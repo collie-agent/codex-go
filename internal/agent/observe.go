@@ -43,9 +43,12 @@ func (o *ObserveProcess) Run(observationContext *fileContext.ObservationContext)
 		return result, fmt.Errorf("task %s: observation: %w", taskID, err)
 	}
 	// Observation only analyzes supplied data, so no MCP tools are exposed.
-	result, _, _, err = client.Run(o.ctx, taskID, observationContext.Format(), nil)
+	result, toolCalls, _, err := client.Run(o.ctx, taskID, observationContext.Format(), nil)
 	if err != nil {
 		return ObserveResult{}, fmt.Errorf("task %s: observation: %w", taskID, err)
+	}
+	if len(toolCalls) > 0 {
+		return ObserveResult{}, fmt.Errorf("task %s: observation returned unexpected tool calls", taskID)
 	}
 	return result, nil
 }

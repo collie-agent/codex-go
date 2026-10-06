@@ -30,7 +30,7 @@ func NewResponsesApiClient[T any](llmConfig *config.LLMConfig, toolConfig filemc
 		option.WithBaseURL(llmConfig.BaseUrl),
 	)
 	c := &responsesApiClient[T]{
-		agentConfig: &config.AgentConfig{LLMConfig: llmConfig},
+		agentConfig: &config.AgentConfig{LLMConfig: llmConfig, AllowTools: toolConfig.AllowTools},
 		client:      &client,
 	}
 	return c, nil

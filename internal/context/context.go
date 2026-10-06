@@ -58,6 +58,16 @@ func NewReactContext(ds *DurableState) *ReactContext {
 	}
 }
 
+// SetSysPrompt 只把调用方约束追加到内置 ReAct 指令之后；空白配置保持内置提示词不变。
+func (c *ReactContext) SetSysPrompt(prompt string) {
+	if c == nil || strings.TrimSpace(prompt) == "" {
+		return
+	}
+	c.mu.Lock()
+	c.sysPrompt += "\n\n# Additional instructions\n\n" + prompt
+	c.mu.Unlock()
+}
+
 func (c *ReactContext) AppendToolResult(ts *ToolResult) {
 	c.mu.Lock()
 	c.ToolResults = append(c.ToolResults, ts)
