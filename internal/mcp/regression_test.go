@@ -289,7 +289,7 @@ func TestApplyPatchPreservesLimitedMatchingProfiles(t *testing.T) {
 				patch += "\n\\ No newline at end of file\n"
 			}
 			patch += "+changed\n"
-			_, err := applyPatch(context.Background(), workspace, patch)
+			_, err := ApplyPatch(context.Background(), workspace, patch)
 			if (err == nil) != tc.accept {
 				t.Fatalf("accept=%t, err=%v", tc.accept, err)
 			}
@@ -318,7 +318,7 @@ func TestApplyPatchPreservesLimitedMatchingProfiles(t *testing.T) {
 				replacement = "..."
 			}
 			patch := "--- file.txt\n+++ file.txt\n@@ -1 +1 @@\n-left" + replacement + "right\n+new-side text\n"
-			if _, err := applyPatch(context.Background(), workspace, patch); err != nil {
+			if _, err := ApplyPatch(context.Background(), workspace, patch); err != nil {
 				t.Fatal(err)
 			}
 		})

@@ -3,6 +3,9 @@ package context
 import (
 	"fmt"
 	"strings"
+	"sync"
+
+	"github.com/collie-agent/codex-go/internal/mcp"
 )
 
 const reactSystemPrompt = `你是 ReAct agent 的单轮决策器。每次调用只根据当前上下文完成一次决策，由外部执行器执行工具并在后续调用中返回结果。
@@ -40,54 +43,64 @@ const reactSystemPrompt = `你是 ReAct agent 的单轮决策器。每次调用�
 `
 
 type ReactContext struct {
-	sysPrompt string
-	ds        *DurableState
-	os        *Observation
-	trs       []*ToolResult
+	mu           *sync.RWMutex
+	sysPrompt    string
+	DurableState *DurableState
+	Observation  *Observation
+	ToolResults  []*ToolResult
 }
 
 func NewReactContext(ds *DurableState) *ReactContext {
 	return &ReactContext{
-		sysPrompt: reactSystemPrompt,
-		ds:        ds,
+		sysPrompt:    reactSystemPrompt,
+		DurableState: ds,
+		mu:           new(sync.RWMutex),
 	}
 }
 
 func (c *ReactContext) AppendToolResult(ts *ToolResult) {
-	c.trs = append(c.trs, ts)
+	c.mu.Lock()
+	c.ToolResults = append(c.ToolResults, ts)
+	c.mu.Unlock()
+}
+
+// UpdateToolResults applies an atomic update to the tool result history.
+// update must not call other methods on c while the lock is held.
+func (c *ReactContext) UpdateToolResults(update func([]*ToolResult) []*ToolResult) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ToolResults = update(c.ToolResults)
 }
 
 func (c *ReactContext) AppendConfirmedFacts(fact string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c == nil || len(fact) == 0 {
 		return
 	}
 	c.ensureObservation()
-	c.os.ConfirmedFacts = append(c.os.ConfirmedFacts, fact)
+	c.Observation.ConfirmedFacts = append(c.Observation.ConfirmedFacts, fact)
 }
 
 func (c *ReactContext) AppendReportedErrors(err string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c == nil || len(err) == 0 {
 		return
 	}
 	c.ensureObservation()
-	c.os.ReportedErrors = append(c.os.ReportedErrors, err)
-}
-
-func (c *ReactContext) AppendModelInferences(inference string) {
-	if c == nil || len(inference) == 0 {
-		return
-	}
-	c.ensureObservation()
-	c.os.ModelInferences = append(c.os.ModelInferences, inference)
+	c.Observation.ReportedErrors = append(c.Observation.ReportedErrors, err)
 }
 
 func (c *ReactContext) ensureObservation() {
-	if c.os == nil {
-		c.os = &Observation{}
+	if c.Observation == nil {
+		c.Observation = &Observation{}
 	}
 }
 
 func (c *ReactContext) Format() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if c == nil {
 		return ""
 	}
@@ -119,22 +132,20 @@ func (c *ReactContext) Format() string {
 	b.WriteString("# sysPrompt\n\n")
 	writeContent(c.sysPrompt)
 	b.WriteString("# DurableState\n\n")
-	if c.ds != nil {
-		writeField("RunId", c.ds.RunId)
-		writeField("Goal", c.ds.Goal)
+	if c.DurableState != nil {
+		writeField("RunId", c.DurableState.RunId)
+		writeField("Goal", c.DurableState.Goal)
 	}
 	b.WriteString("# Observation\n\n")
-	if c.os != nil {
+	if c.Observation != nil {
 		b.WriteString("## ConfirmedFacts\n\n")
-		writeList(c.os.ConfirmedFacts)
+		writeList(c.Observation.ConfirmedFacts)
 		b.WriteString("## ReportedErrors\n\n")
-		writeList(c.os.ReportedErrors)
-		b.WriteString("## ModelInferences\n\n")
-		writeList(c.os.ModelInferences)
+		writeList(c.Observation.ReportedErrors)
 	}
 	b.WriteString("# ToolResult list\n\n")
 	index := 0
-	for _, tr := range c.trs {
+	for _, tr := range c.ToolResults {
 		if tr == nil {
 			continue
 		}
@@ -143,41 +154,42 @@ func (c *ReactContext) Format() string {
 		for _, field := range []struct{ name, value string }{
 			{"ToolCallId", tr.ToolCallId},
 			{"ToolName", tr.ToolName},
+			{"Status", string(tr.Status)},
 		} {
 			b.WriteString("### " + field.name + "\n\n")
 			writeContent(field.value)
 		}
 		b.WriteString("### Arguments\n\n")
-		writeList(tr.Arguments)
+		writeContent(tr.Arguments)
 		b.WriteString("### Result\n\n")
 		writeContent(tr.Result)
 		b.WriteString("### Error\n\n")
 		writeContent(tr.Error)
 	}
 	b.WriteString("# CompletionCriteria\n\n")
-	if c.ds != nil {
-		writeList(c.ds.CompletionCriteria)
+	if c.DurableState != nil {
+		writeList(c.DurableState.CompletionCriteria)
 	}
 	return strings.TrimSpace(b.String())
 }
 
 type Observation struct {
-	ConfirmedFacts  []string
-	ReportedErrors  []string
-	ModelInferences []string
+	ConfirmedFacts []string
+	ReportedErrors []string
 }
 
 // 需要持久化的agent状态
 type DurableState struct {
 	RunId              string
 	Goal               string
-	CompletionCriteria []string
+	CompletionCriteria []string //task analyzer提供
 }
 
 type ToolResult struct {
 	ToolCallId string
 	ToolName   string
-	Arguments  []string
+	Status     mcp.ToolCallStatus
+	Arguments  string
 	Result     string
 	Error      string
 }

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	mcpconfig "github.com/collie-agent/codex-go/internal/config"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -41,7 +42,7 @@ type grepArgs struct {
 // registerGrepTool registers the grep tool against an already resolved workspace.
 // It is kept separate so startup registration can compose the individual tools.
 func registerGrepTool(server *sdk.Server, workspace string, timeout time.Duration) {
-	sdk.AddTool(server, &sdk.Tool{Name: "grep", Description: `Search file contents for a non-empty pattern using ripgrep. path is an existing workspace-relative file or directory (default .); directory searches are recursive. Absolute paths, paths outside the workspace, and symlink path components are rejected. pattern is a ripgrep regular expression by default; set literal=true for fixed text. Matching is case-sensitive unless ignore_case=true. glob optionally filters file paths using ripgrep glob syntax evaluated from the workspace root; it is not a content pattern. Includes hidden files, does not follow symlinks, and excludes .git entries. Directory traversal respects ignore files unless include_ignored=true; an explicitly named file can be searched even when ignored. Returns one item per matching line with workspace-relative path, one-based line number, and line text, sorted by path then line; no matches returns an empty page. offset is a zero-based matching-line index (default 0), not a source line number; limit is a positive maximum item count (default 200). If truncated is true, repeat the same search with offset=next_offset. The 1 MiB response cap may shorten a page.`},
+	sdk.AddTool(server, &sdk.Tool{Name: string(mcpconfig.GrepMCPToolName), Description: `Search file contents for a non-empty pattern using ripgrep. path is an existing workspace-relative file or directory (default .); directory searches are recursive. Absolute paths, paths outside the workspace, and symlink path components are rejected. pattern is a ripgrep regular expression by default; set literal=true for fixed text. Matching is case-sensitive unless ignore_case=true. glob optionally filters file paths using ripgrep glob syntax evaluated from the workspace root; it is not a content pattern. Includes hidden files, does not follow symlinks, and excludes .git entries. Directory traversal respects ignore files unless include_ignored=true; an explicitly named file can be searched even when ignored. Returns one item per matching line with workspace-relative path, one-based line number, and line text, sorted by path then line; no matches returns an empty page. offset is a zero-based matching-line index (default 0), not a source line number; limit is a positive maximum item count (default 200). If truncated is true, repeat the same search with offset=next_offset. The 1 MiB response cap may shorten a page.`},
 		func(ctx context.Context, _ *sdk.CallToolRequest, args grepArgs) (*sdk.CallToolResult, grepResult, error) {
 			if args.Pattern == "" {
 				return nil, grepResult{}, fmt.Errorf("pattern is required")
@@ -51,7 +52,7 @@ func registerGrepTool(server *sdk.Server, workspace string, timeout time.Duratio
 			}
 			toolCtx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
-			result, err := grep(toolCtx, workspace, args)
+			result, err := Grep(toolCtx, workspace, args)
 			if err != nil {
 				return nil, grepResult{}, err
 			}
@@ -63,7 +64,7 @@ func registerGrepTool(server *sdk.Server, workspace string, timeout time.Duratio
 		})
 }
 
-func grep(ctx context.Context, workspace string, args grepArgs) (grepResult, error) {
+func Grep(ctx context.Context, workspace string, args grepArgs) (grepResult, error) {
 	limit := intDefault(args.Limit, 200)
 	if args.Offset < 0 || limit < 1 {
 		return grepResult{}, fmt.Errorf("offset must be non-negative and limit must be positive")

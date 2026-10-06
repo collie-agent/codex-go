@@ -10,7 +10,15 @@ import (
 	"time"
 	"unicode/utf8"
 
+	mcpconfig "github.com/collie-agent/codex-go/internal/config"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+type ToolCallStatus string
+
+const (
+	ToolCallSuceessStatus = "success"
+	ToolCallFailedStatus  = "failed"
 )
 
 // Config contains settings shared by the tools registered on an MCP server.
@@ -45,11 +53,11 @@ func RegisterTools(server *sdk.Server, config Config) error {
 		Offset *int   `json:"offset,omitempty" jsonschema:"positive one-based starting line (default 1); use next_offset to continue"`
 		Limit  *int   `json:"limit,omitempty" jsonschema:"positive maximum number of lines (default 200); response size may reduce the page"`
 	}
-	sdk.AddTool(server, &sdk.Tool{Name: "read_file", Description: `Read a page of lines from an existing UTF-8 text file (NUL bytes are rejected). path is relative to the workspace; absolute paths and paths resolving outside it are rejected. Symlinks are allowed only when their resolved target stays inside the workspace. offset is the one-based starting line (default 1); limit is a positive maximum line count (default 200). Returns lines with their original one-based line numbers and text, plus truncated and next_offset. An offset past EOF returns an empty page. Responses may contain fewer than limit lines to fit the 1 MiB response cap; when truncated is true, pass next_offset as offset with the same path to continue.`},
+	sdk.AddTool(server, &sdk.Tool{Name: string(mcpconfig.ReadFileMCPToolName), Description: `Read a page of lines from an existing UTF-8 text file (NUL bytes are rejected). path is relative to the workspace; absolute paths and paths resolving outside it are rejected. Symlinks are allowed only when their resolved target stays inside the workspace. offset is the one-based starting line (default 1); limit is a positive maximum line count (default 200). Returns lines with their original one-based line numbers and text, plus truncated and next_offset. An offset past EOF returns an empty page. Responses may contain fewer than limit lines to fit the 1 MiB response cap; when truncated is true, pass next_offset as offset with the same path to continue.`},
 		func(ctx context.Context, _ *sdk.CallToolRequest, args readFileArgs) (*sdk.CallToolResult, ReadFileResult, error) {
 			toolCtx, cancel := context.WithTimeout(ctx, config.Timeout)
 			defer cancel()
-			result, err := readFile(toolCtx, workspace, args.Path, intDefault(args.Offset, 1), intDefault(args.Limit, 200))
+			result, err := ReadFile(toolCtx, workspace, args.Path, intDefault(args.Offset, 1), intDefault(args.Limit, 200))
 			if err != nil {
 				return nil, ReadFileResult{}, err
 			}
@@ -68,7 +76,7 @@ func RegisterTools(server *sdk.Server, config Config) error {
 	return nil
 }
 
-func readFile(ctx context.Context, workspace, path string, offset, limit int) (ReadFileResult, error) {
+func ReadFile(ctx context.Context, workspace, path string, offset, limit int) (ReadFileResult, error) {
 	if offset < 1 || limit < 1 {
 		return ReadFileResult{}, fmt.Errorf("offset and limit must be positive")
 	}

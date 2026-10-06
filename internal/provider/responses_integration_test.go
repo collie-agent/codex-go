@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/collie-agent/codex-go/internal/config"
+	filemcp "github.com/collie-agent/codex-go/internal/mcp"
 )
 
 // TestResponsesRunIntegration performs real requests only when explicitly enabled.
@@ -32,15 +33,25 @@ func TestResponsesRunIntegration(t *testing.T) {
 		{"line_protocol", config.LineProtocolLLMOutputSchema, "Return exactly these four lines, without Markdown or other text:\nBEGIN RESULT\nMESSAGE=\"hello\"\nCOUNT=2\nEND RESULT"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			client := NewResponsesApiClient[result](&config.LLMConfig{
+			client, err := NewResponsesApiClient[result](&config.LLMConfig{
 				ApiKey: os.Getenv("OPENAI_API_KEY"), BaseUrl: os.Getenv("OPENAI_BASE_URL"),
 				Model: os.Getenv("OPENAI_MODEL"), OutputSchema: tc.schema,
-			})
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			defer cancel()
-			got, err := client.Run(ctx, "integration-"+tc.name, tc.input)
+			}, filemcp.Config{Workspace: t.TempDir()})
 			if err != nil {
 				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			session := newResponsesTestSession(t, ctx, t.TempDir())
+			got, toolCalls, reasoning, err := client.Run(ctx, "integration-"+tc.name, tc.input, session)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reasoning != "" {
+				t.Fatalf("unexpected reasoning: %q", reasoning)
+			}
+			if len(toolCalls) != 0 {
+				t.Fatalf("unexpected tool calls: %+v", toolCalls)
 			}
 			if want := (result{Message: "hello", Count: 2}); got != want {
 				t.Fatalf("got %+v, want %+v", got, want)

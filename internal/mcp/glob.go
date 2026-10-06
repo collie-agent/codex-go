@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	mcpconfig "github.com/collie-agent/codex-go/internal/config"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -35,11 +36,11 @@ func registerGlobTool(server *sdk.Server, workspace string, timeout time.Duratio
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	sdk.AddTool(server, &sdk.Tool{Name: "glob", Description: `Find file paths, rather than file contents, using a ripgrep glob under an existing directory. path defaults to . and must be workspace-relative; absolute paths, paths outside the workspace, and symlink path components are rejected. Positive patterns are anchored to the search directory: *.go matches its immediate files, while **/*.go matches recursively. A leading ! excludes matching paths instead of selecting them. Includes hidden files, skips symlinks and .git entries, and respects ignore files unless include_ignored=true. Returns lexicographically sorted workspace-relative file paths, not directories. offset is a zero-based result index (default 0); limit is a positive maximum result count (default 200). No matches returns an empty page. If truncated is true, repeat the same search with offset=next_offset; the 1 MiB response cap may shorten a page.`},
+	sdk.AddTool(server, &sdk.Tool{Name: string(mcpconfig.GlobMCPToolName), Description: `Find file paths, rather than file contents, using a ripgrep glob under an existing directory. path defaults to . and must be workspace-relative; absolute paths, paths outside the workspace, and symlink path components are rejected. Positive patterns are anchored to the search directory: *.go matches its immediate files, while **/*.go matches recursively. A leading ! excludes matching paths instead of selecting them. Includes hidden files, skips symlinks and .git entries, and respects ignore files unless include_ignored=true. Returns lexicographically sorted workspace-relative file paths, not directories. offset is a zero-based result index (default 0); limit is a positive maximum result count (default 200). No matches returns an empty page. If truncated is true, repeat the same search with offset=next_offset; the 1 MiB response cap may shorten a page.`},
 		func(ctx context.Context, _ *sdk.CallToolRequest, args globArgs) (*sdk.CallToolResult, GlobResult, error) {
 			toolCtx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
-			result, err := glob(toolCtx, workspace, args)
+			result, err := Glob(toolCtx, workspace, args)
 			if err != nil {
 				return nil, GlobResult{}, err
 			}
@@ -51,7 +52,7 @@ func registerGlobTool(server *sdk.Server, workspace string, timeout time.Duratio
 		})
 }
 
-func glob(ctx context.Context, workspace string, args globArgs) (GlobResult, error) {
+func Glob(ctx context.Context, workspace string, args globArgs) (GlobResult, error) {
 	if args.Pattern == "" {
 		return GlobResult{}, errors.New("pattern is required")
 	}

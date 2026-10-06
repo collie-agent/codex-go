@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	mcpconfig "github.com/collie-agent/codex-go/internal/config"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -41,11 +42,11 @@ func registerListDirTool(server *sdk.Server, workspace string, timeout time.Dura
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	sdk.AddTool(server, &sdk.Tool{Name: "list_dir", Description: `List entries under an existing workspace directory, excluding the directory itself. path defaults to . and must be workspace-relative; absolute paths and paths resolving outside the workspace are rejected. The input directory may resolve through symlinks within the workspace, but traversal does not follow descendant symlinks. depth is a positive traversal depth (default 1: immediate children only). Includes hidden and ignored entries, but excludes entries named .git and their descendants. Returns workspace-relative paths sorted lexicographically and types file, directory, symlink, or other. offset is a zero-based entry index (default 0); limit is a positive maximum entry count (default 200). truncated and next_offset indicate pagination; reuse the same path and depth with offset=next_offset to continue. The 1 MiB response cap may shorten a page; an offset beyond the results returns an empty page.`},
+	sdk.AddTool(server, &sdk.Tool{Name: string(mcpconfig.ListDirMCPToolName), Description: `List entries under an existing workspace directory, excluding the directory itself. path defaults to . and must be workspace-relative; absolute paths and paths resolving outside the workspace are rejected. The input directory may resolve through symlinks within the workspace, but traversal does not follow descendant symlinks. depth is a positive traversal depth (default 1: immediate children only). Includes hidden and ignored entries, but excludes entries named .git and their descendants. Returns workspace-relative paths sorted lexicographically and types file, directory, symlink, or other. offset is a zero-based entry index (default 0); limit is a positive maximum entry count (default 200). truncated and next_offset indicate pagination; reuse the same path and depth with offset=next_offset to continue. The 1 MiB response cap may shorten a page; an offset beyond the results returns an empty page.`},
 		func(ctx context.Context, _ *sdk.CallToolRequest, args listDirArgs) (*sdk.CallToolResult, ListDirResult, error) {
 			toolCtx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
-			result, err := listDir(toolCtx, workspace, args.Path, intDefault(args.Depth, 1), args.Offset, intDefault(args.Limit, 200))
+			result, err := ListDir(toolCtx, workspace, args.Path, intDefault(args.Depth, 1), args.Offset, intDefault(args.Limit, 200))
 			if err != nil {
 				return nil, ListDirResult{}, err
 			}
@@ -58,7 +59,7 @@ func registerListDirTool(server *sdk.Server, workspace string, timeout time.Dura
 	return nil
 }
 
-func listDir(ctx context.Context, workspace, path string, depth, offset, limit int) (ListDirResult, error) {
+func ListDir(ctx context.Context, workspace, path string, depth, offset, limit int) (ListDirResult, error) {
 	if path == "" {
 		path = "."
 	}

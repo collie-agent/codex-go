@@ -1,0 +1,287 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/collie-agent/codex-go/internal/config"
+	fileContext "github.com/collie-agent/codex-go/internal/context"
+	filemcp "github.com/collie-agent/codex-go/internal/mcp"
+	mcpSdk "github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+func TestReactObserveAsync(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	started := make(chan string, 1)
+	release := make(chan struct{})
+	defer close(release)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var request struct {
+			Input json.RawMessage `json:"input"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&request); err != nil {
+			t.Error(err)
+			return
+		}
+		started <- string(request.Input)
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return
+		}
+		writeObservationResponse(w, []any{observationMessage(`{"ConfirmedFacts":["patch call_patch: file updated"],"ReportedErrors":["patch call_patch: partial result"]}`)})
+	}))
+	defer server.Close()
+	r := &ReactProcess[ReactResult]{ctx: ctx, agentConfig: &config.AgentConfig{LLMConfig: &config.LLMConfig{
+		BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema,
+	}}}
+	rc := fileContext.NewReactContext(&fileContext.DurableState{RunId: "react-task", Goal: "update file"})
+	rc.AppendConfirmedFacts("existing fact")
+	done := make(chan struct{})
+	go func() {
+		r.updateContext(&mcpSdk.CallToolResult{Content: []mcpSdk.Content{&mcpSdk.TextContent{Text: "updated"}}},
+			&mcpSdk.CallToolParams{Name: "apply_patch", Meta: mcpSdk.Meta{toolCallIDMetaKey: "call_patch"}}, rc, nil)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("context update blocked on observation")
+	}
+	select {
+	case input := <-started:
+		for _, want := range []string{"update file", "existing fact", "apply_patch", "call_patch", "updated"} {
+			if !strings.Contains(input, want) {
+				t.Errorf("observation input missing %q: %s", want, input)
+			}
+		}
+	case <-ctx.Done():
+		t.Fatal("observation did not start")
+	}
+	// Formatting and new facts must remain available while the request waits.
+	rc.AppendConfirmedFacts("fact added during observation")
+	if !strings.Contains(rc.Format(), "updated") {
+		t.Fatal("raw result missing while observation is pending")
+	}
+	release <- struct{}{}
+	waitForReactObservation(t, ctx, rc, "patch call_patch: partial result")
+	for _, want := range []string{"existing fact", "fact added during observation", "patch call_patch: file updated"} {
+		if !strings.Contains(rc.Format(), want) {
+			t.Errorf("context missing %q", want)
+		}
+	}
+}
+
+func TestReactObserveFailure(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		writeObservationResponse(w, []any{observationMessage("invalid JSON")})
+	}))
+	defer server.Close()
+	r := &ReactProcess[ReactResult]{ctx: ctx, agentConfig: &config.AgentConfig{LLMConfig: &config.LLMConfig{
+		BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema,
+	}}}
+	rc := fileContext.NewReactContext(&fileContext.DurableState{RunId: "react-task"})
+	r.updateContext(nil, &mcpSdk.CallToolParams{Name: "apply_patch", Meta: mcpSdk.Meta{toolCallIDMetaKey: "call_patch"}}, rc, errors.New("tool failed"))
+	waitForReactObservation(t, ctx, rc, "observation failed")
+	formatted := rc.Format()
+	for _, want := range []string{"call_patch", "parse response output", "tool failed"} {
+		if !strings.Contains(formatted, want) {
+			t.Errorf("context missing %q: %s", want, formatted)
+		}
+	}
+}
+
+func TestObservationSnapshotIndependent(t *testing.T) {
+	state := &fileContext.DurableState{Goal: "original goal", CompletionCriteria: []string{"original criterion"}}
+	rc := fileContext.NewReactContext(state)
+	rc.AppendConfirmedFacts("original fact")
+	rc.AppendReportedErrors("original error")
+	tr := &fileContext.ToolResult{Result: "original result"}
+	snapshot := rc.SnapshotObservationContext(tr)
+	state.Goal = "changed goal"
+	state.CompletionCriteria[0] = "changed criterion"
+	rc.Observation.ConfirmedFacts[0] = "changed fact"
+	rc.Observation.ReportedErrors[0] = "changed error"
+	tr.Result = "changed result"
+	formatted := snapshot.Format()
+	for _, want := range []string{"original goal", "original criterion", "original fact", "original error", "original result"} {
+		if !strings.Contains(formatted, want) {
+			t.Errorf("snapshot missing %q: %s", want, formatted)
+		}
+	}
+}
+
+func waitForReactObservation(t *testing.T, ctx context.Context, rc *fileContext.ReactContext, want string) {
+	t.Helper()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if strings.Contains(rc.Format(), want) {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			t.Fatalf("observation missing %q: %s", want, rc.Format())
+		}
+	}
+}
+
+func TestUpdateContext(t *testing.T) {
+	r := &ReactProcess[ReactResult]{}
+	rc := fileContext.NewReactContext(nil)
+	retained := &fileContext.ToolResult{ToolName: "read_file", Result: "original"}
+	rc.AppendToolResult(retained)
+	rc.AppendToolResult(&fileContext.ToolResult{ToolName: "list_dir"})
+	rc.AppendToolResult(&fileContext.ToolResult{ToolName: "glob"})
+	r.updateContext(&mcpSdk.CallToolResult{
+		Content:           []mcpSdk.Content{&mcpSdk.TextContent{Text: "permission denied"}},
+		StructuredContent: map[string]any{"path": "a.go"},
+		IsError:           true,
+	}, &mcpSdk.CallToolParams{Meta: mcpSdk.Meta{toolCallIDMetaKey: "call_123"}, Name: "grep", Arguments: map[string]any{"pattern": "test"}}, rc, errors.New("transport error"))
+	if len(rc.ToolResults) != 2 || rc.ToolResults[0] != retained {
+		t.Fatalf("unexpected history: %+v", rc.ToolResults)
+	}
+	got := rc.ToolResults[1]
+	if got.Status != filemcp.ToolCallFailedStatus {
+		t.Fatalf("unexpected status: %q", got.Status)
+	}
+	if got.ToolCallId != "call_123" || got.ToolName != "grep" || got.Arguments != `{"pattern":"test"}` {
+		t.Fatalf("unexpected tool parameters: %+v", got)
+	}
+	if !strings.Contains(got.Result, "permission denied") || !strings.Contains(got.Result, "a.go") || !strings.Contains(got.Error, `tool "grep" (call_id="call_123"): MCP call failed: transport error`) || !strings.Contains(got.Error, "tool execution failed (MCP isError=true): permission denied") || !strings.Contains(got.Error, `Tool arguments: {"pattern":"test"}`) {
+		t.Fatalf("unexpected result: %+v", got)
+	}
+	if formatted := rc.Format(); !strings.Contains(formatted, "transport error") || !strings.Contains(formatted, "permission denied") {
+		t.Fatal("tool error missing from LLM context")
+	}
+	r.updateContext(nil, &mcpSdk.CallToolParams{Name: "read_file"}, rc, errors.New("read failed"))
+	if len(rc.ToolResults) != 3 || !strings.Contains(rc.ToolResults[2].Error, "MCP call failed: read failed") {
+		t.Fatal("nil result lost the tool error")
+	}
+}
+
+func TestUpdateContextConcurrent(t *testing.T) {
+	r := &ReactProcess[ReactResult]{}
+	rc := fileContext.NewReactContext(nil)
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Go(func() {
+			r.updateContext(nil, &mcpSdk.CallToolParams{Name: "read_file"}, rc, nil)
+			rc.Format()
+		})
+	}
+	wg.Wait()
+	if len(rc.ToolResults) != 32 {
+		t.Fatalf("concurrent updates lost results: got %d", len(rc.ToolResults))
+	}
+}
+
+func TestUpdateContextErrorDetails(t *testing.T) {
+	tests := []struct {
+		name      string
+		arguments any
+		result    *mcpSdk.CallToolResult
+		want      string
+	}{
+		{name: "arguments encoding", arguments: make(chan int), want: "failed to encode arguments as JSON (type chan int)"},
+		{name: "result encoding", result: &mcpSdk.CallToolResult{StructuredContent: make(chan int)}, want: "failed to encode MCP result as JSON; result cannot be added to context"},
+		{name: "empty tool error", result: &mcpSdk.CallToolResult{IsError: true}, want: "MCP returned isError=true without a non-empty text error message"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rc := fileContext.NewReactContext(nil)
+			r := &ReactProcess[ReactResult]{}
+			r.updateContext(tt.result, &mcpSdk.CallToolParams{Meta: mcpSdk.Meta{toolCallIDMetaKey: "call_failure"}, Name: "read_file", Arguments: tt.arguments}, rc, nil)
+			got := rc.ToolResults[0]
+			if got.Status != filemcp.ToolCallFailedStatus {
+				t.Fatalf("unexpected status: %q", got.Status)
+			}
+			if got.ToolCallId != "call_failure" || !strings.Contains(got.Error, `tool "read_file" (call_id="call_failure")`) || !strings.Contains(got.Error, tt.want) {
+				t.Fatalf("missing error details: %+v", got)
+			}
+		})
+	}
+}
+
+// Each handler waits until both calls have started, so sequential execution
+// cannot pass. The batch must also finish updating context before returning.
+func TestBatchToolCallings(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	server := mcpSdk.NewServer(&mcpSdk.Implementation{Name: "batch-test"}, nil)
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	mcpSdk.AddTool(server, &mcpSdk.Tool{Name: "read_file"}, func(ctx context.Context, req *mcpSdk.CallToolRequest, args struct{}) (*mcpSdk.CallToolResult, any, error) {
+		started <- struct{}{}
+		select {
+		case <-release:
+			return &mcpSdk.CallToolResult{Content: []mcpSdk.Content{&mcpSdk.TextContent{Text: "done"}}}, nil, nil
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		}
+	})
+	ct, st := mcpSdk.NewInMemoryTransports()
+	ss, err := server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ss.Close()
+	client := mcpSdk.NewClient(&mcpSdk.Implementation{Name: "batch-client"}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	r := &ReactProcess[ReactResult]{ctx: ctx, mcpClientSess: cs}
+	rc := fileContext.NewReactContext(nil)
+	done := make(chan struct{})
+	go func() {
+		r.batchToolCallings([]*mcpSdk.CallToolParams{
+			{Name: "read_file", Meta: mcpSdk.Meta{toolCallIDMetaKey: "first"}, Arguments: map[string]any{}},
+			{Name: "read_file", Meta: mcpSdk.Meta{toolCallIDMetaKey: "second"}, Arguments: map[string]any{}},
+		}, rc)
+		close(done)
+	}()
+	for range 2 {
+		select {
+		case <-started:
+		case <-ctx.Done():
+			t.Fatal("tool calls did not start concurrently")
+		}
+	}
+	select {
+	case <-done:
+		t.Fatal("batch returned before tools completed")
+	default:
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("batch did not complete")
+	}
+	if len(rc.ToolResults) != 2 {
+		t.Fatalf("got %d results, want 2", len(rc.ToolResults))
+	}
+	ids := map[string]bool{}
+	for _, result := range rc.ToolResults {
+		ids[result.ToolCallId] = true
+		if result.Status != filemcp.ToolCallSuceessStatus || result.Error != "" || !strings.Contains(result.Result, "done") {
+			t.Fatalf("unexpected result: %+v", result)
+		}
+	}
+	if !ids["first"] || !ids["second"] {
+		t.Fatalf("missing call IDs: %v", ids)
+	}
+}
