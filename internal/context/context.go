@@ -1,7 +1,6 @@
 package context
 
 import (
-	"fmt"
 	"strings"
 	"sync"
 
@@ -154,13 +153,10 @@ func (c *ReactContext) Format() string {
 		writeList(c.Observation.ReportedErrors)
 	}
 	b.WriteString("# ToolResult list\n\n")
-	index := 0
 	for _, tr := range c.ToolResults {
 		if tr == nil {
 			continue
 		}
-		index++
-		fmt.Fprintf(&b, "## ToolResult %d\n\n", index)
 		for _, field := range []struct{ name, value string }{
 			{"ToolCallId", tr.ToolCallId},
 			{"ToolName", tr.ToolName},

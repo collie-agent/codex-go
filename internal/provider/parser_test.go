@@ -168,3 +168,47 @@ func TestLineProtocolDestination(t *testing.T) {
 		t.Fatal("expected non-struct destination error")
 	}
 }
+
+func TestLineProtocolResponseDocument(t *testing.T) {
+	type result struct {
+		Answer string `json:"answer"`
+	}
+	document := "BEGIN RESULT\nANSWER=\"done\"\nEND RESULT"
+	for _, tc := range []struct {
+		name  string
+		text  string
+		valid bool
+	}{
+		{"bare", document, true},
+		{"preamble", "Based on the code examined.\n\n" + document, true},
+		{"postscript", document + "\n\nTask completed.", true},
+		{"fenced", "```text\n" + document + "\n```", true},
+		{"CRLF", strings.ReplaceAll("Explanation\n"+document, "\n", "\r\n"), true},
+		{"CR", strings.ReplaceAll("Explanation\n"+document, "\n", "\r"), true},
+		{"multiple roots", "Explanation\n" + document + "\n" + document, false},
+		{"missing end", "Explanation\nBEGIN RESULT\nANSWER=\"done\"", false},
+		{"wrong end", "Explanation\nBEGIN RESULT\nANSWER=\"done\"\nEND OTHER", false},
+		{"outside field before", "ANSWER=\"lost\"\n" + document, false},
+		{"outside field after", document + "\nANSWER=\"lost\"", false},
+		{"invalid inside", "Explanation\nBEGIN RESULT\nANSWER=done\nEND RESULT", false},
+		{"prose inside", "BEGIN RESULT\nExplanation\nEND RESULT", false},
+		{"no block", "Explanation only", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got result
+			err := (&LineProtocolOutput[*result]{}).Parse(lineProtocolResponseDocument(tc.text), &got)
+			if (err == nil) != tc.valid {
+				t.Fatalf("valid=%v got result=%+v err=%v", tc.valid, got, err)
+			}
+			if tc.valid && got.Answer != "done" {
+				t.Fatalf("unexpected answer %q", got.Answer)
+			}
+		})
+	}
+	// 最小复现：同一个合法块只增加说明前缀就会被严格解析器拒绝。
+	var got result
+	err := (&LineProtocolOutput[*result]{}).Parse("Explanation\n"+document, &got)
+	if err == nil || !strings.Contains(err.Error(), "line 1: invalid line or text outside a block") {
+		t.Fatalf("expected original symptom, got %v", err)
+	}
+}

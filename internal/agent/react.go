@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"os/exec"
 	"strings"
 	"sync"
 
@@ -52,6 +54,25 @@ type ReactProcess[T LLMSchema] struct {
 const maxReactTurns = 100
 
 func NewReactProcess[T LLMSchema](ctx context.Context, durableState *fileContext.DurableState, agentConfig *config.AgentConfig, toolConfig filemcp.Config) (*ReactProcess[T], error) {
+	clientTransport, serverTransport := mcpSdk.NewInMemoryTransports()
+	return newReactProcess[T](ctx, durableState, agentConfig, toolConfig, clientTransport, serverTransport)
+}
+
+// NewReactProcessWithCommand connects to a separately built MCP server over stdio.
+func NewReactProcessWithCommand[T LLMSchema](ctx context.Context, durableState *fileContext.DurableState, agentConfig *config.AgentConfig, command *exec.Cmd) (*ReactProcess[T], error) {
+	if command == nil {
+		return nil, fmt.Errorf("MCP command is required")
+	}
+	client := mcpSdk.NewClient(&mcpSdk.Implementation{Name: "codex-go-responses", Version: "0.1.0"}, nil)
+	session, err := client.Connect(ctx, &mcpSdk.CommandTransport{Command: command}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("connect to MCP command: %w", err)
+	}
+	return &ReactProcess[T]{ctx: ctx, maxTurn: maxReactTurns, durableState: durableState,
+		agentConfig: agentConfig, mcpClientSess: session}, nil
+}
+
+func newReactProcess[T LLMSchema](ctx context.Context, durableState *fileContext.DurableState, agentConfig *config.AgentConfig, toolConfig filemcp.Config, clientTransport, serverTransport mcpSdk.Transport) (*ReactProcess[T], error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("agent context is required")
 	}
@@ -61,7 +82,6 @@ func NewReactProcess[T LLMSchema](ctx context.Context, durableState *fileContext
 	if agentConfig == nil || agentConfig.LLMConfig == nil {
 		return nil, fmt.Errorf("agent config with LLM config is required")
 	}
-	clientTransport, serverTransport := mcpSdk.NewInMemoryTransports()
 	server := mcpSdk.NewServer(&mcpSdk.Implementation{Name: "codex-go-agent", Version: "0.1.0"}, nil)
 	if err := filemcp.RegisterTools(server, toolConfig); err != nil {
 		return nil, fmt.Errorf("register MCP tools: %w", err)
@@ -92,8 +112,12 @@ func (r *ReactProcess[T]) Run() (T, error) {
 	if r == nil || r.ctx == nil || r.durableState == nil || r.agentConfig == nil {
 		return zero, fmt.Errorf("invalid ReAct process")
 	}
-	defer r.mcpClientSess.Close()
-	defer r.serverSess.Close()
+	if r.mcpClientSess != nil {
+		defer r.mcpClientSess.Close()
+	}
+	if r.serverSess != nil {
+		defer r.serverSess.Close()
+	}
 	rc := fileContext.NewReactContext(r.durableState)
 	// 先保留内置 ReAct 执行约束，再把 YAML 的长期约束追加到其后。
 	rc.SetSysPrompt(r.agentConfig.SysPrompt)
@@ -229,6 +253,9 @@ func (r *ReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, toolP
 		}
 		return append(next, result)
 	})
+	// Log the recorded result and the resulting ReAct context together so
+	// concurrent tool calls remain distinguishable in the process output.
+	log.Printf("tool result: %+v\nReact context:\n%s", result, rc.Format())
 	if config.McpToolName(toolParam.Name) == config.ApplyPatchMCPToolName {
 		r.observe(result, rc)
 	}

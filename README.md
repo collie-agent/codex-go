@@ -4,18 +4,29 @@
 
 完整示例见 [`examples/react-agent.yaml`](examples/react-agent.yaml)。它使用 `name: react`、环境变量密钥、LLM 设置、工具允许列表和 `sys_prompt`；示例中的工具实际执行依赖票据 02。
 
-启动 Agent 模式：
+分别构建 MCP server 和 agent server（`-s -w` 去除符号表和调试信息，减小二进制体积）：
+
+```sh
+make build
+```
+
+也可以分别运行 `make mcp` 和 `make agent-server`。设置 `GOOS`、`GOARCH` 可交叉编译，例如 `make build GOOS=linux GOARCH=arm64`。
+
+Agent server 默认启动 PATH 中的 `codex-mcp`，也可以用 `--mcp-command` 指定 MCP 二进制路径。两者通过 MCP stdio transport 通信；MCP 协议数据使用标准输入和标准输出，诊断信息写到标准错误。
+
+启动 Agent：
 
 ```sh
 export OPENAI_API_KEY='your-key'
-go run ./cmd \
+./bin/agent-server \
   --config examples/react-agent.yaml \
   --task '检查项目并完成目标' \
   --workspace /path/to/workspace \
-  --timeout 30s
+  --timeout 30s \
+  --mcp-command ./bin/codex-mcp
 ```
 
-指定 `--config` 时，`--task` 必须非空，`--workspace` 必须存在，`--timeout` 必须为正值（默认 30 秒）。未指定 `--config` 时仍启动原有 MCP stdio 服务模式；该模式仍需要 `--workspace`。
+单独启动 MCP stdio 服务时运行 `./bin/codex-mcp --workspace /path/to/workspace --timeout 30s`。Agent 模式要求 `--config`、非空 `--task` 和 `--workspace`，`--timeout` 必须为正值（默认 30 秒）。
 
 YAML 字段规则：
 

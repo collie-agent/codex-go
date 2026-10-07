@@ -43,9 +43,23 @@ func NewResponsesApiClient[T any](llmConfig *config.LLMConfig, toolConfig filemc
 func (c *responsesApiClient[T]) Run(ctx context.Context, taskId, input string, mcpClientSess *sdk.ClientSession) (T, []responses.ResponseFunctionToolCall, string, error) {
 	var result T
 	var outputParser LLMOutputParser[*T]
+	var textConfig responses.ResponseTextConfigParam
 	switch c.agentConfig.LLMConfig.OutputSchema {
 	case config.JsonLLMOutputSchema:
-		outputParser = &JsonOutput[*T]{}
+		parser := &JsonOutput[*T]{}
+		schema, err := parser.schema()
+		if err != nil {
+			return result, nil, "", fmt.Errorf("task %s: generate JSON output schema: %w", taskId, err)
+		}
+		// Print the exact schema attached to text.format for JSON output runs.
+		if encodedSchema, err := json.MarshalIndent(schema, "", "  "); err == nil {
+			fmt.Printf("task %s: JSON schema=\n%s\n", taskId, encodedSchema)
+		}
+		// Responses API 通过 text.format 约束最终文本，工具调用仍按原有流程处理。
+		textConfig.Format.OfJSONSchema = &responses.ResponseFormatTextJSONSchemaConfigParam{
+			Name: "llm_output", Schema: schema, Strict: openai.Bool(true),
+		}
+		outputParser = parser
 		input += "\n\n" + jsonFewShotPrompt
 	case config.LineProtocolLLMOutputSchema:
 		outputParser = &LineProtocolOutput[*T]{}
@@ -83,6 +97,7 @@ func (c *responsesApiClient[T]) Run(ctx context.Context, taskId, input string, m
 			OfString: openai.String(input),
 		},
 		Tools: tools,
+		Text:  textConfig,
 	}
 	response, err := c.client.Responses.New(ctx, params)
 	if err != nil {
@@ -108,6 +123,10 @@ func (c *responsesApiClient[T]) Run(ctx context.Context, taskId, input string, m
 	}
 	if strings.TrimSpace(text) == "" {
 		return result, nil, "", fmt.Errorf("task %s: response output is empty", taskId)
+	}
+	fmt.Printf("task %s: LLM response text=%s\n", taskId, text)
+	if c.agentConfig.LLMConfig.OutputSchema == config.LineProtocolLLMOutputSchema {
+		text = lineProtocolResponseDocument(text)
 	}
 	if err := outputParser.Parse(text, &result); err != nil {
 		var zero T

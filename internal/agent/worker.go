@@ -45,9 +45,13 @@ func (w *Worker[T]) Run(reactContext *fileContext.ReactContext) (T, string, []*m
 			input += "\nLine Protocol example:\nBEGIN RESULT\nSTATUS=\"completed\"\nANSWER=\"Task completed.\"\nEND RESULT"
 		}
 	}
-	result, toolCalls, reasoning, err := client.Run(w.ctx, reactContext.DurableState.RunId, input, w.mcpClientSess)
+	result, toolCalls, assistantOutput, err := client.Run(w.ctx, reactContext.DurableState.RunId, input, w.mcpClientSess)
 	if err != nil {
 		return result, "", nil, err
+	}
+	// This is the assistant's visible response text for the ReAct turn, not hidden reasoning.
+	if _, ok := any(result).(ReactResult); ok {
+		fmt.Printf("task %s: assistant output=%s\n", reactContext.DurableState.RunId, assistantOutput)
 	}
 	var toolParams []*mcpSdk.CallToolParams
 	if len(toolCalls) > 0 {
@@ -70,7 +74,7 @@ func (w *Worker[T]) Run(reactContext *fileContext.ReactContext) (T, string, []*m
 			})
 		}
 	}
-	return result, reasoning, toolParams, nil
+	return result, assistantOutput, toolParams, nil
 }
 
 const reactResultInstructions = `When no tools are called, return a result with exactly these required string fields:

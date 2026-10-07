@@ -7,6 +7,12 @@ Now answer the original task using its requested schema and JSON format only.`
 
 const lineProtocolFewShotPrompt = `Output format: Line Protocol.
 
+Mandatory response contract:
+- Your entire response must contain only one Line Protocol document. Never combine prose with a protocol block.
+- Start immediately with the root BEGIN line and stop immediately after its matching END line. Do not add a preamble, summary, explanation, heading, Markdown fence, or postscript, even when the task asks for an explanation.
+- Put all requested answers, explanations, and evidence inside the declared protocol fields as JSON-escaped strings. Never write them before or after the root block. Do not add fields absent from the task's schema.
+- For example, when the task requests RESULT with STATUS and ANSWER, start with BEGIN RESULT, write STATUS and ANSWER inside the block, and finish with END RESULT. A sentence such as "Based on the code examined, I have enough information to answer." before BEGIN RESULT is forbidden.
+
 Document and names:
 - Return exactly one complete root block. Use uppercase BEGIN NAME and END NAME on separate lines, and close nested blocks in reverse opening order with matching names.
 - Names are case-insensitive. Block names match [A-Z][A-Z0-9_]*. Field names use the same pattern, optionally with dot-separated segments of that pattern. BEGIN_NAME and END_NAME are also accepted, including mixed space/underscore boundaries; prefer the space form shown below.
@@ -86,4 +92,4 @@ END NO_TOOL
 
 Invalid forms (do not output these): TAGS=[]; DETAIL={}; MESSAGE=hello; COUNT=NaN; META.NOTE="x" when no such literal field is declared; BEGIN RESULT closed by END PLAN; two root blocks; or a field emitted both as FIELD=null and as a FIELD child block.
 
-Now answer the original task using its declared schema and Line Protocol format only.`
+Now answer the original task using its declared schema and Line Protocol format only. Before sending, check that the first line is the root BEGIN line, the last line is its matching END line, and every answer or explanation is inside a declared field. Output only that document.`

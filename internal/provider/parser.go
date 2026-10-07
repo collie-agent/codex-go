@@ -306,3 +306,29 @@ func parseLineProtocol(document string) (*ParsedBlock, error) {
 	}
 	return root, nil
 }
+
+// lineProtocolResponseDocument 只在 LLM 响应入口去掉块外说明，协议解析器仍严格校验。
+// 保留所有边界之间的内容，避免静默选取多根块中的一个或掩盖损坏的子块。
+func lineProtocolResponseDocument(text string) string {
+	normalized := strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
+	lines := strings.Split(normalized, "\n")
+	first, last := -1, -1
+	for i, line := range lines {
+		if lineBoundary.MatchString(line) {
+			if first == -1 {
+				first = i
+			}
+			last = i
+		}
+	}
+	if first == -1 {
+		return text
+	}
+	for i, line := range lines {
+		// 块外字段不是说明文字；交给严格解析器报错，不能丢弃潜在业务数据。
+		if (i < first || i > last) && lineScalar.MatchString(line) {
+			return text
+		}
+	}
+	return strings.Join(lines[first:last+1], "\n")
+}

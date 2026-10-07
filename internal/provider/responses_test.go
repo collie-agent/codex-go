@@ -25,6 +25,14 @@ func TestResponsesRunToolsWithoutHistoryAndClientReuse(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
+			Text struct {
+				Format struct {
+					Type   string         `json:"type"`
+					Name   string         `json:"name"`
+					Strict bool           `json:"strict"`
+					Schema map[string]any `json:"schema"`
+				} `json:"format"`
+			} `json:"text"`
 			Tools []struct {
 				Name       string         `json:"name"`
 				Parameters map[string]any `json:"parameters"`
@@ -38,6 +46,19 @@ func TestResponsesRunToolsWithoutHistoryAndClientReuse(t *testing.T) {
 			return
 		}
 		requests++
+		format := request.Text.Format
+		if format.Type != "json_schema" || format.Name != "llm_output" || !format.Strict {
+			t.Errorf("unexpected output format: %+v", format)
+		}
+		if format.Schema["type"] != "object" || format.Schema["additionalProperties"] != false {
+			t.Errorf("unexpected output schema: %v", format.Schema)
+		}
+		properties, _ := format.Schema["properties"].(map[string]any)
+		message, _ := properties["message"].(map[string]any)
+		required, _ := format.Schema["required"].([]any)
+		if message["type"] != "string" || len(required) != 1 || required[0] != "message" {
+			t.Errorf("output schema does not describe result: %v", format.Schema)
+		}
 		tools := map[string]bool{}
 		for _, tool := range request.Tools {
 			tools[tool.Name] = true
@@ -164,5 +185,72 @@ func TestResponsesRunToolCallsSkipParsing(t *testing.T) {
 				t.Fatalf("unexpected tool calls: %+v", calls)
 			}
 		})
+	}
+}
+
+func TestResponsesRunLineProtocolWithoutJSONFormat(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if text, ok := request["text"]; ok && string(text) != "{}" {
+			t.Errorf("line protocol should not send JSON format: %s", text)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_line","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"BEGIN RESULT\nMESSAGE=\"hello\"\nEND RESULT","annotations":[]}]}]}`))
+	}))
+	defer server.Close()
+	type result struct {
+		Message string `json:"message"`
+	}
+	client, err := NewResponsesApiClient[result](&config.LLMConfig{
+		ApiKey: "test", BaseUrl: server.URL, Model: "test-model", OutputSchema: config.LineProtocolLLMOutputSchema,
+	}, filemcp.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _, _, err := client.Run(context.Background(), "line-task", "Say hello", nil)
+	if err != nil || got.Message != "hello" {
+		t.Fatalf("got result=%+v err=%v", got, err)
+	}
+}
+
+func TestResponsesRunLineProtocolWithPreamble(t *testing.T) {
+	answer := "该项目的 LLM API 是 OpenAI Responses API（v3）。证据：\n1. `internal/provider/responses.go` 导入 Responses SDK。"
+	literal, err := json.Marshal(answer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := "Based on the code examined, I have enough information to answer. The project uses the **OpenAI Responses API** (not the Chat Completions API).\n\nBEGIN RESULT\nSTATUS=\"completed\"\nANSWER=" + string(literal) + "\nEND RESULT"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "resp_line", "status": "completed",
+			"output": []any{map[string]any{
+				"type": "message", "id": "msg_1", "role": "assistant", "status": "completed",
+				"content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}}},
+			}},
+		})
+	}))
+	defer server.Close()
+	type result struct {
+		Status string `json:"status"`
+		Answer string `json:"answer"`
+	}
+	client, err := NewResponsesApiClient[result](&config.LLMConfig{
+		ApiKey: "test", BaseUrl: server.URL, Model: "test-model", OutputSchema: config.LineProtocolLLMOutputSchema,
+	}, filemcp.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, calls, _, err := client.Run(context.Background(), "cli-task", "Identify the LLM API", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "completed" || got.Answer != answer || len(calls) != 0 {
+		t.Fatalf("unexpected result=%+v calls=%+v", got, calls)
 	}
 }
