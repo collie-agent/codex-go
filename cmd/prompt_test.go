@@ -31,7 +31,7 @@ func TestRunAgentSendsYAMLSysPromptAfterBuiltInPrompt(t *testing.T) {
 	defer server.Close()
 
 	path := filepath.Join(t.TempDir(), "agent.yaml")
-	contents := "name: react\nllm:\n  base_url: " + server.URL + "\n  api_key: test\n  model: test\nsys_prompt: " + customPrompt + "\n"
+	contents := "name: react\nbase:\n  llm:\n    base_url: " + server.URL + "\n    api_key: test\n    model: test\n  sys_prompt: " + customPrompt + "\n"
 	if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestRunAgentSendsYAMLSysPromptAfterBuiltInPrompt(t *testing.T) {
 }
 
 func TestRunAgentKeepsBuiltInPromptWhenYAMLSysPromptIsEmpty(t *testing.T) {
-	for _, sysPrompt := range []string{"", "sys_prompt: \"\"\n"} {
+	for _, sysPrompt := range []string{"", "  sys_prompt: \"\"\n"} {
 		t.Run(strings.ReplaceAll(sysPrompt, "\n", "empty"), func(t *testing.T) {
 			var requestInput string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -68,7 +68,7 @@ func TestRunAgentKeepsBuiltInPromptWhenYAMLSysPromptIsEmpty(t *testing.T) {
 			defer server.Close()
 
 			path := filepath.Join(t.TempDir(), "agent.yaml")
-			contents := "name: react\nllm:\n  base_url: " + server.URL + "\n  api_key: test\n  model: test\n" + sysPrompt
+			contents := "name: react\nbase:\n  llm:\n    base_url: " + server.URL + "\n    api_key: test\n    model: test\n" + sysPrompt
 			if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
 				t.Fatal(err)
 			}

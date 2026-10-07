@@ -39,7 +39,6 @@ type ReactResult struct {
 	Answer string      `json:"answer" lineprotocol:"ANSWER"`
 }
 
-// support dag orchestrator
 type ReactProcess[T LLMSchema] struct {
 	ctx           context.Context
 	maxTurn       int
@@ -99,10 +98,10 @@ func newReactProcess[T LLMSchema](ctx context.Context, toolConfig filemcp.Config
 	}, nil
 }
 
-func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fileContext.DurableState) (T, error) {
+func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fileContext.DurableState) (T, []AgentProcessorType, error) {
 	var zero T
 	if r == nil || r.ctx == nil || durableState == nil || agentConfig == nil || agentConfig.LLMConfig == nil {
-		return zero, fmt.Errorf("invalid ReAct process")
+		return zero, nil, fmt.Errorf("invalid ReAct process")
 	}
 	if r.mcpClientSess != nil {
 		defer r.mcpClientSess.Close()
@@ -117,30 +116,30 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 	for i := 1; i <= r.maxTurn; i++ {
 		result, _, toolParams, err := worker.Run(rc)
 		if err != nil {
-			return zero, fmt.Errorf("ReAct turn %d: %w", i, err)
+			return zero, nil, fmt.Errorf("ReAct turn %d: %w", i, err)
 		}
 		if len(toolParams) == 0 {
 			if reactResult, ok := any(result).(ReactResult); ok {
 				// 格式解析不校验业务约束：仅明确完成且有答案时才允许成功退出。
 				switch reactResult.Status {
 				case FailedReactStatus:
-					return zero, fmt.Errorf("ReAct reported failure: %s", reactResult.Answer)
+					return zero, nil, fmt.Errorf("ReAct reported failure: %s", reactResult.Answer)
 				case CompletedReactStatus:
 					if strings.TrimSpace(reactResult.Answer) == "" {
-						return zero, fmt.Errorf("ReAct completed result requires a non-empty answer")
+						return zero, nil, fmt.Errorf("ReAct completed result requires a non-empty answer")
 					}
 				default:
-					return zero, fmt.Errorf("ReAct returned invalid status %q", reactResult.Status)
+					return zero, nil, fmt.Errorf("ReAct returned invalid status %q", reactResult.Status)
 				}
 			}
-			return result, nil
+			return result, []AgentProcessorType{EndAgentType}, nil
 		}
 		r.batchToolCallings(toolParams, rc, agentConfig)
 		if r.ctx.Err() != nil {
-			return zero, r.ctx.Err()
+			return zero, nil, r.ctx.Err()
 		}
 	}
-	return zero, fmt.Errorf("ReAct exhausted maximum turns (%d)", r.maxTurn)
+	return zero, nil, fmt.Errorf("ReAct exhausted maximum turns (%d)", r.maxTurn)
 }
 
 func (r *ReactProcess[T]) observe(toolResult *fileContext.ToolResult, rc *fileContext.ReactContext, agentConfig *config.AgentConfig) {
@@ -152,8 +151,8 @@ func (r *ReactProcess[T]) observe(toolResult *fileContext.ToolResult, rc *fileCo
 	observationContext := rc.SnapshotObservationContext(toolResult)
 	// 配置沿调用链传入并由本次闭包捕获，无需保存在 Process 上。
 	go func() {
-		observer := NewObserveProcess(r.ctx, observationContext)
-		result, err := observer.Run(agentConfig, observationContext.DurableState)
+		observer := NewObserveProcess[ObserveResult](r.ctx, observationContext)
+		result, _, err := observer.Run(agentConfig, observationContext.DurableState)
 		if r.ctx.Err() != nil {
 			return
 		}
@@ -250,6 +249,9 @@ func (r *ReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, toolP
 	// concurrent tool calls remain distinguishable in the process output.
 	log.Printf("tool result: %+v\nReact context:\n%s", result, rc.Format())
 	if config.McpToolName(toolParam.Name) == config.ApplyPatchMCPToolName {
-		r.observe(result, rc, agentConfig)
+		// Observation is a separate processor and must use its own resolved
+		// settings rather than inheriting ReAct's model or custom prompt.
+		observerConfig := agentConfig.ForAgent("observe")
+		r.observe(result, rc, observerConfig)
 	}
 }

@@ -62,8 +62,8 @@ func TestObserveRun(t *testing.T) {
 			agentConfig := &config.AgentConfig{LLMConfig: &config.LLMConfig{
 				ApiKey: "test", BaseUrl: server.URL, Model: "test-model", OutputSchema: tc.schema,
 			}}
-			var observer AgentProcessor[ObserveResult] = NewObserveProcess(context.Background(), rc)
-			got, err := observer.Run(agentConfig, state)
+			var observer AgentProcessor[ObserveResult] = NewObserveProcess[ObserveResult](context.Background(), rc)
+			got, _, err := observer.Run(agentConfig, state)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -96,8 +96,8 @@ func TestObserveRunResponseErrors(t *testing.T) {
 				ApiKey: "test", BaseUrl: server.URL, Model: "test-model", OutputSchema: config.JsonLLMOutputSchema,
 			}}
 			state := &fileContext.DurableState{RunId: "observe-task"}
-			observer := NewObserveProcess(context.Background(), fileContext.NewObservationContext(state, nil, nil))
-			got, err := observer.Run(agentConfig, state)
+			observer := NewObserveProcess[ObserveResult](context.Background(), fileContext.NewObservationContext(state, nil, nil))
+			got, _, err := observer.Run(agentConfig, state)
 			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "observe-task") {
 				t.Fatalf("got error %v, want task ID and %q", err, tc.want)
 			}
@@ -114,19 +114,19 @@ func TestObserveRunInvalidInput(t *testing.T) {
 	validConfig := &config.AgentConfig{LLMConfig: &config.LLMConfig{}}
 	for _, tc := range []struct {
 		name     string
-		observer *ObserveProcess
+		observer *ObserveProcess[ObserveResult]
 		config   *config.AgentConfig
 		state    *fileContext.DurableState
 	}{
 		{"nil observer", nil, validConfig, state},
-		{"nil config", NewObserveProcess(context.Background(), validContext), nil, state},
-		{"nil context", NewObserveProcess(nil, validContext), validConfig, state},
-		{"nil observation context", NewObserveProcess(context.Background(), nil), validConfig, state},
-		{"nil durable state", NewObserveProcess(context.Background(), validContext), validConfig, nil},
-		{"nil LLM config", NewObserveProcess(context.Background(), validContext), &config.AgentConfig{}, state},
+		{"nil config", NewObserveProcess[ObserveResult](context.Background(), validContext), nil, state},
+		{"nil context", NewObserveProcess[ObserveResult](nil, validContext), validConfig, state},
+		{"nil observation context", NewObserveProcess[ObserveResult](context.Background(), nil), validConfig, state},
+		{"nil durable state", NewObserveProcess[ObserveResult](context.Background(), validContext), validConfig, nil},
+		{"nil LLM config", NewObserveProcess[ObserveResult](context.Background(), validContext), &config.AgentConfig{}, state},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := tc.observer.Run(tc.config, tc.state); err == nil {
+			if _, _, err := tc.observer.Run(tc.config, tc.state); err == nil {
 				t.Fatal("expected an input error")
 			}
 		})

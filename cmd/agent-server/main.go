@@ -1,4 +1,4 @@
-// Command agent-server runs an agent and delegates tool calls to a child MCP server.
+// Command agent-server runs agents through the processor orchestrator.
 package main
 
 import (
@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -29,18 +28,14 @@ func main() {
 	loaded, err := config.LoadAgentConfig(*configPath)
 	if err == nil {
 		ctx := context.Background()
-		args := []string{"--workspace", *workspace, "--timeout", timeout.String()}
 		durableState := &fileContext.DurableState{RunId: "cli-task", Goal: *task}
-		process, procErr := agent.NewReactProcessWithCommand[agent.ReactResult](ctx,
-			exec.Command(*mcpCommand, args...))
-		if procErr != nil {
-			err = procErr
-		} else {
-			result, runErr := process.Run(loaded, durableState)
-			err = runErr
-			if runErr == nil {
-				fmt.Println(result.Answer)
-			}
+		// 构造函数以 TaskAnalyzerAgentType 为根节点，后续流程由处理器决定。
+		orchestrator := agent.NewProcessorOrchestratorWithCommand(ctx, *mcpCommand,
+			"--workspace", *workspace, "--timeout", timeout.String())
+		result, runErr := orchestrator.Run(loaded, durableState)
+		err = runErr
+		if runErr == nil {
+			fmt.Println(result.Answer)
 		}
 	}
 	if err != nil {

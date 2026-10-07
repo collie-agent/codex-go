@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/collie-agent/codex-go/internal/agent"
+	"github.com/collie-agent/codex-go/internal/config"
+	fileContext "github.com/collie-agent/codex-go/internal/context"
+	filemcp "github.com/collie-agent/codex-go/internal/mcp"
 )
 
 func TestRunRequiresWorkspace(t *testing.T) {
@@ -50,7 +56,7 @@ func TestRunAgentCompletesWithBothOutputSchemas(t *testing.T) {
 			}))
 			defer server.Close()
 			path := filepath.Join(t.TempDir(), "agent.yaml")
-			contents := "name: react\nllm:\n  base_url: " + server.URL + "\n  api_key: test\n  model: test\n  output_schema: " + tc.schema + "\n"
+			contents := "name: react\nbase:\n  llm:\n    base_url: " + server.URL + "\n    api_key: test\n    model: test\n    output_schema: " + tc.schema + "\n"
 			if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
 				t.Fatal(err)
 			}
@@ -87,7 +93,7 @@ func TestRunAgentRejectsInvalidFinalResults(t *testing.T) {
 			}))
 			defer server.Close()
 			path := filepath.Join(t.TempDir(), "agent.yaml")
-			contents := "name: react\nllm:\n  base_url: " + server.URL + "\n  api_key: test\n  model: test\n  output_schema: " + tc.schema + "\n"
+			contents := "name: react\nbase:\n  llm:\n    base_url: " + server.URL + "\n    api_key: test\n    model: test\n    output_schema: " + tc.schema + "\n"
 			if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
 				t.Fatal(err)
 			}
@@ -117,7 +123,7 @@ func TestRunAgentToolTimeoutDoesNotLimitModelRequests(t *testing.T) {
 	}))
 	defer server.Close()
 	path := filepath.Join(t.TempDir(), "agent.yaml")
-	contents := "name: react\nllm:\n  base_url: " + server.URL + "\n  api_key: test\n  model: test\n"
+	contents := "name: react\nbase:\n  llm:\n    base_url: " + server.URL + "\n    api_key: test\n    model: test\n"
 	if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +176,7 @@ func TestRunAgentUsesYAMLAllowedToolAndReturnsItsResultToModel(t *testing.T) {
 	defer server.Close()
 
 	configPath := filepath.Join(t.TempDir(), "agent.yaml")
-	config := "name: react\nllm:\n  base_url: " + server.URL + "\n  api_key: test\n  model: test\nallow_tools:\n  - read_file\n"
+	config := "name: react\nbase:\n  llm:\n    base_url: " + server.URL + "\n    api_key: test\n    model: test\n  allow_tools:\n    - read_file\n"
 	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -205,13 +211,136 @@ func TestRunAgentRejectsModelCallOutsideYAMLAllowedTools(t *testing.T) {
 	defer server.Close()
 
 	configPath := filepath.Join(t.TempDir(), "agent.yaml")
-	config := "name: react\nllm:\n  base_url: " + server.URL + "\n  api_key: test\n  model: test\nallow_tools: [read_file]\n"
+	config := "name: react\nbase:\n  llm:\n    base_url: " + server.URL + "\n    api_key: test\n    model: test\n  allow_tools: [read_file]\n"
 	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
 		t.Fatal(err)
 	}
 	err := runAgent(configPath, "列出目录", t.TempDir(), 5*time.Second)
 	if err == nil || !strings.Contains(err.Error(), "tool list_dir is not allowed") {
 		t.Fatalf("error=%v, want unallowed tool rejection", err)
+	}
+}
+
+func TestRunAgentUsesObserveAgentConfiguration(t *testing.T) {
+	for _, mode := range []string{"CLI", "resolved ReAct config"} {
+		t.Run(mode, func(t *testing.T) {
+			workspace := t.TempDir()
+			if err := os.WriteFile(filepath.Join(workspace, "notes.txt"), []byte("before\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			observeRequest := make(chan struct {
+				model string
+				input string
+				tools []struct {
+					Name string `json:"name"`
+				}
+			}, 1)
+			var reactRequests int
+			observerStarted := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var request struct {
+					Model string `json:"model"`
+					Input string `json:"input"`
+					Tools []struct {
+						Name string `json:"name"`
+					} `json:"tools"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Error(err)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				switch request.Model {
+				case "react-model":
+					reactRequests++
+					if !strings.Contains(request.Input, "react-prompt") || strings.Contains(request.Input, "base-prompt") {
+						t.Errorf("ReAct used wrong prompt: %s", request.Input)
+					}
+					if len(request.Tools) != 1 || request.Tools[0].Name != "apply_patch" {
+						t.Errorf("ReAct saw tools %v, want only apply_patch", request.Tools)
+					}
+					if reactRequests > 1 {
+						// 等待异步观察器收到请求，避免 CLI 完成后取消上下文使断言偶发失败。
+						select {
+						case <-observerStarted:
+						case <-time.After(5 * time.Second):
+							t.Error("observer request did not start before ReAct completed")
+						}
+						_ = json.NewEncoder(w).Encode(map[string]any{
+							"id": "resp_final", "status": "completed",
+							"output": []any{map[string]any{"type": "message", "role": "assistant", "status": "completed", "content": []any{
+								map[string]any{"type": "output_text", "text": `{"status":"completed","answer":"done"}`},
+							}}},
+						})
+						return
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"id": "resp_tool", "status": "completed",
+						"output": []any{map[string]any{"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "apply_patch", "arguments": `{"patch":"--- /dev/null\n+++ b/created.txt\n@@ -0,0 +1 @@\n+created\n"}`}},
+					})
+				case "observe-model":
+					observeRequest <- struct {
+						model string
+						input string
+						tools []struct {
+							Name string `json:"name"`
+						}
+					}{request.Model, request.Input, request.Tools}
+					close(observerStarted)
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"id": "resp_observe", "status": "completed",
+						"output": []any{map[string]any{"type": "message", "role": "assistant", "status": "completed", "content": []any{
+							map[string]any{"type": "output_text", "text": `{"ConfirmedFacts":["created.txt created"],"ReportedErrors":[]}`},
+						}}},
+					})
+				default:
+					t.Errorf("unexpected model %q", request.Model)
+				}
+			}))
+			defer server.Close()
+
+			configPath := filepath.Join(t.TempDir(), "agent.yaml")
+			contents := "name: react\nbase:\n  llm:\n    base_url: " + server.URL + "\n    api_key: test\n    model: base-model\n  allow_tools: [apply_patch]\n  sys_prompt: base-prompt\nagents:\n  react:\n    llm:\n      base_url: " + server.URL + "\n      api_key: test\n      model: react-model\n    sys_prompt: react-prompt\n  observe:\n    llm:\n      base_url: " + server.URL + "\n      api_key: test\n      model: observe-model\n    sys_prompt: observe-prompt\n"
+			if err := os.WriteFile(configPath, []byte(contents), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "CLI" {
+				if err := runAgent(configPath, "修改文件", workspace, 5*time.Second); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				loaded, err := config.LoadAgentConfig(configPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				process, err := agent.NewReactProcess[agent.ReactResult](ctx, filemcp.Config{Workspace: workspace, Timeout: 5 * time.Second})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, _, err := process.Run(loaded.ForAgent("react"), &fileContext.DurableState{RunId: "resolved-config-task", Goal: "修改文件"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			select {
+			case request := <-observeRequest:
+				if request.model != "observe-model" {
+					t.Fatalf("observer used model %q, want observe-model", request.model)
+				}
+				if len(request.tools) != 0 {
+					t.Fatalf("observer exposed tools: %v", request.tools)
+				}
+				if !strings.Contains(request.input, "工具结果观察器") || !strings.Contains(request.input, "observe-prompt") || strings.Contains(request.input, "react-prompt") {
+					t.Fatalf("observer used wrong prompt: %s", request.input)
+				}
+				if strings.Index(request.input, "observe-prompt") > strings.Index(request.input, "# DurableState") {
+					t.Fatalf("observer custom prompt must follow its built-in prompt before task data: %s", request.input)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("observer model request was not captured")
+			}
+		})
 	}
 }
 
@@ -238,7 +367,7 @@ func TestRunAgentWithEmptyYAMLAllowedToolsExposesNoTools(t *testing.T) {
 	defer server.Close()
 
 	configPath := filepath.Join(t.TempDir(), "agent.yaml")
-	config := "name: react\nllm:\n  base_url: " + server.URL + "\n  api_key: test\n  model: test\nallow_tools: []\n"
+	config := "name: react\nbase:\n  llm:\n    base_url: " + server.URL + "\n    api_key: test\n    model: test\n  allow_tools: []\n"
 	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +382,7 @@ func TestRunAgentReportsModelFailure(t *testing.T) {
 	}))
 	defer server.Close()
 	path := filepath.Join(t.TempDir(), "agent.yaml")
-	contents := "name: react\nllm:\n  base_url: " + server.URL + "\n  api_key: test\n  model: test\n"
+	contents := "name: react\nbase:\n  llm:\n    base_url: " + server.URL + "\n    api_key: test\n    model: test\n"
 	if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
 		t.Fatal(err)
 	}

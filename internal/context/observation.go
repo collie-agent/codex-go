@@ -65,6 +65,16 @@ func (c *ReactContext) SnapshotObservationContext(toolResult *ToolResult) *Obser
 }
 
 func (c *ObservationContext) Format() string {
+	return c.format("")
+}
+
+// FormatWithSysPrompt appends the observer-specific instructions to its built-in
+// prompt before writing task data, matching the prompt boundary of other agents.
+func (c *ObservationContext) FormatWithSysPrompt(prompt string) string {
+	return c.format(prompt)
+}
+
+func (c *ObservationContext) format(customPrompt string) string {
 	if c == nil {
 		return ""
 	}
@@ -95,6 +105,9 @@ func (c *ObservationContext) Format() string {
 
 	b.WriteString("# sysPrompt\n\n")
 	writeContent(observeToolResultPrompt)
+	if strings.TrimSpace(customPrompt) != "" {
+		writeContent("# Additional instructions\n\n" + customPrompt)
+	}
 	b.WriteString("# DurableState\n\n")
 	if c.DurableState != nil {
 		writeField("Goal", c.DurableState.Goal)

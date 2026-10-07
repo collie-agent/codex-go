@@ -11,12 +11,13 @@ func TestLoadAgentConfigAppliesDefaultsAndResolvesEnvironmentKey(t *testing.T) {
 	t.Setenv("YAML_AGENT_TEST_KEY", "secret-value")
 	path := filepath.Join(t.TempDir(), "agent.yaml")
 	if err := os.WriteFile(path, []byte(`name: react
-llm:
-  model: gpt-test
-  api_key_env: YAML_AGENT_TEST_KEY
-allow_tools:
-  - read_file
-  - grep
+base:
+  llm:
+    model: gpt-test
+    api_key_env: YAML_AGENT_TEST_KEY
+  allow_tools:
+    - read_file
+    - grep
 `), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -42,8 +43,141 @@ allow_tools:
 	}
 }
 
+func TestLoadAgentConfigResolvesBaseForReact(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "base-secret")
+	path := filepath.Join(t.TempDir(), "agents.yaml")
+	if err := os.WriteFile(path, []byte(`name: react
+base:
+  llm:
+    model: base-model
+  allow_tools: [read_file]
+  sys_prompt: shared prompt
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := LoadAgentConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := loaded.ForAgent("react")
+	if got.LLMConfig.Model != "base-model" || got.LLMConfig.ApiKey != "base-secret" {
+		t.Fatalf("unexpected resolved LLM config: %+v", got.LLMConfig)
+	}
+	if _, ok := got.AllowTools[ReadFileMCPToolName]; !ok || got.SysPrompt != "shared prompt" {
+		t.Fatalf("base settings were not applied: %+v", got)
+	}
+}
+
+func TestLoadAgentConfigAppliesIndependentOverrides(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "base-secret")
+	t.Setenv("ANALYZER_SECRET", "analyzer-secret")
+	path := filepath.Join(t.TempDir(), "agents.yaml")
+	if err := os.WriteFile(path, []byte(`name: react
+base:
+  llm:
+    model: base-model
+  allow_tools: [read_file]
+  sys_prompt: shared prompt
+agents:
+  react:
+    allow_tools: []
+    sys_prompt: ""
+  task_analyzer:
+    llm:
+      model: analyzer-model
+      api_key_env: ANALYZER_SECRET
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := LoadAgentConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	react := loaded.ForAgent("react")
+	if len(react.AllowTools) != 0 || react.SysPrompt != "" {
+		t.Fatalf("explicit empty overrides were lost: %+v", react)
+	}
+	analyzer := loaded.ForAgent("task_analyzer")
+	if analyzer.LLMConfig.Model != "analyzer-model" || analyzer.LLMConfig.ApiKey != "analyzer-secret" {
+		t.Fatalf("LLM block was not replaced: %+v", analyzer.LLMConfig)
+	}
+	if _, ok := analyzer.AllowTools[ReadFileMCPToolName]; ok || analyzer.SysPrompt != "shared prompt" {
+		t.Fatalf("base settings did not independently fall back: %+v", analyzer)
+	}
+}
+
+func TestLoadAgentConfigValidatesUnusedAgentSettingsAndToolBoundary(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "base-secret")
+	for _, tc := range []struct{ name, agent, want string }{
+		{"invalid unused model", "task_analyzer:\n    llm:\n      api_key: analyzer-secret\n", "llm.model is required"},
+		{"internal tools", "observe:\n    allow_tools: [read_file]\n", "cannot enable tools"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "agents.yaml")
+			body := "name: react\nbase:\n  llm:\n    model: base-model\nagents:\n  " + tc.agent
+			if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadAgentConfig(path); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error=%v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadAgentConfigRejectsExplicitNullWithoutLeakingKey(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sensitive-value")
+	path := filepath.Join(t.TempDir(), "agents.yaml")
+	body := "name: react\nbase:\n  llm:\n    model: base-model\n  sys_prompt: null\n"
+	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadAgentConfig(path); err == nil || !strings.Contains(err.Error(), "null") || strings.Contains(err.Error(), "sensitive-value") {
+		t.Fatalf("error=%v, want null rejection without secret", err)
+	}
+}
+
+func TestLoadAgentConfigReturnsIndependentAgentCopies(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "base-secret")
+	path := filepath.Join(t.TempDir(), "agents.yaml")
+	body := "name: react\nbase:\n  llm:\n    model: base-model\n  allow_tools: [read_file]\n  sys_prompt: shared\n"
+	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadAgentConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := loaded.ForAgent("react")
+	first.SysPrompt = "changed"
+	first.LLMConfig.Model = "changed-model"
+	delete(first.AllowTools, ReadFileMCPToolName)
+	second := first.ForAgent("observe")
+	if second.SysPrompt != "shared" || second.LLMConfig.Model != "base-model" {
+		t.Fatalf("configuration mutation leaked: %+v", second)
+	}
+	if _, ok := second.AllowTools[ReadFileMCPToolName]; ok {
+		t.Fatal("base tools leaked into internal agent")
+	}
+	second.LLMConfig.Model = "changed-observer-model"
+	second.SysPrompt = "changed-observer-prompt"
+	second.AllowTools[ApplyPatchMCPToolName] = struct{}{}
+	third := second.ForAgent("react")
+	if third.LLMConfig.Model != "base-model" || third.SysPrompt != "shared" {
+		t.Fatalf("configuration mutation leaked through chained lookup: %+v", third)
+	}
+	if len(third.AllowTools) != 1 {
+		t.Fatalf("tool mutation leaked through chained lookup: %v", third.AllowTools)
+	}
+	if _, ok := third.AllowTools[ReadFileMCPToolName]; !ok {
+		t.Fatal("original ReAct tools were lost")
+	}
+}
+
 func TestLoadAgentConfigRejectsTrailingYAMLDocuments(t *testing.T) {
-	const valid = "name: react\nllm:\n  model: test\n  api_key: test\n"
+	const valid = "name: react\nbase:\n  llm:\n    model: test\n    api_key: test\n"
 	for _, tc := range []struct {
 		name, suffix, want string
 	}{
@@ -78,11 +212,11 @@ func TestLoadAgentConfigRejectsInvalidDefinitions(t *testing.T) {
 		body string
 		want string
 	}{
-		{"unknown field", "name: react\nllm:\n  model: x\n  api_key: key\nextra: true\n", "field extra not found"},
-		{"unknown agent", "name: planner\nllm:\n  model: x\n  api_key: key\n", "unknown agent type"},
-		{"unknown tool", "name: react\nllm:\n  model: x\n  api_key: key\nallow_tools: [shell]\n", "unknown tool"},
-		{"conflicting keys", "name: react\nllm:\n  model: x\n  api_key: key\n  api_key_env: KEY\n", "mutually exclusive"},
-		{"missing key", "name: react\nllm:\n  model: x\n", "API key is empty"},
+		{"unknown field", "name: react\nbase:\n  llm:\n    model: x\n    api_key: key\nextra: true\n", "field extra not found"},
+		{"unknown agent", "name: planner\nbase:\n  llm:\n    model: x\n    api_key: key\n", "unknown agent type"},
+		{"unknown tool", "name: react\nbase:\n  llm:\n    model: x\n    api_key: key\n  allow_tools: [shell]\n", "unknown tool"},
+		{"conflicting keys", "name: react\nbase:\n  llm:\n    model: x\n    api_key: key\n    api_key_env: KEY\n", "mutually exclusive"},
+		{"missing key", "name: react\nbase:\n  llm:\n    model: x\n", "API key is empty"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "agent.yaml")

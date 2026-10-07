@@ -59,7 +59,7 @@ func runAgent(configPath, task, workspace string, timeout time.Duration) error {
 	if err != nil {
 		return err
 	}
-	result, err := process.Run(loaded, durableState)
+	result, _, err := process.Run(loaded, durableState)
 	if err != nil {
 		return err
 	}

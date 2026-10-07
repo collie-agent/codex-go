@@ -45,7 +45,7 @@ func TestReactRunSendsBuiltInPromptBeforeCustomPrompt(t *testing.T) {
 	}
 	state := &fileContext.DurableState{RunId: "run-task", Goal: "本次运行目标"}
 	var processor AgentProcessor[ReactResult] = process
-	if _, err := processor.Run(runConfig, state); err != nil {
+	if _, _, err := processor.Run(runConfig, state); err != nil {
 		t.Fatal(err)
 	}
 
