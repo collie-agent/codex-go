@@ -8,10 +8,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 	"time"
 
-	"github.com/collie-agent/codex-go/internal/config"
 	filemcp "github.com/collie-agent/codex-go/internal/mcp"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -19,8 +17,6 @@ import (
 func main() {
 	workspace := flag.String("workspace", "", "workspace directory (required)")
 	timeout := flag.Duration("timeout", 30*time.Second, "tool command timeout")
-	var allowed string
-	flag.StringVar(&allowed, "allow-tools", "", "comma-separated tool allow-list")
 	flag.Parse()
 	if *workspace == "" || *timeout <= 0 {
 		fmt.Fprintln(os.Stderr, "--workspace is required and --timeout must be positive")
@@ -32,15 +28,8 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	var allow map[config.McpToolName]struct{}
-	if allowed != "" {
-		allow = make(map[config.McpToolName]struct{})
-		for _, name := range strings.Split(allowed, ",") {
-			allow[config.McpToolName(strings.TrimSpace(name))] = struct{}{}
-		}
-	}
 	server := sdk.NewServer(&sdk.Implementation{Name: "codex-go-mcp", Version: "0.1.0"}, nil)
-	if err := filemcp.RegisterTools(server, filemcp.Config{Workspace: *workspace, Timeout: *timeout, AllowTools: allow}); err != nil {
+	if err := filemcp.RegisterTools(server, filemcp.Config{Workspace: *workspace, Timeout: *timeout}); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

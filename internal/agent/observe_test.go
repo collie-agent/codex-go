@@ -56,11 +56,14 @@ func TestObserveRun(t *testing.T) {
 				&fileContext.Observation{ConfirmedFacts: []string{"previous fact"}, ReportedErrors: []string{"previous error"}},
 				&fileContext.ToolResult{ToolCallId: "call_read", ToolName: "read_file", Status: filemcp.ToolCallFailedStatus, Arguments: `{"path":"notes.txt"}`, Result: "partial content: hello", Error: "permission denied"},
 			)
+			state := rc.DurableState
+			rc.DurableState = &fileContext.DurableState{RunId: "old-task", Goal: "old goal"}
 			before := rc.Format()
-			observer := NewObserveProcess(context.Background(), &config.AgentConfig{LLMConfig: &config.LLMConfig{
+			agentConfig := &config.AgentConfig{LLMConfig: &config.LLMConfig{
 				ApiKey: "test", BaseUrl: server.URL, Model: "test-model", OutputSchema: tc.schema,
-			}})
-			got, err := observer.Run(rc)
+			}}
+			var observer AgentProcessor[ObserveResult] = NewObserveProcess(context.Background(), rc)
+			got, err := observer.Run(agentConfig, state)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -89,10 +92,12 @@ func TestObserveRunResponseErrors(t *testing.T) {
 				writeObservationResponse(w, tc.output)
 			}))
 			defer server.Close()
-			observer := NewObserveProcess(context.Background(), &config.AgentConfig{LLMConfig: &config.LLMConfig{
+			agentConfig := &config.AgentConfig{LLMConfig: &config.LLMConfig{
 				ApiKey: "test", BaseUrl: server.URL, Model: "test-model", OutputSchema: config.JsonLLMOutputSchema,
-			}})
-			got, err := observer.Run(fileContext.NewObservationContext(&fileContext.DurableState{RunId: "observe-task"}, nil, nil))
+			}}
+			state := &fileContext.DurableState{RunId: "observe-task"}
+			observer := NewObserveProcess(context.Background(), fileContext.NewObservationContext(state, nil, nil))
+			got, err := observer.Run(agentConfig, state)
 			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "observe-task") {
 				t.Fatalf("got error %v, want task ID and %q", err, tc.want)
 			}
@@ -104,21 +109,24 @@ func TestObserveRunResponseErrors(t *testing.T) {
 }
 
 func TestObserveRunInvalidInput(t *testing.T) {
-	validContext := fileContext.NewObservationContext(&fileContext.DurableState{RunId: "observe-task"}, nil, nil)
+	state := &fileContext.DurableState{RunId: "observe-task"}
+	validContext := fileContext.NewObservationContext(state, nil, nil)
+	validConfig := &config.AgentConfig{LLMConfig: &config.LLMConfig{}}
 	for _, tc := range []struct {
 		name     string
 		observer *ObserveProcess
-		input    *fileContext.ObservationContext
+		config   *config.AgentConfig
+		state    *fileContext.DurableState
 	}{
-		{"nil observer", nil, validContext},
-		{"nil config", NewObserveProcess(context.Background(), nil), validContext},
-		{"nil context", NewObserveProcess(nil, &config.AgentConfig{}), validContext},
-		{"nil observation context", NewObserveProcess(context.Background(), &config.AgentConfig{}), nil},
-		{"nil durable state", NewObserveProcess(context.Background(), &config.AgentConfig{}), fileContext.NewObservationContext(nil, nil, nil)},
-		{"nil LLM config", NewObserveProcess(context.Background(), &config.AgentConfig{}), validContext},
+		{"nil observer", nil, validConfig, state},
+		{"nil config", NewObserveProcess(context.Background(), validContext), nil, state},
+		{"nil context", NewObserveProcess(nil, validContext), validConfig, state},
+		{"nil observation context", NewObserveProcess(context.Background(), nil), validConfig, state},
+		{"nil durable state", NewObserveProcess(context.Background(), validContext), validConfig, nil},
+		{"nil LLM config", NewObserveProcess(context.Background(), validContext), &config.AgentConfig{}, state},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := tc.observer.Run(tc.input); err == nil {
+			if _, err := tc.observer.Run(tc.config, tc.state); err == nil {
 				t.Fatal("expected an input error")
 			}
 		})

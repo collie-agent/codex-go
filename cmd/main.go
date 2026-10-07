@@ -53,12 +53,13 @@ func runAgent(configPath, task, workspace string, timeout time.Duration) error {
 	// --timeout 只限制单次工具调用；多轮模型决策不共享这个时限。
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	process, err := agent.NewReactProcess[agent.ReactResult](ctx, &fileContext.DurableState{RunId: "cli-task", Goal: task}, loaded,
-		filemcp.Config{Workspace: workspace, Timeout: timeout, AllowTools: loaded.AllowTools})
+	durableState := &fileContext.DurableState{RunId: "cli-task", Goal: task}
+	process, err := agent.NewReactProcess[agent.ReactResult](ctx,
+		filemcp.Config{Workspace: workspace, Timeout: timeout})
 	if err != nil {
 		return err
 	}
-	result, err := process.Run()
+	result, err := process.Run(loaded, durableState)
 	if err != nil {
 		return err
 	}

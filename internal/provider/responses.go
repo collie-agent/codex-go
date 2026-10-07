@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/collie-agent/codex-go/internal/config"
-	filemcp "github.com/collie-agent/codex-go/internal/mcp"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -19,9 +18,9 @@ type responsesApiClient[T any] struct {
 	agentConfig *config.AgentConfig
 }
 
-// NewResponsesApiClient creates a client whose Run method returns T and connects
-// its MCP tools. Call Close when the client is no longer needed.
-func NewResponsesApiClient[T any](llmConfig *config.LLMConfig, toolConfig filemcp.Config) (*responsesApiClient[T], error) {
+// NewResponsesApiClient creates a client whose Run method returns T.
+// allowTools 是 Agent 的工具权限；nil 或空 map 都不向模型提供工具。
+func NewResponsesApiClient[T any](llmConfig *config.LLMConfig, allowTools map[config.McpToolName]struct{}) (*responsesApiClient[T], error) {
 	if llmConfig == nil {
 		return nil, fmt.Errorf("LLM config is required")
 	}
@@ -30,7 +29,7 @@ func NewResponsesApiClient[T any](llmConfig *config.LLMConfig, toolConfig filemc
 		option.WithBaseURL(llmConfig.BaseUrl),
 	)
 	c := &responsesApiClient[T]{
-		agentConfig: &config.AgentConfig{LLMConfig: llmConfig, AllowTools: toolConfig.AllowTools},
+		agentConfig: &config.AgentConfig{LLMConfig: llmConfig, AllowTools: allowTools},
 		client:      &client,
 	}
 	return c, nil

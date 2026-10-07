@@ -23,9 +23,8 @@ const (
 
 // Config contains settings shared by the tools registered on an MCP server.
 type Config struct {
-	Workspace  string
-	Timeout    time.Duration
-	AllowTools map[mcpconfig.McpToolName]struct{}
+	Workspace string
+	Timeout   time.Duration
 }
 
 type ReadFileLine struct {
@@ -49,50 +48,32 @@ func RegisterTools(server *sdk.Server, config Config) error {
 	if config.Timeout <= 0 {
 		config.Timeout = 30 * time.Second
 	}
-	// nil 表示旧调用方要求注册全部工具；非 nil（包括空 map）表示
-	// YAML 的明确允许列表，空列表必须让 MCP server 不暴露任何工具。
-	allow := func(name mcpconfig.McpToolName) bool {
-		if config.AllowTools == nil {
-			return true
-		}
-		_, ok := config.AllowTools[name]
-		return ok
-	}
+	// MCP server 提供全部内置工具；Agent 的允许列表在调用方控制。
 	type readFileArgs struct {
 		Path   string `json:"path" jsonschema:"existing UTF-8 text file relative to the workspace; absolute paths are rejected"`
 		Offset *int   `json:"offset,omitempty" jsonschema:"positive one-based starting line (default 1); use next_offset to continue"`
 		Limit  *int   `json:"limit,omitempty" jsonschema:"positive maximum number of lines (default 200); response size may reduce the page"`
 	}
-	if allow(mcpconfig.ReadFileMCPToolName) {
-		sdk.AddTool(server, &sdk.Tool{Name: string(mcpconfig.ReadFileMCPToolName), Description: `Read a page of lines from an existing UTF-8 text file (NUL bytes are rejected). path is relative to the workspace; absolute paths and paths resolving outside it are rejected. Symlinks are allowed only when their resolved target stays inside the workspace. offset is the one-based starting line (default 1); limit is a positive maximum line count (default 200). Returns lines with their original one-based line numbers and text, plus truncated and next_offset. An offset past EOF returns an empty page. Responses may contain fewer than limit lines to fit the 1 MiB response cap; when truncated is true, pass next_offset as offset with the same path to continue.`},
-			func(ctx context.Context, _ *sdk.CallToolRequest, args readFileArgs) (*sdk.CallToolResult, ReadFileResult, error) {
-				toolCtx, cancel := context.WithTimeout(ctx, config.Timeout)
-				defer cancel()
-				result, err := ReadFile(toolCtx, workspace, args.Path, intDefault(args.Offset, 1), intDefault(args.Limit, 200))
-				if err != nil {
-					return nil, ReadFileResult{}, err
-				}
-				return pageResponse(result.Lines, intDefault(args.Offset, 1), result.Truncated, result.NextOffset,
-					func(lines []ReadFileLine, truncated bool, next *int) ReadFileResult {
-						return ReadFileResult{Lines: lines, Truncated: truncated, NextOffset: next}
-					},
-					func(line ReadFileLine) string { return fmt.Sprintf("%d: %s", line.Line, line.Text) })
-			})
+	sdk.AddTool(server, &sdk.Tool{Name: string(mcpconfig.ReadFileMCPToolName), Description: `Read a page of lines from an existing UTF-8 text file (NUL bytes are rejected). path is relative to the workspace; absolute paths and paths resolving outside it are rejected. Symlinks are allowed only when their resolved target stays inside the workspace. offset is the one-based starting line (default 1); limit is a positive maximum line count (default 200). Returns lines with their original one-based line numbers and text, plus truncated and next_offset. An offset past EOF returns an empty page. Responses may contain fewer than limit lines to fit the 1 MiB response cap; when truncated is true, pass next_offset as offset with the same path to continue.`},
+		func(ctx context.Context, _ *sdk.CallToolRequest, args readFileArgs) (*sdk.CallToolResult, ReadFileResult, error) {
+			toolCtx, cancel := context.WithTimeout(ctx, config.Timeout)
+			defer cancel()
+			result, err := ReadFile(toolCtx, workspace, args.Path, intDefault(args.Offset, 1), intDefault(args.Limit, 200))
+			if err != nil {
+				return nil, ReadFileResult{}, err
+			}
+			return pageResponse(result.Lines, intDefault(args.Offset, 1), result.Truncated, result.NextOffset,
+				func(lines []ReadFileLine, truncated bool, next *int) ReadFileResult {
+					return ReadFileResult{Lines: lines, Truncated: truncated, NextOffset: next}
+				},
+				func(line ReadFileLine) string { return fmt.Sprintf("%d: %s", line.Line, line.Text) })
+		})
+	if err := registerListDirTool(server, workspace, config.Timeout); err != nil {
+		return err
 	}
-	if allow(mcpconfig.ListDirMCPToolName) {
-		if err := registerListDirTool(server, workspace, config.Timeout); err != nil {
-			return err
-		}
-	}
-	if allow(mcpconfig.GlobMCPToolName) {
-		registerGlobTool(server, workspace, config.Timeout)
-	}
-	if allow(mcpconfig.GrepMCPToolName) {
-		registerGrepTool(server, workspace, config.Timeout)
-	}
-	if allow(mcpconfig.ApplyPatchMCPToolName) {
-		registerApplyPatchTool(server, workspace, config.Timeout)
-	}
+	registerGlobTool(server, workspace, config.Timeout)
+	registerGrepTool(server, workspace, config.Timeout)
+	registerApplyPatchTool(server, workspace, config.Timeout)
 	return nil
 }
 

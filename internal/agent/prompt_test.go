@@ -35,19 +35,25 @@ func TestReactRunSendsBuiltInPromptBeforeCustomPrompt(t *testing.T) {
 	}))
 	defer server.Close()
 
-	process, err := NewReactProcess[ReactResult](ctx, &fileContext.DurableState{RunId: "prompt-test", Goal: "完成任务"}, &config.AgentConfig{
-		LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema},
-		SysPrompt: customPrompt,
-	}, filemcp.Config{})
+	process, err := NewReactProcess[ReactResult](ctx, filemcp.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := process.Run(); err != nil {
+	runConfig := &config.AgentConfig{
+		LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema},
+		SysPrompt: customPrompt,
+	}
+	state := &fileContext.DurableState{RunId: "run-task", Goal: "本次运行目标"}
+	var processor AgentProcessor[ReactResult] = process
+	if _, err := processor.Run(runConfig, state); err != nil {
 		t.Fatal(err)
 	}
 
 	select {
 	case input := <-inputReceived:
+		if !strings.Contains(input, state.Goal) {
+			t.Fatalf("model request did not use Run config and state: %q", input)
+		}
 		builtInAt := strings.Index(input, builtInMarker)
 		customAt := strings.Index(input, customPrompt)
 		if builtInAt < 0 || customAt < 0 {

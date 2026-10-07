@@ -40,15 +40,16 @@ func TestReactObserveAsync(t *testing.T) {
 		writeObservationResponse(w, []any{observationMessage(`{"ConfirmedFacts":["patch call_patch: file updated"],"ReportedErrors":["patch call_patch: partial result"]}`)})
 	}))
 	defer server.Close()
-	r := &ReactProcess[ReactResult]{ctx: ctx, agentConfig: &config.AgentConfig{LLMConfig: &config.LLMConfig{
+	r := &ReactProcess[ReactResult]{ctx: ctx}
+	agentConfig := &config.AgentConfig{LLMConfig: &config.LLMConfig{
 		BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema,
-	}}}
+	}}
 	rc := fileContext.NewReactContext(&fileContext.DurableState{RunId: "react-task", Goal: "update file"})
 	rc.AppendConfirmedFacts("existing fact")
 	done := make(chan struct{})
 	go func() {
 		r.updateContext(&mcpSdk.CallToolResult{Content: []mcpSdk.Content{&mcpSdk.TextContent{Text: "updated"}}},
-			&mcpSdk.CallToolParams{Name: "apply_patch", Meta: mcpSdk.Meta{toolCallIDMetaKey: "call_patch"}}, rc, nil)
+			&mcpSdk.CallToolParams{Name: "apply_patch", Meta: mcpSdk.Meta{toolCallIDMetaKey: "call_patch"}}, rc, nil, agentConfig)
 		close(done)
 	}()
 	select {
@@ -87,11 +88,12 @@ func TestReactObserveFailure(t *testing.T) {
 		writeObservationResponse(w, []any{observationMessage("invalid JSON")})
 	}))
 	defer server.Close()
-	r := &ReactProcess[ReactResult]{ctx: ctx, agentConfig: &config.AgentConfig{LLMConfig: &config.LLMConfig{
+	r := &ReactProcess[ReactResult]{ctx: ctx}
+	agentConfig := &config.AgentConfig{LLMConfig: &config.LLMConfig{
 		BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema,
-	}}}
+	}}
 	rc := fileContext.NewReactContext(&fileContext.DurableState{RunId: "react-task"})
-	r.updateContext(nil, &mcpSdk.CallToolParams{Name: "apply_patch", Meta: mcpSdk.Meta{toolCallIDMetaKey: "call_patch"}}, rc, errors.New("tool failed"))
+	r.updateContext(nil, &mcpSdk.CallToolParams{Name: "apply_patch", Meta: mcpSdk.Meta{toolCallIDMetaKey: "call_patch"}}, rc, errors.New("tool failed"), agentConfig)
 	waitForReactObservation(t, ctx, rc, "observation failed")
 	formatted := rc.Format()
 	for _, want := range []string{"call_patch", "parse response output", "tool failed"} {
@@ -148,7 +150,7 @@ func TestUpdateContext(t *testing.T) {
 		Content:           []mcpSdk.Content{&mcpSdk.TextContent{Text: "permission denied"}},
 		StructuredContent: map[string]any{"path": "a.go"},
 		IsError:           true,
-	}, &mcpSdk.CallToolParams{Meta: mcpSdk.Meta{toolCallIDMetaKey: "call_123"}, Name: "grep", Arguments: map[string]any{"pattern": "test"}}, rc, errors.New("transport error"))
+	}, &mcpSdk.CallToolParams{Meta: mcpSdk.Meta{toolCallIDMetaKey: "call_123"}, Name: "grep", Arguments: map[string]any{"pattern": "test"}}, rc, errors.New("transport error"), nil)
 	if len(rc.ToolResults) != 2 || rc.ToolResults[0] != retained {
 		t.Fatalf("unexpected history: %+v", rc.ToolResults)
 	}
@@ -165,7 +167,7 @@ func TestUpdateContext(t *testing.T) {
 	if formatted := rc.Format(); !strings.Contains(formatted, "transport error") || !strings.Contains(formatted, "permission denied") {
 		t.Fatal("tool error missing from LLM context")
 	}
-	r.updateContext(nil, &mcpSdk.CallToolParams{Name: "read_file"}, rc, errors.New("read failed"))
+	r.updateContext(nil, &mcpSdk.CallToolParams{Name: "read_file"}, rc, errors.New("read failed"), nil)
 	if len(rc.ToolResults) != 3 || !strings.Contains(rc.ToolResults[2].Error, "MCP call failed: read failed") {
 		t.Fatal("nil result lost the tool error")
 	}
@@ -177,7 +179,7 @@ func TestUpdateContextConcurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 32; i++ {
 		wg.Go(func() {
-			r.updateContext(nil, &mcpSdk.CallToolParams{Name: "read_file"}, rc, nil)
+			r.updateContext(nil, &mcpSdk.CallToolParams{Name: "read_file"}, rc, nil, nil)
 			rc.Format()
 		})
 	}
@@ -202,7 +204,7 @@ func TestUpdateContextErrorDetails(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			rc := fileContext.NewReactContext(nil)
 			r := &ReactProcess[ReactResult]{}
-			r.updateContext(tt.result, &mcpSdk.CallToolParams{Meta: mcpSdk.Meta{toolCallIDMetaKey: "call_failure"}, Name: "read_file", Arguments: tt.arguments}, rc, nil)
+			r.updateContext(tt.result, &mcpSdk.CallToolParams{Meta: mcpSdk.Meta{toolCallIDMetaKey: "call_failure"}, Name: "read_file", Arguments: tt.arguments}, rc, nil, nil)
 			got := rc.ToolResults[0]
 			if got.Status != filemcp.ToolCallFailedStatus {
 				t.Fatalf("unexpected status: %q", got.Status)
@@ -250,7 +252,7 @@ func TestBatchToolCallings(t *testing.T) {
 		r.batchToolCallings([]*mcpSdk.CallToolParams{
 			{Name: "read_file", Meta: mcpSdk.Meta{toolCallIDMetaKey: "first"}, Arguments: map[string]any{}},
 			{Name: "read_file", Meta: mcpSdk.Meta{toolCallIDMetaKey: "second"}, Arguments: map[string]any{}},
-		}, rc)
+		}, rc, nil)
 		close(done)
 	}()
 	for range 2 {

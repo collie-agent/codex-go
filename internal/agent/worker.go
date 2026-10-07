@@ -7,7 +7,6 @@ import (
 
 	"github.com/collie-agent/codex-go/internal/config"
 	fileContext "github.com/collie-agent/codex-go/internal/context"
-	filemcp "github.com/collie-agent/codex-go/internal/mcp"
 	"github.com/collie-agent/codex-go/internal/provider"
 	mcpSdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -16,7 +15,6 @@ type Worker[T LLMSchema] struct {
 	ctx           context.Context
 	agentConfig   *config.AgentConfig
 	mcpClientSess *mcpSdk.ClientSession
-	toolConfig    filemcp.Config
 }
 
 func NewWorker[T LLMSchema](ctx context.Context, agentConfig *config.AgentConfig, mcpClientSess *mcpSdk.ClientSession) *Worker[T] {
@@ -24,13 +22,12 @@ func NewWorker[T LLMSchema](ctx context.Context, agentConfig *config.AgentConfig
 		ctx:           ctx,
 		agentConfig:   agentConfig,
 		mcpClientSess: mcpClientSess,
-		toolConfig:    filemcp.Config{AllowTools: agentConfig.AllowTools},
 	}
 }
 
 func (w *Worker[T]) Run(reactContext *fileContext.ReactContext) (T, string, []*mcpSdk.CallToolParams, error) {
 	var result T
-	client, err := provider.NewResponsesApiClient[T](w.agentConfig.LLMConfig, w.toolConfig)
+	client, err := provider.NewResponsesApiClient[T](w.agentConfig.LLMConfig, w.agentConfig.AllowTools)
 	if err != nil {
 		return result, "", nil, err
 	}

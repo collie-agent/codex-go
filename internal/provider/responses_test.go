@@ -14,7 +14,7 @@ import (
 )
 
 func TestNewResponsesApiClientRejectsNilConfig(t *testing.T) {
-	if client, err := NewResponsesApiClient[any](nil, filemcp.Config{}); err == nil || client != nil {
+	if client, err := NewResponsesApiClient[any](nil, nil); err == nil || client != nil {
 		t.Fatalf("nil config: client=%v, err=%v", client, err)
 	}
 
@@ -84,15 +84,15 @@ func TestResponsesRunToolsWithoutHistoryAndClientReuse(t *testing.T) {
 	type result struct {
 		Message string `json:"message"`
 	}
+	allowTools := map[config.McpToolName]struct{}{}
+	for _, name := range []string{"read_file", "list_dir", "glob", "grep", "apply_patch"} {
+		allowTools[config.McpToolName(name)] = struct{}{}
+	}
 	client, err := NewResponsesApiClient[result](&config.LLMConfig{
 		ApiKey: "test", BaseUrl: server.URL, Model: "test-model", OutputSchema: config.JsonLLMOutputSchema,
-	}, filemcp.Config{Workspace: workspace})
+	}, allowTools)
 	if err != nil {
 		t.Fatal(err)
-	}
-	client.agentConfig.AllowTools = map[config.McpToolName]struct{}{}
-	for _, name := range []string{"read_file", "list_dir", "glob", "grep", "apply_patch"} {
-		client.agentConfig.AllowTools[config.McpToolName(name)] = struct{}{}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -167,7 +167,7 @@ func TestResponsesRunToolCallsSkipParsing(t *testing.T) {
 			}
 			client, err := NewResponsesApiClient[result](&config.LLMConfig{
 				ApiKey: "test", BaseUrl: server.URL, Model: "test-model", OutputSchema: config.JsonLLMOutputSchema,
-			}, filemcp.Config{})
+			}, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -208,7 +208,7 @@ func TestResponsesRunLineProtocolWithoutJSONFormat(t *testing.T) {
 	}
 	client, err := NewResponsesApiClient[result](&config.LLMConfig{
 		ApiKey: "test", BaseUrl: server.URL, Model: "test-model", OutputSchema: config.LineProtocolLLMOutputSchema,
-	}, filemcp.Config{})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestResponsesRunLineProtocolWithPreamble(t *testing.T) {
 	}
 	client, err := NewResponsesApiClient[result](&config.LLMConfig{
 		ApiKey: "test", BaseUrl: server.URL, Model: "test-model", OutputSchema: config.LineProtocolLLMOutputSchema,
-	}, filemcp.Config{})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

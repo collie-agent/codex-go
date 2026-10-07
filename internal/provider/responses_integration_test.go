@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/collie-agent/codex-go/internal/config"
-	filemcp "github.com/collie-agent/codex-go/internal/mcp"
 )
 
 // TestResponsesRunIntegration performs real requests only when explicitly enabled.
@@ -36,7 +35,7 @@ func TestResponsesRunIntegration(t *testing.T) {
 			client, err := NewResponsesApiClient[result](&config.LLMConfig{
 				ApiKey: os.Getenv("OPENAI_API_KEY"), BaseUrl: os.Getenv("OPENAI_BASE_URL"),
 				Model: os.Getenv("OPENAI_MODEL"), OutputSchema: tc.schema,
-			}, filemcp.Config{Workspace: t.TempDir()})
+			}, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

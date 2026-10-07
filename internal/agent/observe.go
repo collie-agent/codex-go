@@ -6,7 +6,6 @@ import (
 
 	"github.com/collie-agent/codex-go/internal/config"
 	fileContext "github.com/collie-agent/codex-go/internal/context"
-	filemcp "github.com/collie-agent/codex-go/internal/mcp"
 	"github.com/collie-agent/codex-go/internal/provider"
 )
 
@@ -16,29 +15,32 @@ type ObserveResult struct {
 }
 
 type ObserveProcess struct {
-	ctx         context.Context
-	agentConfig *config.AgentConfig
+	ctx                context.Context
+	observationContext *fileContext.ObservationContext
 }
 
-func NewObserveProcess(ctx context.Context, agentConfig *config.AgentConfig) *ObserveProcess {
-	return &ObserveProcess{ctx: ctx, agentConfig: agentConfig}
+func NewObserveProcess(ctx context.Context, observationContext *fileContext.ObservationContext) *ObserveProcess {
+	return &ObserveProcess{ctx: ctx, observationContext: observationContext}
 }
 
 // Run extracts new facts and errors from the tool results. The caller decides
 // when to merge the returned observation into the ReAct context.
-func (o *ObserveProcess) Run(observationContext *fileContext.ObservationContext) (ObserveResult, error) {
+func (o *ObserveProcess) Run(agentConfig *config.AgentConfig, durableState *fileContext.DurableState) (ObserveResult, error) {
 	var result ObserveResult
-	if o == nil || o.agentConfig == nil {
+	if o == nil || agentConfig == nil {
 		return result, fmt.Errorf("observation: agent config is required")
 	}
 	if o.ctx == nil {
 		return result, fmt.Errorf("observation: context is required")
 	}
-	if observationContext == nil || observationContext.DurableState == nil {
+	if o.observationContext == nil || durableState == nil {
 		return result, fmt.Errorf("observation: observation context with durable state is required")
 	}
-	taskID := observationContext.DurableState.RunId
-	client, err := provider.NewResponsesApiClient[ObserveResult](o.agentConfig.LLMConfig, filemcp.Config{})
+	// 用本次运行的状态替换快照中的状态，不修改调用方提供的观察上下文。
+	observationContext := *o.observationContext
+	observationContext.DurableState = durableState
+	taskID := durableState.RunId
+	client, err := provider.NewResponsesApiClient[ObserveResult](agentConfig.LLMConfig, nil)
 	if err != nil {
 		return result, fmt.Errorf("task %s: observation: %w", taskID, err)
 	}

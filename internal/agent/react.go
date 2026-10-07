@@ -43,8 +43,6 @@ type ReactResult struct {
 type ReactProcess[T LLMSchema] struct {
 	ctx           context.Context
 	maxTurn       int
-	durableState  *fileContext.DurableState
-	agentConfig   *config.AgentConfig
 	toolConfig    filemcp.Config
 	mcpClientSess *mcpSdk.ClientSession
 	serverSess    *mcpSdk.ServerSession
@@ -53,13 +51,16 @@ type ReactProcess[T LLMSchema] struct {
 // 最大轮数固定在代码中，避免任务通过配置无限延长。
 const maxReactTurns = 100
 
-func NewReactProcess[T LLMSchema](ctx context.Context, durableState *fileContext.DurableState, agentConfig *config.AgentConfig, toolConfig filemcp.Config) (*ReactProcess[T], error) {
+func NewReactProcess[T LLMSchema](ctx context.Context, toolConfig filemcp.Config) (*ReactProcess[T], error) {
 	clientTransport, serverTransport := mcpSdk.NewInMemoryTransports()
-	return newReactProcess[T](ctx, durableState, agentConfig, toolConfig, clientTransport, serverTransport)
+	return newReactProcess[T](ctx, toolConfig, clientTransport, serverTransport)
 }
 
 // NewReactProcessWithCommand connects to a separately built MCP server over stdio.
-func NewReactProcessWithCommand[T LLMSchema](ctx context.Context, durableState *fileContext.DurableState, agentConfig *config.AgentConfig, command *exec.Cmd) (*ReactProcess[T], error) {
+func NewReactProcessWithCommand[T LLMSchema](ctx context.Context, command *exec.Cmd) (*ReactProcess[T], error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("agent context is required")
+	}
 	if command == nil {
 		return nil, fmt.Errorf("MCP command is required")
 	}
@@ -68,19 +69,12 @@ func NewReactProcessWithCommand[T LLMSchema](ctx context.Context, durableState *
 	if err != nil {
 		return nil, fmt.Errorf("connect to MCP command: %w", err)
 	}
-	return &ReactProcess[T]{ctx: ctx, maxTurn: maxReactTurns, durableState: durableState,
-		agentConfig: agentConfig, mcpClientSess: session}, nil
+	return &ReactProcess[T]{ctx: ctx, maxTurn: maxReactTurns, mcpClientSess: session}, nil
 }
 
-func newReactProcess[T LLMSchema](ctx context.Context, durableState *fileContext.DurableState, agentConfig *config.AgentConfig, toolConfig filemcp.Config, clientTransport, serverTransport mcpSdk.Transport) (*ReactProcess[T], error) {
+func newReactProcess[T LLMSchema](ctx context.Context, toolConfig filemcp.Config, clientTransport, serverTransport mcpSdk.Transport) (*ReactProcess[T], error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("agent context is required")
-	}
-	if durableState == nil {
-		return nil, fmt.Errorf("durable state is required")
-	}
-	if agentConfig == nil || agentConfig.LLMConfig == nil {
-		return nil, fmt.Errorf("agent config with LLM config is required")
 	}
 	server := mcpSdk.NewServer(&mcpSdk.Implementation{Name: "codex-go-agent", Version: "0.1.0"}, nil)
 	if err := filemcp.RegisterTools(server, toolConfig); err != nil {
@@ -99,17 +93,15 @@ func newReactProcess[T LLMSchema](ctx context.Context, durableState *fileContext
 	return &ReactProcess[T]{
 		ctx:           ctx,
 		maxTurn:       maxReactTurns,
-		durableState:  durableState,
-		agentConfig:   agentConfig,
 		toolConfig:    toolConfig,
 		mcpClientSess: mcpClientSess,
 		serverSess:    serverSess,
 	}, nil
 }
 
-func (r *ReactProcess[T]) Run() (T, error) {
+func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fileContext.DurableState) (T, error) {
 	var zero T
-	if r == nil || r.ctx == nil || r.durableState == nil || r.agentConfig == nil {
+	if r == nil || r.ctx == nil || durableState == nil || agentConfig == nil || agentConfig.LLMConfig == nil {
 		return zero, fmt.Errorf("invalid ReAct process")
 	}
 	if r.mcpClientSess != nil {
@@ -118,10 +110,10 @@ func (r *ReactProcess[T]) Run() (T, error) {
 	if r.serverSess != nil {
 		defer r.serverSess.Close()
 	}
-	rc := fileContext.NewReactContext(r.durableState)
+	rc := fileContext.NewReactContext(durableState)
 	// 先保留内置 ReAct 执行约束，再把 YAML 的长期约束追加到其后。
-	rc.SetSysPrompt(r.agentConfig.SysPrompt)
-	worker := NewWorker[T](r.ctx, r.agentConfig, r.mcpClientSess)
+	rc.SetSysPrompt(agentConfig.SysPrompt)
+	worker := NewWorker[T](r.ctx, agentConfig, r.mcpClientSess)
 	for i := 1; i <= r.maxTurn; i++ {
 		result, _, toolParams, err := worker.Run(rc)
 		if err != nil {
@@ -143,7 +135,7 @@ func (r *ReactProcess[T]) Run() (T, error) {
 			}
 			return result, nil
 		}
-		r.batchToolCallings(toolParams, rc)
+		r.batchToolCallings(toolParams, rc, agentConfig)
 		if r.ctx.Err() != nil {
 			return zero, r.ctx.Err()
 		}
@@ -151,16 +143,17 @@ func (r *ReactProcess[T]) Run() (T, error) {
 	return zero, fmt.Errorf("ReAct exhausted maximum turns (%d)", r.maxTurn)
 }
 
-func (r *ReactProcess[T]) observe(toolResult *fileContext.ToolResult, rc *fileContext.ReactContext) {
+func (r *ReactProcess[T]) observe(toolResult *fileContext.ToolResult, rc *fileContext.ReactContext, agentConfig *config.AgentConfig) {
 	if r == nil || r.ctx == nil || rc == nil || toolResult == nil || r.ctx.Err() != nil {
 		return
 	}
 	// Copy the inputs before starting the request: the next ReAct turn and
 	// other observers may update the context while this request is running.
 	observationContext := rc.SnapshotObservationContext(toolResult)
+	// 配置沿调用链传入并由本次闭包捕获，无需保存在 Process 上。
 	go func() {
-		observer := NewObserveProcess(r.ctx, r.agentConfig)
-		result, err := observer.Run(observationContext)
+		observer := NewObserveProcess(r.ctx, observationContext)
+		result, err := observer.Run(agentConfig, observationContext.DurableState)
 		if r.ctx.Err() != nil {
 			return
 		}
@@ -178,18 +171,18 @@ func (r *ReactProcess[T]) observe(toolResult *fileContext.ToolResult, rc *fileCo
 	}()
 }
 
-func (r *ReactProcess[T]) batchToolCallings(toolParams []*mcpSdk.CallToolParams, rc *fileContext.ReactContext) {
+func (r *ReactProcess[T]) batchToolCallings(toolParams []*mcpSdk.CallToolParams, rc *fileContext.ReactContext, agentConfig *config.AgentConfig) {
 	var wg sync.WaitGroup
 	for _, toolParam := range toolParams {
 		wg.Go(func() {
 			callResult, err := r.mcpClientSess.CallTool(r.ctx, toolParam)
-			r.updateContext(callResult, toolParam, rc, err)
+			r.updateContext(callResult, toolParam, rc, err, agentConfig)
 		})
 	}
 	wg.Wait()
 }
 
-func (r *ReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, toolParam *mcpSdk.CallToolParams, rc *fileContext.ReactContext, err error) {
+func (r *ReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, toolParam *mcpSdk.CallToolParams, rc *fileContext.ReactContext, err error, agentConfig *config.AgentConfig) {
 	if rc == nil || toolParam == nil {
 		return
 	}
@@ -257,6 +250,6 @@ func (r *ReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, toolP
 	// concurrent tool calls remain distinguishable in the process output.
 	log.Printf("tool result: %+v\nReact context:\n%s", result, rc.Format())
 	if config.McpToolName(toolParam.Name) == config.ApplyPatchMCPToolName {
-		r.observe(result, rc)
+		r.observe(result, rc, agentConfig)
 	}
 }

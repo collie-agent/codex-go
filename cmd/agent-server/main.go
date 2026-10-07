@@ -30,20 +30,13 @@ func main() {
 	if err == nil {
 		ctx := context.Background()
 		args := []string{"--workspace", *workspace, "--timeout", timeout.String()}
-		if loaded.AllowTools != nil {
-			names := make([]string, 0, len(loaded.AllowTools))
-			for name := range loaded.AllowTools {
-				names = append(names, string(name))
-			}
-			args = append(args, "--allow-tools", strings.Join(names, ","))
-		}
+		durableState := &fileContext.DurableState{RunId: "cli-task", Goal: *task}
 		process, procErr := agent.NewReactProcessWithCommand[agent.ReactResult](ctx,
-			&fileContext.DurableState{RunId: "cli-task", Goal: *task}, loaded,
 			exec.Command(*mcpCommand, args...))
 		if procErr != nil {
 			err = procErr
 		} else {
-			result, runErr := process.Run()
+			result, runErr := process.Run(loaded, durableState)
 			err = runErr
 			if runErr == nil {
 				fmt.Println(result.Answer)
