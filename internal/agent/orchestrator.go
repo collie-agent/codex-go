@@ -51,9 +51,10 @@ func NewProcessorOrchestratorWithCommand(ctx context.Context, command string, ar
 	return o
 }
 
-// Run 按批次执行动态处理流程，返回调度顺序中最后一个 ReAct 结果。
-func (o *ProcessorOrchestrator) Run(agentConfig *config.AgentConfig, durableState *fileContext.DurableState) (ReactResult, error) {
-	var zero ReactResult
+// Run 按批次执行动态处理流程，按分支顺序返回每个终止分支的最后一个 ReAct 结果。
+// 未执行 ReAct 的分支不产生结果；任何节点失败时返回 nil 和错误。
+func (o *ProcessorOrchestrator) Run(agentConfig *config.AgentConfig, durableState *fileContext.DurableState) ([]ReactResult, error) {
+	var zero []ReactResult
 	if o == nil || o.ctx == nil {
 		return zero, fmt.Errorf("orchestrator: context is required")
 	}
@@ -78,26 +79,36 @@ type processorResult struct {
 
 type processorRunner func(AgentProcessorType, *config.AgentConfig, *fileContext.DurableState) (processorResult, error)
 
-func (o *ProcessorOrchestrator) runBatches(agentConfig *config.AgentConfig, durableState *fileContext.DurableState, run processorRunner) (ReactResult, error) {
-	var result ReactResult
-	batch := []AgentProcessorType{o.rootAgentType}
+// processorBranch 保留分支关系，后继节点继承该路径上最近的 ReAct 结果。
+// 使用树的叶节点收集结果，避免分支执行深度或结束时间改变返回顺序。
+type processorBranch struct {
+	agentType AgentProcessorType
+	react     *ReactResult
+	children  []*processorBranch
+}
+
+func (o *ProcessorOrchestrator) runBatches(agentConfig *config.AgentConfig, durableState *fileContext.DurableState, run processorRunner) ([]ReactResult, error) {
+	root := &processorBranch{agentType: o.rootAgentType}
+	batch := []*processorBranch{root}
 	for len(batch) > 0 {
 		if err := o.ctx.Err(); err != nil {
-			return ReactResult{}, err
+			return nil, err
 		}
 		// 先校验整批类型，避免同批中有不支持的节点时，其他节点已执行工具。
-		for _, agentType := range batch {
+		for _, branch := range batch {
+			agentType := branch.agentType
 			switch agentType {
 			case TaskAnalyzerAgentType, ReactAgentType, EndAgentType:
 			default:
-				return ReactResult{}, fmt.Errorf("orchestrator: unsupported processor type %q", agentType)
+				return nil, fmt.Errorf("orchestrator: unsupported processor type %q", agentType)
 			}
 		}
 
 		results := make([]processorResult, len(batch))
 		errs := make([]error, len(batch))
 		var wg sync.WaitGroup
-		for i, agentType := range batch {
+		for i, branch := range batch {
+			agentType := branch.agentType
 			// end 只终止当前分支，不影响同一批次的其他分支。
 			if agentType == EndAgentType {
 				continue
@@ -116,26 +127,48 @@ func (o *ProcessorOrchestrator) runBatches(agentConfig *config.AgentConfig, dura
 		// 即使某个节点失败，也等待同批节点退出，确保返回后没有本批处理器仍在运行。
 		wg.Wait()
 		if err := errors.Join(errs...); err != nil {
-			return ReactResult{}, err
+			return nil, err
 		}
 		if err := o.ctx.Err(); err != nil {
-			return ReactResult{}, err
+			return nil, err
 		}
 
-		var next []AgentProcessorType
+		var next []*processorBranch
 		// 按调度顺序合并，避免 goroutine 完成先后改变最终结果；重复类型保留为独立实例。
-		for _, output := range results {
+		for i, output := range results {
+			branch := batch[i]
 			if output.analysis != nil {
 				durableState.CompletionCriteria = slices.Clone(output.analysis.CompletionCriteria)
 			}
 			if output.react != nil {
-				result = *output.react
+				branch.react = output.react
 			}
-			next = append(next, output.next...)
+			// 单后继延续当前分支，多后继分叉；end 和空后继都终止路径。
+			for _, agentType := range output.next {
+				child := &processorBranch{agentType: agentType, react: branch.react}
+				branch.children = append(branch.children, child)
+				next = append(next, child)
+			}
 		}
 		batch = next
 	}
-	return result, nil
+	var finalResults []ReactResult
+	// 按后继声明顺序遍历叶节点；祖先的中间结果不会单独返回。
+	pending := []*processorBranch{root}
+	for len(pending) > 0 {
+		branch := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if len(branch.children) == 0 {
+			if branch.react != nil {
+				finalResults = append(finalResults, *branch.react)
+			}
+			continue
+		}
+		for i := len(branch.children) - 1; i >= 0; i-- {
+			pending = append(pending, branch.children[i])
+		}
+	}
+	return finalResults, nil
 }
 
 func (o *ProcessorOrchestrator) runProcessor(agentType AgentProcessorType, agentConfig *config.AgentConfig, state *fileContext.DurableState) (processorResult, error) {

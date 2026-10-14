@@ -35,7 +35,7 @@ func TestOrchestratorWithCommand(t *testing.T) {
 	// 直接执行 ReAct 节点，验证外部命令的连接错误会经由编排器返回。
 	o.rootAgentType = ReactAgentType
 	got, err := o.Run(&config.AgentConfig{LLMConfig: &config.LLMConfig{}}, &fileContext.DurableState{Goal: "test"})
-	if err == nil || !strings.Contains(err.Error(), "connect to MCP command") || got != (ReactResult{}) {
+	if err == nil || !strings.Contains(err.Error(), "connect to MCP command") || len(got) != 0 {
 		t.Fatalf("Run() = %+v, %v; want MCP command connection error", got, err)
 	}
 }
@@ -53,7 +53,7 @@ func TestOrchestratorRun(t *testing.T) {
 		{"clear stale criteria", `{"NeedsTools":false,"ExpectedSteps":1,"ReasoningSummary":"direct answer","CompletionCriteria":[]}`, `{"status":"completed","answer":"done"}`, "", []string{}, TaskAnalyzerAgentType},
 		{"analyzer failure", `{"NeedsTools":true,"ExpectedSteps":0,"ReasoningSummary":"invalid","CompletionCriteria":[]}`, "", `processor "task_analyzer"`, []string{"old criterion"}, TaskAnalyzerAgentType},
 		{"react failure", `{"NeedsTools":true,"ExpectedSteps":2,"ReasoningSummary":"inspect and verify","CompletionCriteria":["file verified"]}`, `{"status":"failed","answer":"blocked"}`, `processor "react"`, []string{"old criterion"}, ReactAgentType},
-		{"react selects unimplemented plan", "", `{"status":"completed","answer":"done"}`, `unsupported processor type "plan"`, []string{"old criterion"}, ReactAgentType},
+		{"react ends branch", "", `{"status":"completed","answer":"done"}`, "", []string{"old criterion"}, ReactAgentType},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -101,20 +101,30 @@ func TestOrchestratorRun(t *testing.T) {
 			o.rootAgentType = tt.root
 			got, err := o.Run(cfg, state)
 			if tt.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErr) || got != (ReactResult{}) {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) || len(got) != 0 {
 					t.Fatalf("Run() = %+v, %v; want zero result and error containing %q", got, err, tt.wantErr)
 				}
-			} else if err != nil || got != (ReactResult{}) {
+			} else if err != nil || !slices.Equal(got, []ReactResult{{Status: CompletedReactStatus, Answer: "done"}}) {
 				t.Fatalf("Run() = %+v, %v", got, err)
 			}
 			if !slices.Equal(state.CompletionCriteria, tt.criteria) || state.Goal != "verify file" || state.RunId != "orchestrator-task" {
 				t.Fatalf("unexpected durable state: %+v", state)
 			}
-			if len(requests) != 1 {
-				t.Fatalf("got %d requests, want 1", len(requests))
+			wantRequests := 1
+			if tt.root == TaskAnalyzerAgentType && tt.wantErr == "" {
+				wantRequests = 2
+			}
+			if len(requests) != wantRequests {
+				t.Fatalf("got %d requests, want %d", len(requests), wantRequests)
+			}
+			if wantRequests == 2 {
+				first := <-requests
+				if first.Model != "analyzer-model" || !strings.Contains(first.Input, "analyzer-prompt") || strings.Contains(first.Input, "react-prompt") {
+					t.Fatalf("unexpected analyzer request: %+v", first)
+				}
 			}
 			first := <-requests
-			if tt.root == TaskAnalyzerAgentType {
+			if tt.root == TaskAnalyzerAgentType && wantRequests == 1 {
 				if first.Model != "analyzer-model" || !strings.Contains(first.Input, "analyzer-prompt") || strings.Contains(first.Input, "react-prompt") {
 					t.Fatalf("unexpected analyzer request: %+v", first)
 				}
@@ -147,7 +157,7 @@ func TestOrchestratorRunValidation(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := tt.o.Run(tt.cfg, tt.state)
-			if err == nil || !strings.Contains(err.Error(), tt.want) || got != (ReactResult{}) {
+			if err == nil || !strings.Contains(err.Error(), tt.want) || len(got) != 0 {
 				t.Fatalf("Run() = %+v, %v; want error containing %q", got, err, tt.want)
 			}
 		})
@@ -165,7 +175,7 @@ func TestOrchestratorRunReactConstructionFailure(t *testing.T) {
 		toolConfig: filemcp.Config{Workspace: filepath.Join(t.TempDir(), "missing")},
 	}
 	got, err := o.Run(&config.AgentConfig{LLMConfig: &config.LLMConfig{}}, &fileContext.DurableState{Goal: "test"})
-	if err == nil || !strings.Contains(err.Error(), `create processor "react"`) || got != (ReactResult{}) {
+	if err == nil || !strings.Contains(err.Error(), `create processor "react"`) || len(got) != 0 {
 		t.Fatalf("Run() = %+v, %v; want ReAct construction error", got, err)
 	}
 }
@@ -213,7 +223,7 @@ func TestOrchestratorConcurrentBatches(t *testing.T) {
 		return output, nil
 	}
 	got, err := o.runBatches(&config.AgentConfig{}, state, run)
-	if err != nil || got.Answer != "done" || started.Load() != 2 || analyzerCalls != 2 {
+	if err != nil || !slices.Equal(got, []ReactResult{{Status: CompletedReactStatus, Answer: "done"}, {Status: CompletedReactStatus, Answer: "done"}}) || started.Load() != 2 || analyzerCalls != 2 {
 		t.Fatalf("got %+v, %v; started=%d analyzerCalls=%d", got, err, started.Load(), analyzerCalls)
 	}
 	if !slices.Equal(state.CompletionCriteria, []string{"criterion"}) {
@@ -244,7 +254,7 @@ func TestOrchestratorBatchFailureWaits(t *testing.T) {
 		return processorResult{next: []AgentProcessorType{PlanAgentType}}, failure
 	}
 	got, err := o.runBatches(&config.AgentConfig{}, &fileContext.DurableState{Goal: "test"}, run)
-	if !errors.Is(err, failure) || got != (ReactResult{}) || strings.Count(err.Error(), "processor failed") != 2 {
+	if !errors.Is(err, failure) || len(got) != 0 || strings.Count(err.Error(), "processor failed") != 2 {
 		t.Fatalf("Run() = %+v, %v; want both batch errors", got, err)
 	}
 }
@@ -253,7 +263,120 @@ func TestOrchestratorEndRoot(t *testing.T) {
 	o := NewProcessorOrchestrator(context.Background(), filemcp.Config{})
 	o.rootAgentType = EndAgentType
 	got, err := o.Run(&config.AgentConfig{LLMConfig: &config.LLMConfig{}}, &fileContext.DurableState{Goal: "test"})
-	if err != nil || got != (ReactResult{}) {
+	if err != nil || len(got) != 0 {
 		t.Fatalf("Run() = %+v, %v", got, err)
+	}
+}
+
+func TestOrchestratorFinalBranchResults(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		nodes []processorResult
+		want  []ReactResult
+	}{
+		{
+			name: "continuation replaces intermediate result",
+			nodes: []processorResult{
+				{react: &ReactResult{Answer: "intermediate"}, next: []AgentProcessorType{ReactAgentType}},
+				{react: &ReactResult{Answer: "final"}, next: []AgentProcessorType{EndAgentType}},
+			},
+			want: []ReactResult{{Answer: "final"}},
+		},
+		{
+			name: "nested branches preserve declaration order despite different depths",
+			nodes: []processorResult{
+				{react: &ReactResult{Answer: "root"}, next: []AgentProcessorType{ReactAgentType, EndAgentType}},
+				{react: &ReactResult{Answer: "middle"}, next: []AgentProcessorType{EndAgentType, TaskAnalyzerAgentType}},
+				{next: []AgentProcessorType{ReactAgentType}},
+				{react: &ReactResult{Answer: "deep"}},
+			},
+			want: []ReactResult{{Answer: "middle"}, {Answer: "deep"}, {Answer: "root"}},
+		},
+		{
+			name: "non-react continuation inherits result",
+			nodes: []processorResult{
+				{react: &ReactResult{Answer: "final"}, next: []AgentProcessorType{TaskAnalyzerAgentType}},
+				{},
+			},
+			want: []ReactResult{{Answer: "final"}},
+		},
+		{
+			name: "branches without react have no result",
+			nodes: []processorResult{
+				{next: []AgentProcessorType{EndAgentType, TaskAnalyzerAgentType}},
+				{},
+			},
+		},
+		{
+			name: "duplicate end branches retain separate results",
+			nodes: []processorResult{
+				{react: &ReactResult{Answer: "shared"}, next: []AgentProcessorType{EndAgentType, EndAgentType}},
+			},
+			want: []ReactResult{{Answer: "shared"}, {Answer: "shared"}},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			o := NewProcessorOrchestrator(context.Background(), filemcp.Config{})
+			var calls int
+			// 每批最多一个执行节点，其余为 end，保证脚本调用顺序确定。
+			run := func(_ AgentProcessorType, _ *config.AgentConfig, _ *fileContext.DurableState) (processorResult, error) {
+				if calls >= len(tt.nodes) {
+					return processorResult{}, errors.New("unexpected processor call")
+				}
+				output := tt.nodes[calls]
+				calls++
+				return output, nil
+			}
+			got, err := o.runBatches(&config.AgentConfig{}, &fileContext.DurableState{Goal: "test"}, run)
+			if err != nil || !slices.Equal(got, tt.want) || calls != len(tt.nodes) {
+				t.Fatalf("runBatches() = %+v, %v; want %+v; calls=%d", got, err, tt.want, calls)
+			}
+		})
+	}
+}
+
+func TestOrchestratorFailureDiscardsFinishedBranches(t *testing.T) {
+	o := NewProcessorOrchestrator(context.Background(), filemcp.Config{})
+	failure := errors.New("continuation failed")
+	calls := 0
+	run := func(_ AgentProcessorType, _ *config.AgentConfig, _ *fileContext.DurableState) (processorResult, error) {
+		calls++
+		if calls == 1 {
+			return processorResult{react: &ReactResult{Answer: "done"}, next: []AgentProcessorType{EndAgentType, ReactAgentType}}, nil
+		}
+		return processorResult{}, failure
+	}
+	got, err := o.runBatches(&config.AgentConfig{}, &fileContext.DurableState{Goal: "test"}, run)
+	if got != nil || !errors.Is(err, failure) {
+		t.Fatalf("runBatches() = %+v, %v; want nil and failure", got, err)
+	}
+}
+
+func TestOrchestratorBranchOrderIgnoresCompletionOrder(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	o := NewProcessorOrchestrator(ctx, filemcp.Config{})
+	secondFinished := make(chan struct{})
+	var analyzerCalls atomic.Int32
+	run := func(kind AgentProcessorType, _ *config.AgentConfig, _ *fileContext.DurableState) (processorResult, error) {
+		if kind == TaskAnalyzerAgentType {
+			if analyzerCalls.Add(1) == 1 {
+				return processorResult{next: []AgentProcessorType{ReactAgentType, TaskAnalyzerAgentType}}, nil
+			}
+			close(secondFinished)
+			return processorResult{react: &ReactResult{Answer: "second"}}, nil
+		}
+		// 首个分支必须等第二个分支产生结果，验证并发完成顺序不影响返回顺序。
+		select {
+		case <-secondFinished:
+		case <-ctx.Done():
+			return processorResult{}, ctx.Err()
+		}
+		return processorResult{react: &ReactResult{Answer: "first"}}, nil
+	}
+	got, err := o.runBatches(&config.AgentConfig{}, &fileContext.DurableState{Goal: "test"}, run)
+	want := []ReactResult{{Answer: "first"}, {Answer: "second"}}
+	if err != nil || !slices.Equal(got, want) {
+		t.Fatalf("runBatches() = %+v, %v; want %+v", got, err, want)
 	}
 }

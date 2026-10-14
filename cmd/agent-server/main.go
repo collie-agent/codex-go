@@ -32,10 +32,12 @@ func main() {
 		// 构造函数以 TaskAnalyzerAgentType 为根节点，后续流程由处理器决定。
 		orchestrator := agent.NewProcessorOrchestratorWithCommand(ctx, *mcpCommand,
 			"--workspace", *workspace, "--timeout", timeout.String())
-		result, runErr := orchestrator.Run(loaded, durableState)
+		results, runErr := orchestrator.Run(loaded, durableState)
 		err = runErr
 		if runErr == nil {
-			fmt.Println(result.Answer)
+			for _, result := range results {
+				fmt.Println(result.Answer)
+			}
 		}
 	}
 	if err != nil {
