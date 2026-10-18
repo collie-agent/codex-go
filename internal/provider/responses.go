@@ -39,7 +39,7 @@ func NewResponsesApiClient[T any](llmConfig *config.LLMConfig, allowTools map[co
 // Responses without tool calls are parsed into T.
 // A nil MCP session sends a request without tools.
 // 方法不能独立声明泛型参数，因此在创建客户端时指定结果类型
-func (c *responsesApiClient[T]) Run(ctx context.Context, taskId, input string, mcpClientSess *sdk.ClientSession) (T, []responses.ResponseFunctionToolCall, string, error) {
+func (c *responsesApiClient[T]) Run(ctx context.Context, taskId, input string, mcpClientSess *sdk.ClientSession, trailingContext ...string) (T, []responses.ResponseFunctionToolCall, string, error) {
 	var result T
 	var outputParser LLMOutputParser[*T]
 	var textConfig responses.ResponseTextConfigParam
@@ -65,6 +65,13 @@ func (c *responsesApiClient[T]) Run(ctx context.Context, taskId, input string, m
 		input += "\n\n" + lineProtocolFewShotPrompt
 	default:
 		return result, nil, "", fmt.Errorf("task %s: unsupported output schema %q", taskId, c.agentConfig.LLMConfig.OutputSchema)
+	}
+
+	// 当前步骤的验收标准必须位于整个文本输入末尾，包括输出协议指令之后。
+	for _, suffix := range trailingContext {
+		if strings.TrimSpace(suffix) != "" {
+			input += "\n\n" + suffix
+		}
 	}
 
 	var tools []responses.ToolUnionParam

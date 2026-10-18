@@ -25,6 +25,14 @@ make build
 
 `./bin/agent-server` 接受相同的 `--config`、`--task`、`--workspace` 和 `--timeout` 参数，并可用 `--mcp-command` 指定 MCP 二进制路径（默认 `codex-mcp`）。入口通过 `ProcessorOrchestrator` 从 `TaskAnalyzerAgentType` 开始执行，ReAct 节点通过 MCP stdio transport 连接子进程。单独启动 MCP stdio 服务运行 `./bin/codex-mcp --workspace /path/to/workspace --timeout 30s`。主 CLI 未指定 `--config` 时也保留原有 MCP stdio server 模式。
 
+`agent-server` 还支持可选参数 `--mode react` 或 `--mode plan-execute`：指定后跳过 task analyzer，分别直接进入 ReAct 或 planner，并优先于 YAML 的 `name` 选择运行模式；不指定时保留原有分析流程。其他模式值会报错并以退出码 2 退出。例如：
+
+```sh
+./bin/agent-server --config examples/react-agent.yaml \
+  --task '检查项目并完成目标' --workspace /path/to/workspace \
+  --mode plan-execute
+```
+
 ## 配置规则
 
 - 顶层仅支持 `name`、`base`、`agents`。`name` 必填且当前只能是 `react`；`base` 必须提供完整有效的 `llm`。`agents` 可省略或为空。

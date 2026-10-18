@@ -47,9 +47,7 @@ func (c *ReactContext) SnapshotObservationContext(toolResult *ToolResult) *Obser
 	defer c.mu.RUnlock()
 	snapshot := &ObservationContext{}
 	if c.DurableState != nil {
-		state := *c.DurableState
-		state.CompletionCriteria = append([]string(nil), state.CompletionCriteria...)
-		snapshot.DurableState = &state
+		snapshot.DurableState = c.DurableState.Clone()
 	}
 	if c.Observation != nil {
 		snapshot.Observation = &Observation{

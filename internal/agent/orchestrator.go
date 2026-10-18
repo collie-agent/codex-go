@@ -27,6 +27,7 @@ const (
 type ProcessorOrchestrator struct {
 	ctx           context.Context
 	rootAgentType AgentProcessorType
+	executionMode AgentProcessorType
 	toolConfig    filemcp.Config
 	mcpCommand    func() *exec.Cmd
 }
@@ -51,6 +52,21 @@ func NewProcessorOrchestratorWithCommand(ctx context.Context, command string, ar
 	return o
 }
 
+// SetMode 显式指定模式时跳过任务分析器；空值恢复默认的分析流程。
+func (o *ProcessorOrchestrator) SetMode(mode string) error {
+	switch mode {
+	case "":
+		o.rootAgentType = TaskAnalyzerAgentType
+	case "react":
+		o.rootAgentType = ReactAgentType
+	case "plan-execute":
+		o.rootAgentType = PlanAgentType
+	default:
+		return fmt.Errorf("unsupported mode %q: expected react or plan-execute", mode)
+	}
+	return nil
+}
+
 // Run 按批次执行动态处理流程，按分支顺序返回每个终止分支的最后一个 ReAct 结果。
 // 未执行 ReAct 的分支不产生结果；任何节点失败时返回 nil 和错误。
 func (o *ProcessorOrchestrator) Run(agentConfig *config.AgentConfig, durableState *fileContext.DurableState) ([]ReactResult, error) {
@@ -67,13 +83,22 @@ func (o *ProcessorOrchestrator) Run(agentConfig *config.AgentConfig, durableStat
 	if durableState == nil || strings.TrimSpace(durableState.Goal) == "" {
 		return zero, fmt.Errorf("orchestrator: durable state with goal is required")
 	}
-	return o.runBatches(agentConfig, durableState, o.runProcessor)
+	// 每次运行使用独立的模式设置，避免复用 orchestrator 时串扰。
+	runner := *o
+	runner.executionMode = ReactAgentType
+	// 显式 ReAct 模式优先于 YAML 的 name，不能误入计划执行流程。
+	if o.rootAgentType == PlanAgentType || (o.rootAgentType == TaskAnalyzerAgentType && agentConfig.Name == "plan-execute") {
+		runner.executionMode = PlanAgentType
+	}
+	return runner.runBatches(agentConfig, durableState, runner.runProcessor)
 }
 
 // processorResult 统一不同泛型处理器的结果，供批次结束后串行合并。
 type processorResult struct {
 	react    *ReactResult
 	analysis *TaskAnalyzerResult
+	plan     *PlannerResult
+	state    *fileContext.DurableState
 	next     []AgentProcessorType
 }
 
@@ -85,10 +110,11 @@ type processorBranch struct {
 	agentType AgentProcessorType
 	react     *ReactResult
 	children  []*processorBranch
+	state     *fileContext.DurableState
 }
 
 func (o *ProcessorOrchestrator) runBatches(agentConfig *config.AgentConfig, durableState *fileContext.DurableState, run processorRunner) ([]ReactResult, error) {
-	root := &processorBranch{agentType: o.rootAgentType}
+	root := &processorBranch{agentType: o.rootAgentType, state: durableState.Clone()}
 	batch := []*processorBranch{root}
 	for len(batch) > 0 {
 		if err := o.ctx.Err(); err != nil {
@@ -98,7 +124,7 @@ func (o *ProcessorOrchestrator) runBatches(agentConfig *config.AgentConfig, dura
 		for _, branch := range batch {
 			agentType := branch.agentType
 			switch agentType {
-			case TaskAnalyzerAgentType, ReactAgentType, EndAgentType:
+			case TaskAnalyzerAgentType, ReactAgentType, PlanAgentType, EndAgentType:
 			default:
 				return nil, fmt.Errorf("orchestrator: unsupported processor type %q", agentType)
 			}
@@ -114,11 +140,10 @@ func (o *ProcessorOrchestrator) runBatches(agentConfig *config.AgentConfig, dura
 				continue
 			}
 			resolvedConfig := agentConfig.ForAgent(string(agentType))
-			// 每个处理器读取独立快照；完成标准在整批结束后统一写回，避免并发读写。
-			state := *durableState
-			state.CompletionCriteria = slices.Clone(durableState.CompletionCriteria)
+			// 分支继承自己的执行记录，每个节点读取深拷贝，批次结束后再写回。
+			state := branch.state.Clone()
 			wg.Go(func() {
-				results[i], errs[i] = run(agentType, resolvedConfig, &state)
+				results[i], errs[i] = run(agentType, resolvedConfig, state)
 				if errs[i] != nil {
 					errs[i] = fmt.Errorf("orchestrator: processor %q: %w", agentType, errs[i])
 				}
@@ -127,6 +152,12 @@ func (o *ProcessorOrchestrator) runBatches(agentConfig *config.AgentConfig, dura
 		// 即使某个节点失败，也等待同批节点退出，确保返回后没有本批处理器仍在运行。
 		wg.Wait()
 		if err := errors.Join(errs...); err != nil {
+			// executor 失败仍保留其步骤状态，不能丢失已发生的执行记录。
+			for _, output := range results {
+				if output.state != nil {
+					*durableState = *output.state.Clone()
+				}
+			}
 			return nil, err
 		}
 		if err := o.ctx.Err(); err != nil {
@@ -137,15 +168,25 @@ func (o *ProcessorOrchestrator) runBatches(agentConfig *config.AgentConfig, dura
 		// 按调度顺序合并，避免 goroutine 完成先后改变最终结果；重复类型保留为独立实例。
 		for i, output := range results {
 			branch := batch[i]
+			if output.state != nil {
+				branch.state = output.state.Clone()
+			}
 			if output.analysis != nil {
-				durableState.CompletionCriteria = slices.Clone(output.analysis.CompletionCriteria)
+				branch.state.CompletionCriteria = slices.Clone(output.analysis.CompletionCriteria)
+			}
+			if output.plan != nil {
+				branch.state.StepExecutions = output.plan.StepExecutions
+				branch.state = branch.state.Clone()
+			}
+			if branch.agentType != EndAgentType {
+				*durableState = *branch.state.Clone()
 			}
 			if output.react != nil {
 				branch.react = output.react
 			}
 			// 单后继延续当前分支，多后继分叉；end 和空后继都终止路径。
 			for _, agentType := range output.next {
-				child := &processorBranch{agentType: agentType, react: branch.react}
+				child := &processorBranch{agentType: agentType, react: branch.react, state: branch.state.Clone()}
 				branch.children = append(branch.children, child)
 				next = append(next, child)
 			}
@@ -176,8 +217,29 @@ func (o *ProcessorOrchestrator) runProcessor(agentType AgentProcessorType, agent
 	case TaskAnalyzerAgentType:
 		process := NewTaskAnalyzerProcess[TaskAnalyzerResult](o.ctx)
 		analysis, next, err := process.Run(agentConfig, state)
+		if err == nil && o.executionMode == PlanAgentType {
+			next = []AgentProcessorType{PlanAgentType}
+		}
 		return processorResult{analysis: &analysis, next: next}, err
+	case PlanAgentType:
+		process := NewPlannerProcess(o.ctx)
+		plan, next, err := process.Run(agentConfig, state)
+		return processorResult{plan: &plan, next: next}, err
 	case ReactAgentType:
+		planExecute := o.executionMode == PlanAgentType || o.rootAgentType == PlanAgentType
+		stepIndex := -1
+		if planExecute {
+			for i := range state.StepExecutions {
+				if state.StepExecutions[i].Status == PendingExecutionStatus {
+					stepIndex = i
+					state.StepExecutions[i].Status = RunningExecutionStatus
+					break
+				}
+			}
+			if stepIndex < 0 {
+				return processorResult{}, fmt.Errorf("plan executor: no pending step")
+			}
+		}
 		var process *ReactProcess[ReactResult]
 		var err error
 		if o.mcpCommand != nil {
@@ -186,9 +248,26 @@ func (o *ProcessorOrchestrator) runProcessor(agentType AgentProcessorType, agent
 			process, err = NewReactProcess[ReactResult](o.ctx, o.toolConfig)
 		}
 		if err != nil {
+			if planExecute {
+				state.StepExecutions[stepIndex].Status = FailedExecutionStatus
+				return processorResult{state: state}, fmt.Errorf("create processor %q: %w", agentType, err)
+			}
 			return processorResult{}, fmt.Errorf("create processor %q: %w", agentType, err)
 		}
-		result, next, err := process.Run(agentConfig, state)
+		result, _, err := process.Run(agentConfig, state)
+		// ReAct 不负责选择运行模式；orchestrator 决定结束或回到 planner。
+		next := []AgentProcessorType{EndAgentType}
+		if planExecute {
+			step := &state.StepExecutions[stepIndex]
+			if err != nil {
+				step.Status = FailedExecutionStatus
+				return processorResult{state: state}, err
+			}
+			step.Status = CompletedExecutionStatus
+			step.CompletionEvidence = []string{result.Answer}
+			next = []AgentProcessorType{PlanAgentType}
+			return processorResult{react: &result, state: state, next: next}, nil
+		}
 		return processorResult{react: &result, next: next}, err
 	default:
 		return processorResult{}, fmt.Errorf("unsupported processor type %q", agentType)

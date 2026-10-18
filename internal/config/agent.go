@@ -86,7 +86,7 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 	if strings.TrimSpace(raw.Name) == "" {
 		return nil, fmt.Errorf("config name is required")
 	}
-	if raw.Name != "react" {
+	if raw.Name != "react" && raw.Name != "plan-execute" {
 		return nil, fmt.Errorf("unknown agent type %q", raw.Name)
 	}
 	if raw.Base == nil {
@@ -98,7 +98,7 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 	}
 	resolved := map[string]*AgentConfig{"base": base}
 	for name, partial := range raw.Agents {
-		if name != "react" && name != "task_analyzer" && name != "observe" {
+		if name != "react" && name != "task_analyzer" && name != "observe" && name != "plan" {
 			return nil, fmt.Errorf("unknown agent type %q", name)
 		}
 		if partial == nil {
@@ -113,7 +113,7 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 		}
 		resolved[name] = cfg
 	}
-	for _, name := range []string{"react", "task_analyzer", "observe"} {
+	for _, name := range []string{"react", "task_analyzer", "observe", "plan"} {
 		if _, ok := resolved[name]; !ok {
 			resolved[name] = cloneAgentConfig(base)
 			resolved[name].Name = name
@@ -123,7 +123,11 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 			resolved[name].AllowTools = map[McpToolName]struct{}{}
 		}
 	}
-	out := cloneAgentConfig(resolved[raw.Name])
+	entry := raw.Name
+	if entry == "plan-execute" {
+		entry = "plan"
+	}
+	out := cloneAgentConfig(resolved[entry])
 	out.Name = raw.Name
 	out.configs = resolved
 	return out, nil

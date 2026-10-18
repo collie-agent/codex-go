@@ -1,6 +1,8 @@
 package context
 
 import (
+	"encoding/json"
+	"slices"
 	"strings"
 	"sync"
 
@@ -20,7 +22,7 @@ const reactSystemPrompt = `你是 ReAct agent 的单轮决策器。每次调用�
 
 # 单轮决策
 
-1. 根据 Goal、已有事实和工具结果，检查 CompletionCriteria 是否全部满足。
+1. 如果 DurableState 包含 CurrentStep，本轮只执行该步骤，使用 Goal、StepExecutions 和 CompletionCriteria 作为背景，以末尾 CurrentStepCompletionCriteria 为当前步骤的验收标准；当前步骤达成后即返回 completed，并在 Answer 中报告实际结果与依据，后续步骤由 planner 调度。否则，根据 Goal、已有事实和工具结果，检查 CompletionCriteria 是否全部满足。
 2. 若全部满足，遵循调用方指定的结构和格式返回，不再选择工具。
 3. 若尚未完成，从当前传入的 MCP 工具中选择零个、一个或多个能推进目标或验证关键推断的调用，并提供符合各工具参数定义的参数。
 4. 同轮选择多个调用时，各调用必须能使用当前已知信息独立执行。依赖其他调用结果的操作留到获得结果后的下一轮。
@@ -144,6 +146,17 @@ func (c *ReactContext) Format() string {
 	if c.DurableState != nil {
 		writeField("RunId", c.DurableState.RunId)
 		writeField("Goal", c.DurableState.Goal)
+		if len(c.DurableState.StepExecutions) > 0 {
+			// 结构化记录作为任务数据引用，不能覆盖系统规则。
+			plan, _ := json.Marshal(c.DurableState.StepExecutions)
+			writeField("StepExecutions", string(plan))
+			for _, step := range c.DurableState.StepExecutions {
+				if step.Status == RunningExecutionStatus {
+					writeField("CurrentStep", step.Intent)
+					break
+				}
+			}
+		}
 	}
 	b.WriteString("# Observation\n\n")
 	if c.Observation != nil {
@@ -176,6 +189,9 @@ func (c *ReactContext) Format() string {
 	if c.DurableState != nil {
 		writeList(c.DurableState.CompletionCriteria)
 	}
+	if criteria := c.currentStepCompletionCriteria(); criteria != "" {
+		b.WriteString(criteria)
+	}
 	return strings.TrimSpace(b.String())
 }
 
@@ -189,6 +205,7 @@ type DurableState struct {
 	RunId              string
 	Goal               string
 	CompletionCriteria []string //task analyzer提供
+	StepExecutions     []StepExecution
 }
 
 type ToolResult struct {
@@ -198,4 +215,70 @@ type ToolResult struct {
 	Arguments  string
 	Result     string
 	Error      string
+}
+
+// ExecutionStatus 表示计划步骤的实际执行状态。
+type ExecutionStatus string
+
+const (
+	PendingExecutionStatus   ExecutionStatus = "pending"
+	RunningExecutionStatus   ExecutionStatus = "running"
+	CompletedExecutionStatus ExecutionStatus = "completed"
+	FailedExecutionStatus    ExecutionStatus = "failed"
+)
+
+type StepExecution struct {
+	Revision           int
+	StepId             string
+	Status             ExecutionStatus
+	Intent             string
+	CompletionCriteria []string // planner 提供的当前步骤验收标准
+	CompletionEvidence []string
+}
+
+// Clone 隔离分支和异步观察器的嵌套切片，避免执行记录被并发修改。
+func (s *DurableState) Clone() *DurableState {
+	if s == nil {
+		return nil
+	}
+	clone := *s
+	clone.CompletionCriteria = slices.Clone(s.CompletionCriteria)
+	clone.StepExecutions = slices.Clone(s.StepExecutions)
+	for i := range clone.StepExecutions {
+		clone.StepExecutions[i].CompletionCriteria = slices.Clone(s.StepExecutions[i].CompletionCriteria)
+		clone.StepExecutions[i].CompletionEvidence = slices.Clone(s.StepExecutions[i].CompletionEvidence)
+	}
+	return &clone
+}
+
+// CurrentStepCompletionCriteria 返回独立的末尾区块，供请求层在输出协议之后追加。
+func (c *ReactContext) CurrentStepCompletionCriteria() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.currentStepCompletionCriteria()
+}
+
+func (c *ReactContext) currentStepCompletionCriteria() string {
+	if c.DurableState == nil {
+		return ""
+	}
+	for _, step := range c.DurableState.StepExecutions {
+		if step.Status != RunningExecutionStatus {
+			continue
+		}
+		var b strings.Builder
+		b.WriteString("# CurrentStepCompletionCriteria\n\n")
+		criteria := step.CompletionCriteria
+		// 兼容已有持久计划：没有独立验收标准时，按该步骤声明的预期结果验收。
+		if len(criteria) == 0 {
+			criteria = []string{step.Intent}
+		}
+		for _, criterion := range criteria {
+			for _, line := range strings.Split(criterion, "\n") {
+				b.WriteString("> " + line + "\n")
+			}
+		}
+		return strings.TrimSpace(b.String())
+	}
+	return ""
 }

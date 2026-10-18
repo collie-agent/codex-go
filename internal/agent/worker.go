@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/collie-agent/codex-go/internal/config"
 	fileContext "github.com/collie-agent/codex-go/internal/context"
@@ -32,6 +33,11 @@ func (w *Worker[T]) Run(reactContext *fileContext.ReactContext) (T, string, []*m
 		return result, "", nil, err
 	}
 	input := reactContext.Format()
+	// 从格式化上下文中取出末尾验收区块，交给 provider 在协议说明之后追加。
+	criteria := reactContext.CurrentStepCompletionCriteria()
+	if criteria != "" {
+		input = strings.TrimSpace(strings.TrimSuffix(input, criteria))
+	}
 	if _, ok := any(result).(ReactResult); ok {
 		// Go 字段标签不会自动进入模型请求，显式提供业务结构和所选格式的示例。
 		input += "\n\n# Required result schema\n\n" + reactResultInstructions
@@ -42,7 +48,7 @@ func (w *Worker[T]) Run(reactContext *fileContext.ReactContext) (T, string, []*m
 			input += "\nLine Protocol example:\nBEGIN RESULT\nSTATUS=\"completed\"\nANSWER=\"Task completed.\"\nEND RESULT"
 		}
 	}
-	result, toolCalls, assistantOutput, err := client.Run(w.ctx, reactContext.DurableState.RunId, input, w.mcpClientSess)
+	result, toolCalls, assistantOutput, err := client.Run(w.ctx, reactContext.DurableState.RunId, input, w.mcpClientSess, criteria)
 	if err != nil {
 		return result, "", nil, err
 	}
