@@ -82,6 +82,82 @@ func TestReactObserveAsync(t *testing.T) {
 	}
 }
 
+func TestReactRetriesOutputParseErrors(t *testing.T) {
+	for _, schema := range []config.LLMOutputSchema{config.JsonLLMOutputSchema, config.LineProtocolLLMOutputSchema} {
+		for _, recover := range []bool{true, false} {
+			name := string(schema) + "/limit"
+			if recover {
+				name = string(schema) + "/recover"
+			}
+			t.Run(name, func(t *testing.T) {
+				bad, good := `{"answer":"broken`, `{"status":"completed","answer":"done"}`
+				wantError := "unexpected end of JSON input"
+				if schema == config.LineProtocolLLMOutputSchema {
+					bad = "BEGIN RESULT\nANSWER=\"broken\nanswer\"\nEND RESULT"
+					good = "BEGIN RESULT\nSTATUS=\"completed\"\nANSWER=\"done\"\nEND RESULT"
+					wantError = "invalid JSON literal for ANSWER"
+				}
+				calls := 0
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+					calls++
+					var request struct {
+						Input string `json:"input"`
+					}
+					if err := json.NewDecoder(req.Body).Decode(&request); err != nil {
+						t.Error(err)
+					}
+					if calls > 1 {
+						for _, want := range []string{wantError, "Retry", "broken"} {
+							if !strings.Contains(request.Input, want) {
+								t.Errorf("retry input missing %q: %s", want, request.Input)
+							}
+						}
+					}
+					text := bad
+					if recover && calls == 4 {
+						text = good
+					}
+					writeObservationResponse(w, []any{observationMessage(text)})
+				}))
+				defer server.Close()
+				// 最后一轮也应允许纠正格式，不消耗工具执行的轮数预算。
+				process := &ReactProcess[ReactResult]{ctx: t.Context(), maxTurn: 1}
+				cfg := &config.AgentConfig{LLMConfig: &config.LLMConfig{
+					BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: schema,
+				}}
+				got, next, err := process.Run(cfg, &fileContext.DurableState{RunId: "retry-task", Goal: "answer"})
+				if calls != 4 {
+					t.Fatalf("requests = %d, want 4; err = %v", calls, err)
+				}
+				if recover {
+					if err != nil || got.Answer != "done" || len(next) != 1 || next[0] != EndAgentType {
+						t.Fatalf("Run() = %+v, %v, %v", got, next, err)
+					}
+				} else if err == nil || !strings.Contains(err.Error(), "output format errors exceeded limit (3)") || !strings.Contains(err.Error(), wantError) {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestReactDoesNotRetryRequestErrors(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		calls++
+		http.Error(w, "bad request", http.StatusBadRequest)
+	}))
+	defer server.Close()
+	process := &ReactProcess[ReactResult]{ctx: t.Context(), maxTurn: 5}
+	cfg := &config.AgentConfig{LLMConfig: &config.LLMConfig{
+		BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema,
+	}}
+	_, _, err := process.Run(cfg, &fileContext.DurableState{RunId: "request-error"})
+	if err == nil || !strings.Contains(err.Error(), "create response") || calls != 1 {
+		t.Fatalf("requests = %d, err = %v", calls, err)
+	}
+}
+
 func TestReactObserveFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

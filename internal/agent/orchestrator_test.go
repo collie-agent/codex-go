@@ -146,6 +146,34 @@ func TestOrchestratorRunReactConstructionFailure(t *testing.T) {
 	}
 }
 
+func TestPlanExecutorPreservesFailedStepIndex(t *testing.T) {
+	o := NewProcessorOrchestrator(context.Background(), filemcp.Config{Workspace: filepath.Join(t.TempDir(), "missing")})
+	o.executionMode = PlanAgentType
+	state := &fileContext.DurableState{
+		Goal: "test", CurrentStepIndex: 1,
+		StepExecutions: []StepExecution{{Status: CompletedExecutionStatus}, {Status: PendingExecutionStatus}},
+	}
+	output, err := o.runProcessor(ReactAgentType, &config.AgentConfig{LLMConfig: &config.LLMConfig{}}, state)
+	if err == nil || output.state == nil || output.state.CurrentStepIndex != 1 || output.state.StepExecutions[1].Status != FailedExecutionStatus || output.state.StepExecutions[0].Status != CompletedExecutionStatus {
+		t.Fatalf("runProcessor() state=%+v err=%v", output.state, err)
+	}
+}
+
+func TestPlanExecutorRejectsInvalidStepIndex(t *testing.T) {
+	o := NewProcessorOrchestrator(context.Background(), filemcp.Config{})
+	o.executionMode = PlanAgentType
+	for _, index := range []int{-1, 0, 2} {
+		state := &fileContext.DurableState{
+			Goal: "test", CurrentStepIndex: index,
+			StepExecutions: []StepExecution{{Status: CompletedExecutionStatus}, {Status: PendingExecutionStatus}},
+		}
+		_, err := o.runProcessor(ReactAgentType, &config.AgentConfig{LLMConfig: &config.LLMConfig{}}, state)
+		if err == nil || !strings.Contains(err.Error(), "no pending step at index") || state.StepExecutions[1].Status != PendingExecutionStatus {
+			t.Fatalf("runProcessor() index=%d err=%v state=%+v", index, err, state)
+		}
+	}
+}
+
 func TestOrchestratorConcurrentBatches(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

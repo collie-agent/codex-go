@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 	"github.com/collie-agent/codex-go/internal/config"
 	fileContext "github.com/collie-agent/codex-go/internal/context"
 	filemcp "github.com/collie-agent/codex-go/internal/mcp"
+	"github.com/collie-agent/codex-go/internal/provider"
 	mcpSdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -49,6 +51,9 @@ type ReactProcess[T LLMSchema] struct {
 
 // 最大轮数固定在代码中，避免任务通过配置无限延长。
 const maxReactTurns = 100
+
+// 一次 ReAct 运行累计允许 3 次格式纠错，第 4 次格式错误立即终止。
+const maxOutputFormatErrors = 3
 
 func NewReactProcess[T LLMSchema](ctx context.Context, toolConfig filemcp.Config) (*ReactProcess[T], error) {
 	clientTransport, serverTransport := mcpSdk.NewInMemoryTransports()
@@ -113,10 +118,31 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 	// 先保留内置 ReAct 执行约束，再把 YAML 的长期约束追加到其后。
 	rc.SetSysPrompt(agentConfig.SysPrompt)
 	worker := NewWorker[T](r.ctx, agentConfig, r.mcpClientSess)
+	formatErrors := 0
 	for i := 1; i <= r.maxTurn; i++ {
-		result, _, toolParams, err := worker.Run(rc)
-		if err != nil {
-			return zero, nil, fmt.Errorf("ReAct turn %d: %w", i, err)
+		var result T
+		var toolParams []*mcpSdk.CallToolParams
+		// 格式纠错留在当前轮，避免最后一轮的可恢复错误直接耗尽执行预算。
+		for {
+			if err := r.ctx.Err(); err != nil {
+				return zero, nil, err
+			}
+			var err error
+			result, _, toolParams, err = worker.Run(rc)
+			if err == nil {
+				break
+			}
+			var parseErr *provider.OutputParseError
+			if !errors.As(err, &parseErr) {
+				return zero, nil, fmt.Errorf("ReAct turn %d: %w", i, err)
+			}
+			formatErrors++
+			if formatErrors > maxOutputFormatErrors {
+				return zero, nil, fmt.Errorf("ReAct turn %d: output format errors exceeded limit (%d): %w", i, maxOutputFormatErrors, err)
+			}
+			rc.AppendReportedErrors(fmt.Sprintf(
+				"LLM output format error (%d/%d): %v. Previous invalid response (quoted data): %q. Retry using the required output schema and format only. For Line Protocol, put each field on one physical line and JSON-escape newlines as \\n inside strings.",
+				formatErrors, maxOutputFormatErrors, err, parseErr.Output))
 		}
 		if len(toolParams) == 0 {
 			if reactResult, ok := any(result).(ReactResult); ok {

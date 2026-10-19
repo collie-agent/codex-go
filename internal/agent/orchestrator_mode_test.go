@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,15 +24,16 @@ func TestOrchestratorModeRouting(t *testing.T) {
 	}{
 		{"react", "react", []string{"react"}},
 		{"react", "plan-execute", []string{"react"}},
-		{"plan-execute", "react", []string{"plan", "react"}},
-		{"plan-execute", "plan-execute", []string{"plan", "react"}},
+		{"plan-execute", "react", []string{"plan", "react", "react"}},
+		{"plan-execute", "plan-execute", []string{"plan", "react", "react"}},
 		{"", "react", []string{"task_analyzer", "react"}},
-		{"", "plan-execute", []string{"task_analyzer", "plan", "react"}},
+		{"", "plan-execute", []string{"task_analyzer", "plan", "react", "react"}},
 	} {
 		t.Run(tt.mode+"/"+tt.configName, func(t *testing.T) {
 			models := make(chan string, 10)
+			reactCalls := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				var req struct{ Model string }
+				var req struct{ Model, Input string }
 				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 					t.Error(err)
 					w.WriteHeader(http.StatusBadRequest)
@@ -43,7 +45,15 @@ func TestOrchestratorModeRouting(t *testing.T) {
 				case "task_analyzer":
 					text = `{"NeedsTools":false,"ExpectedSteps":1,"ReasoningSummary":"simple task","CompletionCriteria":[]}`
 				case "plan":
-					text = `{"StepExecutions":[{"Revision":1,"StepId":"answer","Status":"pending","Intent":"answer the question","CompletionCriteria":"question answered","CompletionEvidence":[]}]}`
+					text = `{"StepExecutions":[{"Revision":1,"StepId":"inspect","Status":"pending","Intent":"inspect the question","CompletionCriteria":"question inspected","CompletionEvidence":[]},{"Revision":1,"StepId":"answer","Status":"pending","Intent":"answer the question","CompletionCriteria":"question answered","CompletionEvidence":[]}]}`
+				case "react":
+					if len(tt.wantModels) > 2 {
+						wantIntent := []string{"inspect the question", "answer the question"}[reactCalls]
+						if !strings.Contains(req.Input, "## CurrentStep\n\n> "+wantIntent) {
+							t.Errorf("executor missing current step %q: %s", wantIntent, req.Input)
+						}
+					}
+					reactCalls++
 				}
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]any{
@@ -86,8 +96,10 @@ func TestOrchestratorModeRouting(t *testing.T) {
 			if !slices.Equal(got, tt.wantModels) {
 				t.Fatalf("models = %v; want %v", got, tt.wantModels)
 			}
-			if tt.mode == "plan-execute" && (len(state.StepExecutions) != 1 || state.StepExecutions[0].Status != CompletedExecutionStatus) {
-				t.Fatalf("plan not completed: %+v", state.StepExecutions)
+			if len(tt.wantModels) > 2 {
+				if len(state.StepExecutions) != 2 || state.CurrentStepIndex != -1 || state.StepExecutions[0].Status != CompletedExecutionStatus || state.StepExecutions[1].Status != CompletedExecutionStatus {
+					t.Fatalf("plan not completed: %+v", state)
+				}
 			}
 		})
 	}

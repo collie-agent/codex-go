@@ -24,6 +24,30 @@ func plannerTestConfig(baseURL string, schema config.LLMOutputSchema) *config.Ag
 	}
 }
 
+func TestPlannerSelectsCurrentStep(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		statuses []ExecutionStatus
+		want     int
+		wantNext AgentProcessorType
+	}{
+		{"first pending", []ExecutionStatus{PendingExecutionStatus, PendingExecutionStatus}, 0, ReactAgentType},
+		{"resume old plan", []ExecutionStatus{CompletedExecutionStatus, PendingExecutionStatus}, 1, ReactAgentType},
+		{"completed plan", []ExecutionStatus{CompletedExecutionStatus, CompletedExecutionStatus}, -1, EndAgentType},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			state := &fileContext.DurableState{Goal: "test"}
+			for _, status := range tt.statuses {
+				state.StepExecutions = append(state.StepExecutions, StepExecution{Status: status})
+			}
+			_, next, err := NewPlannerProcess(context.Background()).Run(plannerTestConfig("http://unused.invalid", config.JsonLLMOutputSchema), state)
+			if err != nil || state.CurrentStepIndex != tt.want || !slices.Equal(next, []AgentProcessorType{tt.wantNext}) {
+				t.Fatalf("Run() index=%d next=%v err=%v", state.CurrentStepIndex, next, err)
+			}
+		})
+	}
+}
+
 // 通过本地 Responses API 走完整请求和解码链路，无需真实 API 凭证。
 func plannerTestServer(t *testing.T, text string, toolCall bool) *httptest.Server {
 	t.Helper()

@@ -174,11 +174,8 @@ func (c *ReactContext) format() string {
 				plan, _ := json.Marshal(c.DurableState.StepExecutions)
 				writeField("StepExecutions", string(plan))
 			}
-			for _, step := range c.DurableState.StepExecutions {
-				if step.Status == RunningExecutionStatus {
-					writeField("CurrentStep", step.Intent)
-					break
-				}
+			if step := c.DurableState.CurrentStep(); step != nil && step.Status == RunningExecutionStatus {
+				writeField("CurrentStep", step.Intent)
 			}
 		}
 	}
@@ -210,6 +207,16 @@ type DurableState struct {
 	Goal               string
 	CompletionCriteria []string //task analyzer提供
 	StepExecutions     []StepExecution
+	// CurrentStepIndex 由 planner 选择，executor 完成或失败后保留；-1 表示计划已结束。
+	CurrentStepIndex int
+}
+
+// CurrentStep 按索引读取当前步骤；零值兼容从第一步开始的新计划。
+func (s *DurableState) CurrentStep() *StepExecution {
+	if s == nil || s.CurrentStepIndex < 0 || s.CurrentStepIndex >= len(s.StepExecutions) {
+		return nil
+	}
+	return &s.StepExecutions[s.CurrentStepIndex]
 }
 
 type ToolResult struct {
@@ -286,24 +293,19 @@ func (c *ReactContext) CurrentStepCompletionCriteria() string {
 }
 
 func (c *ReactContext) currentStepCompletionCriteria() string {
-	if c.DurableState == nil {
+	step := c.DurableState.CurrentStep()
+	if step == nil || step.Status != RunningExecutionStatus {
 		return ""
 	}
-	for _, step := range c.DurableState.StepExecutions {
-		if step.Status != RunningExecutionStatus {
-			continue
-		}
-		var b strings.Builder
-		b.WriteString("# CurrentStepCompletionCriteria\n\n")
-		criteria := step.CompletionCriteria
-		// 兼容已有持久计划：没有独立验收标准时，按该步骤声明的预期结果验收。
-		if strings.TrimSpace(criteria) == "" {
-			criteria = step.Intent
-		}
-		for _, line := range strings.Split(criteria, "\n") {
-			b.WriteString("> " + line + "\n")
-		}
-		return strings.TrimSpace(b.String())
+	var b strings.Builder
+	b.WriteString("# CurrentStepCompletionCriteria\n\n")
+	criteria := step.CompletionCriteria
+	// 兼容已有持久计划：没有独立验收标准时，按该步骤声明的预期结果验收。
+	if strings.TrimSpace(criteria) == "" {
+		criteria = step.Intent
 	}
-	return ""
+	for _, line := range strings.Split(criteria, "\n") {
+		b.WriteString("> " + line + "\n")
+	}
+	return strings.TrimSpace(b.String())
 }

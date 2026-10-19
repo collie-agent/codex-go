@@ -46,17 +46,21 @@ func (p *PlannerProcess) Run(agentConfig *config.AgentConfig, durableState *file
 	}
 	// 已生成的计划保留执行记录；后续轮次只选择剩余步骤，不重新生成初始计划。
 	if len(durableState.StepExecutions) > 0 {
-		hasPending := false
-		for _, step := range durableState.StepExecutions {
+		stepIndex := -1
+		for i, step := range durableState.StepExecutions {
 			switch step.Status {
 			case PendingExecutionStatus:
-				hasPending = true
+				if stepIndex < 0 {
+					stepIndex = i
+				}
 			case CompletedExecutionStatus:
 			default:
 				return PlannerResult{}, nil, fmt.Errorf("planner: step %q has unexpected status %q", step.StepId, step.Status)
 			}
 		}
-		if hasPending {
+		// 校验成功后再发布选择结果，也为没有索引的旧持久计划恢复当前步骤。
+		durableState.CurrentStepIndex = stepIndex
+		if stepIndex >= 0 {
 			return PlannerResult{StepExecutions: durableState.Clone().StepExecutions}, []AgentProcessorType{ReactAgentType}, nil
 		}
 		return PlannerResult{StepExecutions: durableState.Clone().StepExecutions}, []AgentProcessorType{EndAgentType}, nil
@@ -93,5 +97,6 @@ func (p *PlannerProcess) Run(agentConfig *config.AgentConfig, durableState *file
 		}
 		ids[id] = struct{}{}
 	}
+	durableState.CurrentStepIndex = 0
 	return result, []AgentProcessorType{ReactAgentType}, nil
 }

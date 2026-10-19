@@ -224,21 +224,19 @@ func (o *ProcessorOrchestrator) runProcessor(agentType AgentProcessorType, agent
 	case PlanAgentType:
 		process := NewPlannerProcess(o.ctx)
 		plan, next, err := process.Run(agentConfig, state)
-		return processorResult{plan: &plan, next: next}, err
+		if err != nil {
+			return processorResult{}, err
+		}
+		return processorResult{plan: &plan, state: state, next: next}, nil
 	case ReactAgentType:
 		planExecute := o.executionMode == PlanAgentType || o.rootAgentType == PlanAgentType
-		stepIndex := -1
+		var step *fileContext.StepExecution
 		if planExecute {
-			for i := range state.StepExecutions {
-				if state.StepExecutions[i].Status == PendingExecutionStatus {
-					stepIndex = i
-					state.StepExecutions[i].Status = RunningExecutionStatus
-					break
-				}
+			step = state.CurrentStep()
+			if step == nil || step.Status != PendingExecutionStatus {
+				return processorResult{}, fmt.Errorf("plan executor: no pending step at index %d", state.CurrentStepIndex)
 			}
-			if stepIndex < 0 {
-				return processorResult{}, fmt.Errorf("plan executor: no pending step")
-			}
+			step.Status = RunningExecutionStatus
 		}
 		var process *ReactProcess[ReactResult]
 		var err error
@@ -249,7 +247,7 @@ func (o *ProcessorOrchestrator) runProcessor(agentType AgentProcessorType, agent
 		}
 		if err != nil {
 			if planExecute {
-				state.StepExecutions[stepIndex].Status = FailedExecutionStatus
+				step.Status = FailedExecutionStatus
 				return processorResult{state: state}, fmt.Errorf("create processor %q: %w", agentType, err)
 			}
 			return processorResult{}, fmt.Errorf("create processor %q: %w", agentType, err)
@@ -258,7 +256,6 @@ func (o *ProcessorOrchestrator) runProcessor(agentType AgentProcessorType, agent
 		// ReAct 不负责选择运行模式；orchestrator 决定结束或回到 planner。
 		next := []AgentProcessorType{EndAgentType}
 		if planExecute {
-			step := &state.StepExecutions[stepIndex]
 			if err != nil {
 				step.Status = FailedExecutionStatus
 				return processorResult{state: state}, err

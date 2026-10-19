@@ -19,6 +19,17 @@ type responsesApiClient[T any] struct {
 	agentConfig *config.AgentConfig
 }
 
+// OutputParseError 区分可由模型纠正的输出格式错误和请求、配置等运行错误。
+// Output 保留原始响应，便于下一次请求指出具体需要纠正的内容。
+type OutputParseError struct {
+	Output string
+	Err    error
+}
+
+func (e *OutputParseError) Error() string { return "parse response output: " + e.Err.Error() }
+
+func (e *OutputParseError) Unwrap() error { return e.Err }
+
 // NewResponsesApiClient creates a client whose Run method returns T.
 // allowTools 是 Agent 的工具权限；nil 或空 map 都不向模型提供工具。
 func NewResponsesApiClient[T any](llmConfig *config.LLMConfig, allowTools map[config.McpToolName]struct{}) (*responsesApiClient[T], error) {
@@ -183,7 +194,7 @@ func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId,
 	}
 	if err := outputParser.Parse(text, &result); err != nil {
 		var zero T
-		return zero, nil, "", fmt.Errorf("task %s: parse response output: %w", taskId, err)
+		return zero, nil, "", fmt.Errorf("task %s: %w", taskId, &OutputParseError{Output: response.OutputText(), Err: err})
 	}
 	return result, toolCalls, "", nil
 }
