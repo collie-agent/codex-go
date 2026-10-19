@@ -69,7 +69,8 @@ func TestReactObserveAsync(t *testing.T) {
 	}
 	// Formatting and new facts must remain available while the request waits.
 	rc.AppendConfirmedFacts("fact added during observation")
-	if !strings.Contains(rc.Format(), "updated") {
+	_, results := rc.FormatForModel()
+	if len(results) != 1 || !strings.Contains(results[0].Result, "updated") {
 		t.Fatal("raw result missing while observation is pending")
 	}
 	release <- struct{}{}
@@ -96,10 +97,14 @@ func TestReactObserveFailure(t *testing.T) {
 	r.updateContext(nil, &mcpSdk.CallToolParams{Name: "apply_patch", Meta: mcpSdk.Meta{toolCallIDMetaKey: "call_patch"}}, rc, errors.New("tool failed"), agentConfig)
 	waitForReactObservation(t, ctx, rc, "observation failed")
 	formatted := rc.Format()
-	for _, want := range []string{"call_patch", "parse response output", "tool failed"} {
+	for _, want := range []string{"call_patch", "parse response output"} {
 		if !strings.Contains(formatted, want) {
 			t.Errorf("context missing %q: %s", want, formatted)
 		}
+	}
+	_, results := rc.FormatForModel()
+	if len(results) != 1 || !strings.Contains(results[0].Error, "tool failed") {
+		t.Fatal("tool error missing from tool messages")
 	}
 }
 
@@ -164,8 +169,8 @@ func TestUpdateContext(t *testing.T) {
 	if !strings.Contains(got.Result, "permission denied") || !strings.Contains(got.Result, "a.go") || !strings.Contains(got.Error, `tool "grep" (call_id="call_123"): MCP call failed: transport error`) || !strings.Contains(got.Error, "tool execution failed (MCP isError=true): permission denied") || !strings.Contains(got.Error, `Tool arguments: {"pattern":"test"}`) {
 		t.Fatalf("unexpected result: %+v", got)
 	}
-	if formatted := rc.Format(); !strings.Contains(formatted, "transport error") || !strings.Contains(formatted, "permission denied") {
-		t.Fatal("tool error missing from LLM context")
+	if formatted := rc.Format(); strings.Contains(formatted, "transport error") || strings.Contains(formatted, "permission denied") {
+		t.Fatal("raw tool error duplicated in ReAct context")
 	}
 	r.updateContext(nil, &mcpSdk.CallToolParams{Name: "read_file"}, rc, errors.New("read failed"), nil)
 	if len(rc.ToolResults) != 3 || !strings.Contains(rc.ToolResults[2].Error, "MCP call failed: read failed") {

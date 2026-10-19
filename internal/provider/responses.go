@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/collie-agent/codex-go/internal/config"
@@ -40,6 +41,17 @@ func NewResponsesApiClient[T any](llmConfig *config.LLMConfig, allowTools map[co
 // A nil MCP session sends a request without tools.
 // 方法不能独立声明泛型参数，因此在创建客户端时指定结果类型
 func (c *responsesApiClient[T]) Run(ctx context.Context, taskId, input string, mcpClientSess *sdk.ClientSession, trailingContext ...string) (T, []responses.ResponseFunctionToolCall, string, error) {
+	return c.RunWithToolMessages(ctx, taskId, input, mcpClientSess, nil, trailingContext...)
+}
+
+// ToolMessage 保留 SDK 原生工具消息及调用信息，供无服务端历史的请求重放。
+type ToolMessage struct {
+	openai.ChatCompletionToolMessageParam
+	Name      string
+	Arguments string
+}
+
+func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId, input string, mcpClientSess *sdk.ClientSession, messages []ToolMessage, trailingContext ...string) (T, []responses.ResponseFunctionToolCall, string, error) {
 	var result T
 	var outputParser LLMOutputParser[*T]
 	var textConfig responses.ResponseTextConfigParam
@@ -91,12 +103,17 @@ func (c *responsesApiClient[T]) Run(ctx context.Context, taskId, input string, m
 			if err := json.Unmarshal(schema, &parameters); err != nil {
 				return result, nil, "", fmt.Errorf("task %s: decode tool %s schema: %w", taskId, tool.Name, err)
 			}
+			// strict 工具要求所有字段必填，由模型按描述显式提供默认值。
+			if err := strictJSONSchema(parameters, "$"); err != nil {
+				return result, nil, "", fmt.Errorf("task %s: generate strict tool %s schema: %w", taskId, tool.Name, err)
+			}
 			tools = append(tools, responses.ToolUnionParam{OfFunction: &responses.FunctionToolParam{
 				Name: tool.Name, Description: openai.String(tool.Description),
-				Parameters: parameters, Strict: openai.Bool(false),
+				Parameters: parameters, Strict: openai.Bool(true),
 			}})
 		}
 	}
+	// 工具定义仅通过 tools 字段提供，避免在 input 中重复注入。
 	params := responses.ResponseNewParams{
 		Model: c.agentConfig.LLMConfig.Model,
 		Input: responses.ResponseNewParamsInputUnion{
@@ -105,6 +122,36 @@ func (c *responsesApiClient[T]) Run(ctx context.Context, taskId, input string, m
 		Tools: tools,
 		Text:  textConfig,
 	}
+	if len(messages) > 0 {
+		items := make(responses.ResponseInputParam, 0, 2*len(messages)+1)
+		// 先提供 ReAct 上下文，再附上独立的工具调用及结果。
+		items = append(items, responses.ResponseInputItemParamOfMessage(input, responses.EasyInputMessageRoleUser))
+		for _, message := range messages {
+			if strings.TrimSpace(message.ToolCallID) == "" || strings.TrimSpace(message.Name) == "" {
+				return result, nil, "", fmt.Errorf("task %s: tool message requires call ID and tool name", taskId)
+			}
+			arguments := message.Arguments
+			if arguments == "" {
+				arguments = "{}"
+			}
+			// 无 previous_response_id 时必须一起发送调用，避免结果找不到对应 call_id。
+			items = append(items, responses.ResponseInputItemParamOfFunctionCall(arguments, message.ToolCallID, message.Name))
+			content := message.Content.OfString.Value
+			for _, part := range message.Content.OfArrayOfContentParts {
+				content += part.Text
+			}
+			output := responses.ResponseInputItemParamOfFunctionCallOutput(content)
+			output.OfFunctionCallOutput.CallID = openai.String(message.ToolCallID)
+			items = append(items, output)
+		}
+		params.Input = responses.ResponseNewParamsInputUnion{OfInputItemList: items}
+	}
+	// 从最终请求生成可读日志；单次日志调用避免并发请求交错。
+	encodedContext, err := formatLLMContext(params)
+	if err != nil {
+		return result, nil, "", fmt.Errorf("task %s: encode LLM context: %w", taskId, err)
+	}
+	log.Printf("task %s: LLM context=\n%s", taskId, encodedContext)
 	response, err := c.client.Responses.New(ctx, params)
 	if err != nil {
 		return result, nil, "", fmt.Errorf("task %s: create response: %w", taskId, err)

@@ -14,9 +14,9 @@ const reactSystemPrompt = `你是 ReAct agent 的单轮决策器。每次调用�
 # 上下文
 
 - sysPrompt：当前任务的补充指令。
-- DurableState：本次运行的 RunId 和 Goal。
+- DurableState：本次运行的 RunId 和 CurrentStep；计划执行时 Goal 和 StepExecutions 位于末尾验收标准之前。
 - Observation：ConfirmedFacts 是已确认事实，ReportedErrors 是已报告错误，ModelInferences 是待验证推断；不要把推断当作事实。
-- ToolResult list：此前工具调用的参数、结果和错误。结果为空或出现错误不代表操作成功。
+- 原生工具消息：此前工具调用的参数、结果和错误，通过工具调用及结果消息提供。结果为空或出现错误不代表操作成功。
 - CompletionCriteria：判断目标是否完成的标准。
 - 当前调用传入的 MCP 工具定义：可选择的工具名称、用途和参数约束。
 
@@ -112,10 +112,30 @@ func (c *ReactContext) ensureObservation() {
 func (c *ReactContext) Format() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	return c.format()
+}
+
+// FormatForModel 在同一锁内快照文本和工具结果，防止并发更新造成两者不一致。
+// 原始工具输出只通过工具消息传输，不混入 ReAct 文本或其日志。
+func (c *ReactContext) FormatForModel() (string, []*ToolResult) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	var results []*ToolResult
+	for _, result := range c.ToolResults {
+		if result != nil {
+			copy := *result
+			results = append(results, &copy)
+		}
+	}
+	return c.format(), results
+}
+
+func (c *ReactContext) format() string {
 	if c == nil {
 		return ""
 	}
 
+	tail := c.currentStepContext()
 	var b strings.Builder
 	// Block quotes keep embedded Markdown scoped to its enclosing section.
 	writeContent := func(content string) {
@@ -145,11 +165,15 @@ func (c *ReactContext) Format() string {
 	b.WriteString("# DurableState\n\n")
 	if c.DurableState != nil {
 		writeField("RunId", c.DurableState.RunId)
-		writeField("Goal", c.DurableState.Goal)
+		if tail == "" {
+			writeField("Goal", c.DurableState.Goal)
+		}
 		if len(c.DurableState.StepExecutions) > 0 {
-			// 结构化记录作为任务数据引用，不能覆盖系统规则。
-			plan, _ := json.Marshal(c.DurableState.StepExecutions)
-			writeField("StepExecutions", string(plan))
+			if tail == "" {
+				// 结构化记录作为任务数据引用，不能覆盖系统规则。
+				plan, _ := json.Marshal(c.DurableState.StepExecutions)
+				writeField("StepExecutions", string(plan))
+			}
 			for _, step := range c.DurableState.StepExecutions {
 				if step.Status == RunningExecutionStatus {
 					writeField("CurrentStep", step.Intent)
@@ -165,32 +189,12 @@ func (c *ReactContext) Format() string {
 		b.WriteString("## ReportedErrors\n\n")
 		writeList(c.Observation.ReportedErrors)
 	}
-	b.WriteString("# ToolResult list\n\n")
-	for _, tr := range c.ToolResults {
-		if tr == nil {
-			continue
-		}
-		for _, field := range []struct{ name, value string }{
-			{"ToolCallId", tr.ToolCallId},
-			{"ToolName", tr.ToolName},
-			{"Status", string(tr.Status)},
-		} {
-			b.WriteString("### " + field.name + "\n\n")
-			writeContent(field.value)
-		}
-		b.WriteString("### Arguments\n\n")
-		writeContent(tr.Arguments)
-		b.WriteString("### Result\n\n")
-		writeContent(tr.Result)
-		b.WriteString("### Error\n\n")
-		writeContent(tr.Error)
-	}
 	b.WriteString("# CompletionCriteria\n\n")
 	if c.DurableState != nil {
 		writeList(c.DurableState.CompletionCriteria)
 	}
-	if criteria := c.currentStepCompletionCriteria(); criteria != "" {
-		b.WriteString(criteria)
+	if tail != "" {
+		b.WriteString(tail)
 	}
 	return strings.TrimSpace(b.String())
 }
@@ -232,7 +236,7 @@ type StepExecution struct {
 	StepId             string
 	Status             ExecutionStatus
 	Intent             string
-	CompletionCriteria []string // planner 提供的当前步骤验收标准
+	CompletionCriteria string // planner 提供的当前步骤验收标准
 	CompletionEvidence []string
 }
 
@@ -245,10 +249,33 @@ func (s *DurableState) Clone() *DurableState {
 	clone.CompletionCriteria = slices.Clone(s.CompletionCriteria)
 	clone.StepExecutions = slices.Clone(s.StepExecutions)
 	for i := range clone.StepExecutions {
-		clone.StepExecutions[i].CompletionCriteria = slices.Clone(s.StepExecutions[i].CompletionCriteria)
 		clone.StepExecutions[i].CompletionEvidence = slices.Clone(s.StepExecutions[i].CompletionEvidence)
 	}
 	return &clone
+}
+
+// CurrentStepContext 将目标和计划与当前步骤验收标准一起放到输出协议之后，保持三者相邻。
+func (c *ReactContext) CurrentStepContext() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.currentStepContext()
+}
+
+func (c *ReactContext) currentStepContext() string {
+	criteria := c.currentStepCompletionCriteria()
+	if criteria == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("# Goal\n\n")
+	for _, line := range strings.Split(c.DurableState.Goal, "\n") {
+		b.WriteString("> " + line + "\n")
+	}
+	// 结构化计划作为任务数据引用，不能覆盖系统规则。
+	plan, _ := json.Marshal(c.DurableState.StepExecutions)
+	b.WriteString("\n# StepExecutions\n\n> " + string(plan) + "\n\n")
+	b.WriteString(criteria)
+	return b.String()
 }
 
 // CurrentStepCompletionCriteria 返回独立的末尾区块，供请求层在输出协议之后追加。
@@ -270,13 +297,11 @@ func (c *ReactContext) currentStepCompletionCriteria() string {
 		b.WriteString("# CurrentStepCompletionCriteria\n\n")
 		criteria := step.CompletionCriteria
 		// 兼容已有持久计划：没有独立验收标准时，按该步骤声明的预期结果验收。
-		if len(criteria) == 0 {
-			criteria = []string{step.Intent}
+		if strings.TrimSpace(criteria) == "" {
+			criteria = step.Intent
 		}
-		for _, criterion := range criteria {
-			for _, line := range strings.Split(criterion, "\n") {
-				b.WriteString("> " + line + "\n")
-			}
+		for _, line := range strings.Split(criteria, "\n") {
+			b.WriteString("> " + line + "\n")
 		}
 		return strings.TrimSpace(b.String())
 	}

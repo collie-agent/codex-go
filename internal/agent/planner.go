@@ -88,13 +88,8 @@ func (p *PlannerProcess) Run(agentConfig *config.AgentConfig, durableState *file
 		if _, exists := ids[id]; exists {
 			return PlannerResult{}, nil, fmt.Errorf("task %s: planner returned duplicate StepId %q", taskID, id)
 		}
-		if len(step.CompletionCriteria) == 0 {
-			return PlannerResult{}, nil, fmt.Errorf("task %s: planner step %d requires CompletionCriteria", taskID, i+1)
-		}
-		for _, criterion := range step.CompletionCriteria {
-			if strings.TrimSpace(criterion) == "" {
-				return PlannerResult{}, nil, fmt.Errorf("task %s: planner step %d returned an empty completion criterion", taskID, i+1)
-			}
+		if strings.TrimSpace(step.CompletionCriteria) == "" {
+			return PlannerResult{}, nil, fmt.Errorf("task %s: planner step %d requires non-empty CompletionCriteria", taskID, i+1)
 		}
 		ids[id] = struct{}{}
 	}

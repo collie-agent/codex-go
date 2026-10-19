@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/collie-agent/codex-go/internal/config"
 	filemcp "github.com/collie-agent/codex-go/internal/mcp"
+	"github.com/google/jsonschema-go/jsonschema"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -22,6 +24,9 @@ func TestNewResponsesApiClientRejectsNilConfig(t *testing.T) {
 
 func TestResponsesRunToolsWithoutHistoryAndClientReuse(t *testing.T) {
 	workspace := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	session := newResponsesTestSession(t, ctx, workspace)
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
@@ -35,6 +40,7 @@ func TestResponsesRunToolsWithoutHistoryAndClientReuse(t *testing.T) {
 			} `json:"text"`
 			Tools []struct {
 				Name       string         `json:"name"`
+				Strict     bool           `json:"strict"`
 				Parameters map[string]any `json:"parameters"`
 			} `json:"tools"`
 			Input              string `json:"input"`
@@ -62,8 +68,56 @@ func TestResponsesRunToolsWithoutHistoryAndClientReuse(t *testing.T) {
 		tools := map[string]bool{}
 		for _, tool := range request.Tools {
 			tools[tool.Name] = true
-			if tool.Parameters["type"] != "object" {
+			if !tool.Strict || tool.Parameters["type"] != "object" || tool.Parameters["additionalProperties"] != false {
 				t.Errorf("tool %s has invalid schema: %v", tool.Name, tool.Parameters)
+			}
+			properties := tool.Parameters["properties"].(map[string]any)
+			required, _ := tool.Parameters["required"].([]any)
+			if len(required) != len(properties) {
+				t.Errorf("tool %s must require every property: %v", tool.Name, tool.Parameters)
+			}
+			for name := range properties {
+				property := properties[name].(map[string]any)
+				if types, ok := property["type"].([]any); ok && slices.Contains(types, any("null")) {
+					t.Errorf("tool %s property %s still allows null", tool.Name, name)
+				}
+				if !slices.Contains(required, any(name)) {
+					t.Errorf("tool %s missing required property %s", tool.Name, name)
+				}
+			}
+			if tool.Name == "list_dir" {
+				depth := properties["depth"].(map[string]any)
+				if depth["type"] != "integer" {
+					t.Errorf("depth must be an integer: %v", depth)
+				}
+				encoded, _ := json.Marshal(tool.Parameters)
+				var schema jsonschema.Schema
+				if err := json.Unmarshal(encoded, &schema); err != nil {
+					t.Fatal(err)
+				}
+				resolved, err := schema.Resolve(nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				args := map[string]any{"path": ".", "depth": 2, "offset": 0, "limit": 200}
+				if err := resolved.Validate(args); err != nil {
+					t.Errorf("valid list_dir arguments rejected: %v", err)
+				}
+				args["depth"] = "2"
+				if err := resolved.Validate(args); err == nil {
+					t.Error("list_dir schema accepted string depth")
+				}
+				args["depth"] = nil
+				if err := resolved.Validate(args); err == nil {
+					t.Error("list_dir schema accepted null depth")
+				}
+				delete(args, "depth")
+				result, err := session.CallTool(r.Context(), &sdk.CallToolParams{Name: "list_dir", Arguments: args})
+				if err != nil {
+					t.Errorf("call list_dir with defaults: %v", err)
+				} else if result.IsError {
+					t.Errorf("list_dir defaults rejected by MCP: %v", result.Content)
+				}
 			}
 		}
 		for _, name := range []string{"read_file", "list_dir", "glob", "grep", "apply_patch"} {
@@ -94,9 +148,6 @@ func TestResponsesRunToolsWithoutHistoryAndClientReuse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	session := newResponsesTestSession(t, ctx, workspace)
 	for range 2 {
 		got, toolCalls, reasoning, err := client.Run(ctx, "test-task", "Read notes.txt", session)
 		if err != nil {

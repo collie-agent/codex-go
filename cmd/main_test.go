@@ -140,7 +140,7 @@ func TestRunAgentUsesYAMLAllowedToolAndReturnsItsResultToModel(t *testing.T) {
 	var requests int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
-			Input string `json:"input"`
+			Input json.RawMessage `json:"input"`
 			Tools []struct {
 				Name string `json:"name"`
 			} `json:"tools"`
@@ -163,8 +163,14 @@ func TestRunAgentUsesYAMLAllowedToolAndReturnsItsResultToModel(t *testing.T) {
 			})
 			return
 		}
-		if !strings.Contains(request.Input, "依赖工具结果") {
-			t.Errorf("second model request did not contain tool result: %s", request.Input)
+		var items []struct {
+			Type, Role, Output string
+			CallID             string `json:"call_id"`
+		}
+		if err := json.Unmarshal(request.Input, &items); err != nil {
+			t.Error(err)
+		} else if len(items) != 3 || items[0].Role != "user" || items[1].Type != "function_call" || items[1].CallID != "call_1" || items[2].Type != "function_call_output" || items[2].CallID != "call_1" || !strings.Contains(items[2].Output, "依赖工具结果") {
+			t.Errorf("second model request did not contain native tool result: %s", request.Input)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id": "resp_final", "status": "completed",
@@ -239,8 +245,8 @@ func TestRunAgentUsesObserveAgentConfiguration(t *testing.T) {
 			observerStarted := make(chan struct{})
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var request struct {
-					Model string `json:"model"`
-					Input string `json:"input"`
+					Model string          `json:"model"`
+					Input json.RawMessage `json:"input"`
 					Tools []struct {
 						Name string `json:"name"`
 					} `json:"tools"`
@@ -250,11 +256,21 @@ func TestRunAgentUsesObserveAgentConfiguration(t *testing.T) {
 					return
 				}
 				w.Header().Set("Content-Type", "application/json")
+				// 首轮和观察器使用字符串；工具执行后的 ReAct 使用结构化输入。
+				var input string
+				if err := json.Unmarshal(request.Input, &input); err != nil {
+					var items []struct{ Content string }
+					if err := json.Unmarshal(request.Input, &items); err != nil || len(items) == 0 {
+						t.Errorf("invalid model input: %s", request.Input)
+						return
+					}
+					input = items[0].Content
+				}
 				switch request.Model {
 				case "react-model":
 					reactRequests++
-					if !strings.Contains(request.Input, "react-prompt") || strings.Contains(request.Input, "base-prompt") {
-						t.Errorf("ReAct used wrong prompt: %s", request.Input)
+					if !strings.Contains(input, "react-prompt") || strings.Contains(input, "base-prompt") {
+						t.Errorf("ReAct used wrong prompt: %s", input)
 					}
 					if len(request.Tools) != 1 || request.Tools[0].Name != "apply_patch" {
 						t.Errorf("ReAct saw tools %v, want only apply_patch", request.Tools)
@@ -285,7 +301,7 @@ func TestRunAgentUsesObserveAgentConfiguration(t *testing.T) {
 						tools []struct {
 							Name string `json:"name"`
 						}
-					}{request.Model, request.Input, request.Tools}
+					}{request.Model, input, request.Tools}
 					close(observerStarted)
 					_ = json.NewEncoder(w).Encode(map[string]any{
 						"id": "resp_observe", "status": "completed",

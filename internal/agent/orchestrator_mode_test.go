@@ -43,7 +43,7 @@ func TestOrchestratorModeRouting(t *testing.T) {
 				case "task_analyzer":
 					text = `{"NeedsTools":false,"ExpectedSteps":1,"ReasoningSummary":"simple task","CompletionCriteria":[]}`
 				case "plan":
-					text = `{"StepExecutions":[{"Revision":1,"StepId":"answer","Status":"pending","Intent":"answer the question","CompletionCriteria":["question answered"],"CompletionEvidence":[]}]}`
+					text = `{"StepExecutions":[{"Revision":1,"StepId":"answer","Status":"pending","Intent":"answer the question","CompletionCriteria":"question answered","CompletionEvidence":[]}]}`
 				}
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]any{

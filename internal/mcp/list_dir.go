@@ -28,9 +28,9 @@ type ListDirResult struct {
 
 type listDirArgs struct {
 	Path   string `json:"path,omitempty" jsonschema:"existing directory relative to the workspace (default .); absolute paths are rejected"`
-	Depth  *int   `json:"depth,omitempty" jsonschema:"positive traversal depth from the requested directory (default 1: immediate children)"`
-	Offset int    `json:"offset,omitempty" jsonschema:"non-negative zero-based entry index (default 0); use next_offset to continue"`
-	Limit  *int   `json:"limit,omitempty" jsonschema:"positive maximum number of entries (default 200); response size may reduce the page"`
+	Depth  *int   `json:"depth,omitempty" jsonschema:"positive traversal depth from the requested directory (default 1: immediate children); use a JSON integer such as 1, never a quoted numeric string"`
+	Offset int    `json:"offset,omitempty" jsonschema:"non-negative zero-based entry index (default 0); use next_offset to continue; use a JSON integer such as 0, never a quoted numeric string"`
+	Limit  *int   `json:"limit,omitempty" jsonschema:"positive maximum number of entries (default 200); use a JSON integer such as 200, never a quoted numeric string; response size may reduce the page"`
 }
 
 // registerListDirTool registers list_dir against a shared workspace root.
@@ -42,7 +42,7 @@ func registerListDirTool(server *sdk.Server, workspace string, timeout time.Dura
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	sdk.AddTool(server, &sdk.Tool{Name: string(mcpconfig.ListDirMCPToolName), Description: `List entries under an existing workspace directory, excluding the directory itself. path defaults to . and must be workspace-relative; absolute paths and paths resolving outside the workspace are rejected. The input directory may resolve through symlinks within the workspace, but traversal does not follow descendant symlinks. depth is a positive traversal depth (default 1: immediate children only). Includes hidden and ignored entries, but excludes entries named .git and their descendants. Returns workspace-relative paths sorted lexicographically and types file, directory, symlink, or other. offset is a zero-based entry index (default 0); limit is a positive maximum entry count (default 200). truncated and next_offset indicate pagination; reuse the same path and depth with offset=next_offset to continue. The 1 MiB response cap may shorten a page; an offset beyond the results returns an empty page.`},
+	sdk.AddTool(server, &sdk.Tool{Name: string(mcpconfig.ListDirMCPToolName), InputSchema: toolInputSchema[listDirArgs](), Description: `List entries under an existing workspace directory, excluding the directory itself. path defaults to . and must be workspace-relative; absolute paths and paths resolving outside the workspace are rejected. The input directory may resolve through symlinks within the workspace, but traversal does not follow descendant symlinks. depth is a positive traversal depth (default 1: immediate children only). Numeric arguments must be JSON integers, never quoted numeric strings. Example arguments: {"path":".","depth":1,"offset":0,"limit":200}. Includes hidden and ignored entries, but excludes entries named .git and their descendants. Returns workspace-relative paths sorted lexicographically and types file, directory, symlink, or other. offset is a zero-based entry index (default 0); limit is a positive maximum entry count (default 200). truncated and next_offset indicate pagination; reuse the same path and depth with offset=next_offset to continue. The 1 MiB response cap may shorten a page; an offset beyond the results returns an empty page.`},
 		func(ctx context.Context, _ *sdk.CallToolRequest, args listDirArgs) (*sdk.CallToolResult, ListDirResult, error) {
 			toolCtx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()

@@ -10,6 +10,7 @@ import (
 	fileContext "github.com/collie-agent/codex-go/internal/context"
 	"github.com/collie-agent/codex-go/internal/provider"
 	mcpSdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/openai/openai-go/v3"
 )
 
 type Worker[T LLMSchema] struct {
@@ -32,9 +33,21 @@ func (w *Worker[T]) Run(reactContext *fileContext.ReactContext) (T, string, []*m
 	if err != nil {
 		return result, "", nil, err
 	}
-	input := reactContext.Format()
-	// 从格式化上下文中取出末尾验收区块，交给 provider 在协议说明之后追加。
-	criteria := reactContext.CurrentStepCompletionCriteria()
+	input, toolResults := reactContext.FormatForModel()
+	var messages []provider.ToolMessage
+	for _, tr := range toolResults {
+		content := tr.Result
+		if tr.Error != "" {
+			// 传输错误也必须回填给对应调用，不能被空结果掩盖。
+			content += "\n\nError: " + tr.Error
+		}
+		messages = append(messages, provider.ToolMessage{
+			ChatCompletionToolMessageParam: *openai.ToolMessage(content, tr.ToolCallId).OfTool,
+			Name:                           tr.ToolName, Arguments: tr.Arguments,
+		})
+	}
+	// 将目标、计划和当前步骤验收标准整体移到协议说明之后，保持相邻顺序。
+	criteria := reactContext.CurrentStepContext()
 	if criteria != "" {
 		input = strings.TrimSpace(strings.TrimSuffix(input, criteria))
 	}
@@ -48,7 +61,7 @@ func (w *Worker[T]) Run(reactContext *fileContext.ReactContext) (T, string, []*m
 			input += "\nLine Protocol example:\nBEGIN RESULT\nSTATUS=\"completed\"\nANSWER=\"Task completed.\"\nEND RESULT"
 		}
 	}
-	result, toolCalls, assistantOutput, err := client.Run(w.ctx, reactContext.DurableState.RunId, input, w.mcpClientSess, criteria)
+	result, toolCalls, assistantOutput, err := client.RunWithToolMessages(w.ctx, reactContext.DurableState.RunId, input, w.mcpClientSess, messages, criteria)
 	if err != nil {
 		return result, "", nil, err
 	}

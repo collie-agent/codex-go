@@ -171,9 +171,32 @@ func (r *ReactProcess[T]) observe(toolResult *fileContext.ToolResult, rc *fileCo
 }
 
 func (r *ReactProcess[T]) batchToolCallings(toolParams []*mcpSdk.CallToolParams, rc *fileContext.ReactContext, agentConfig *config.AgentConfig) {
+	// 执行前获取本批工具的实际 schema；校验失败也作为工具结果返回下一轮。
+	schemas := make(map[string]any)
+	var schemaErr error
+	for tool, err := range r.mcpClientSess.Tools(r.ctx, nil) {
+		if err != nil {
+			schemaErr = fmt.Errorf("list tool schemas: %w", err)
+			break
+		}
+		schemas[tool.Name] = tool.InputSchema
+	}
 	var wg sync.WaitGroup
 	for _, toolParam := range toolParams {
 		wg.Go(func() {
+			err := schemaErr
+			if err == nil {
+				schema, ok := schemas[toolParam.Name]
+				if !ok {
+					err = fmt.Errorf("unknown tool %q; choose an available tool", toolParam.Name)
+				} else {
+					err = validateToolArguments(schema, toolParam.Arguments)
+				}
+			}
+			if err != nil {
+				r.updateContext(&mcpSdk.CallToolResult{IsError: true, Content: []mcpSdk.Content{&mcpSdk.TextContent{Text: err.Error()}}}, toolParam, rc, nil, agentConfig)
+				return
+			}
 			callResult, err := r.mcpClientSess.CallTool(r.ctx, toolParam)
 			r.updateContext(callResult, toolParam, rc, err, agentConfig)
 		})

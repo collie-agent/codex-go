@@ -48,8 +48,8 @@ func plannerTestServer(t *testing.T, text string, toolCall bool) *httptest.Serve
 
 func TestPlannerRun(t *testing.T) {
 	want := PlannerResult{StepExecutions: []StepExecution{
-		{Revision: 1, StepId: "inspect", Status: PendingExecutionStatus, Intent: "读取 README.md，确认当前标题。"},
-		{Revision: 1, StepId: "update", Status: PendingExecutionStatus, Intent: "修改标题并重新读取，确认其他内容未变。"},
+		{Revision: 1, StepId: "inspect", Status: PendingExecutionStatus, Intent: "读取 README.md，确认当前标题。", CompletionCriteria: "当前标题已确认"},
+		{Revision: 1, StepId: "update", Status: PendingExecutionStatus, Intent: "修改标题并重新读取，确认其他内容未变。", CompletionCriteria: "标题已更新且其他内容未变"},
 	}}
 	encoded, err := json.Marshal(want)
 	if err != nil {
@@ -67,12 +67,14 @@ REVISION=1
 STEPID="inspect"
 STATUS="pending"
 INTENT="读取 README.md，确认当前标题。"
+COMPLETIONCRITERIA="当前标题已确认"
 END STEPEXECUTIONS
 BEGIN STEPEXECUTIONS
 REVISION=1
 STEPID="update"
 STATUS="pending"
 INTENT="修改标题并重新读取，确认其他内容未变。"
+COMPLETIONCRITERIA="标题已更新且其他内容未变"
 END STEPEXECUTIONS
 END PLAN`},
 	} {
@@ -169,7 +171,7 @@ func TestPlannerRunValidation(t *testing.T) {
 }
 
 func TestPlannerRunRejectsInvalidResponses(t *testing.T) {
-	valid := StepExecution{Revision: 1, StepId: "inspect", Status: PendingExecutionStatus, Intent: "读取文件", CompletionEvidence: []string{}}
+	valid := StepExecution{Revision: 1, StepId: "inspect", Status: PendingExecutionStatus, Intent: "读取文件", CompletionCriteria: "文件已读取", CompletionEvidence: []string{}}
 	for _, tt := range []struct {
 		name   string
 		change func(*StepExecution)
@@ -177,6 +179,8 @@ func TestPlannerRunRejectsInvalidResponses(t *testing.T) {
 	}{
 		{"blank ID", func(s *StepExecution) { s.StepId = " \t" }, "planner step 1 requires"},
 		{"blank intent", func(s *StepExecution) { s.Intent = " \n" }, "planner step 1 requires"},
+		{"empty criteria", func(s *StepExecution) { s.CompletionCriteria = "" }, "requires non-empty CompletionCriteria"},
+		{"blank criteria", func(s *StepExecution) { s.CompletionCriteria = " \n\t" }, "requires non-empty CompletionCriteria"},
 		{"wrong revision", func(s *StepExecution) { s.Revision = 2 }, "planner step 1 requires"},
 		{"running status", func(s *StepExecution) { s.Status = RunningExecutionStatus }, "planner step 1 requires"},
 		{"completed status", func(s *StepExecution) { s.Status = CompletedExecutionStatus }, "planner step 1 requires"},

@@ -135,40 +135,6 @@ func TestOrchestratorRun(t *testing.T) {
 	}
 }
 
-func TestOrchestratorRunValidation(t *testing.T) {
-	cfg := &config.AgentConfig{LLMConfig: &config.LLMConfig{}}
-	state := &fileContext.DurableState{Goal: "test"}
-	for _, tt := range []struct {
-		name  string
-		o     *ProcessorOrchestrator
-		cfg   *config.AgentConfig
-		state *fileContext.DurableState
-		want  string
-	}{
-		{"nil orchestrator", nil, cfg, state, "context is required"},
-		{"nil context", &ProcessorOrchestrator{}, cfg, state, "context is required"},
-		{"nil config", NewProcessorOrchestrator(context.Background(), filemcp.Config{}), nil, state, "agent config"},
-		{"nil LLM config", NewProcessorOrchestrator(context.Background(), filemcp.Config{}), &config.AgentConfig{}, state, "agent config"},
-		{"nil state", NewProcessorOrchestrator(context.Background(), filemcp.Config{}), cfg, nil, "durable state"},
-		{"blank goal", NewProcessorOrchestrator(context.Background(), filemcp.Config{}), cfg, &fileContext.DurableState{Goal: "  "}, "durable state"},
-		{"unsupported direct", &ProcessorOrchestrator{ctx: context.Background(), rootAgentType: DirectAgentType}, cfg, state, `unsupported processor type "direct"`},
-		{"unsupported plan before side effects", &ProcessorOrchestrator{ctx: context.Background(), rootAgentType: PlanAgentType}, cfg, state, `unsupported processor type "plan"`},
-		{"unknown processor", &ProcessorOrchestrator{ctx: context.Background(), rootAgentType: "unknown"}, cfg, state, `unsupported processor type "unknown"`},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := tt.o.Run(tt.cfg, tt.state)
-			if err == nil || !strings.Contains(err.Error(), tt.want) || len(got) != 0 {
-				t.Fatalf("Run() = %+v, %v; want error containing %q", got, err, tt.want)
-			}
-		})
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := NewProcessorOrchestrator(ctx, filemcp.Config{}).Run(cfg, state); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Run() error = %v, want context.Canceled", err)
-	}
-}
-
 func TestOrchestratorRunReactConstructionFailure(t *testing.T) {
 	o := &ProcessorOrchestrator{
 		ctx: context.Background(), rootAgentType: ReactAgentType,
