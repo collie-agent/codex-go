@@ -261,7 +261,9 @@ func (o *ProcessorOrchestrator) runProcessor(agentType AgentProcessorType, agent
 				return processorResult{state: state}, err
 			}
 			step.Status = CompletedExecutionStatus
-			step.CompletionEvidence = []string{result.Answer}
+			// 直接保留 executor 的结构化结果，供后续步骤读取。
+			step.Observation = slices.Clone(result.Observation)
+			step.CompletionEvidence = slices.Clone(result.CompletionEvidence)
 			next = []AgentProcessorType{PlanAgentType}
 			return processorResult{react: &result, state: state, next: next}, nil
 		}

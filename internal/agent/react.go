@@ -39,6 +39,9 @@ var reserveForeverResultTool = map[config.McpToolName]struct{}{
 type ReactResult struct {
 	Status ReactStatus `json:"status" lineprotocol:"STATUS"`
 	Answer string      `json:"answer" lineprotocol:"ANSWER"`
+	// 计划步骤完成时必填；普通 ReAct 模式使用空列表。
+	Observation        []string `json:"Observation" lineprotocol:"OBSERVATION"`
+	CompletionEvidence []string `json:"CompletionEvidence" lineprotocol:"COMPLETION_EVIDENCE"`
 }
 
 type ReactProcess[T LLMSchema] struct {
@@ -151,6 +154,12 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 				case FailedReactStatus:
 					return zero, nil, fmt.Errorf("ReAct reported failure: %s", reactResult.Answer)
 				case CompletedReactStatus:
+					// 计划步骤必须提供结构化观察与验收证据，不能用 answer 代替。
+					if step := durableState.CurrentStep(); step != nil && step.Status == fileContext.RunningExecutionStatus {
+						if !hasNonEmptyItems(reactResult.Observation) || !hasNonEmptyItems(reactResult.CompletionEvidence) {
+							return zero, nil, fmt.Errorf("ReAct completed step requires non-empty observation and CompletionEvidence")
+						}
+					}
 					if strings.TrimSpace(reactResult.Answer) == "" {
 						return zero, nil, fmt.Errorf("ReAct completed result requires a non-empty answer")
 					}
@@ -296,11 +305,25 @@ func (r *ReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, toolP
 	})
 	// Log the recorded result and the resulting ReAct context together so
 	// concurrent tool calls remain distinguishable in the process output.
-	log.Printf("tool result: %+v\nReact context:\n%s", result, rc.Format())
-	if config.McpToolName(toolParam.Name) == config.ApplyPatchMCPToolName {
+	log.Printf("tool result: %+v\nReact context:\n%s", result, rc.FormatForLog())
+	if config.McpToolName(toolParam.Name) == config.ApplyPatchMCPToolName || config.McpToolName(toolParam.Name) == config.ExecMCPToolName {
+		// exec 的参数和原始结果随快照交给观察器，由 LLM 筛选影响后续决策的新增信息。
 		// Observation is a separate processor and must use its own resolved
 		// settings rather than inheriting ReAct's model or custom prompt.
 		observerConfig := agentConfig.ForAgent("observe")
 		r.observe(result, rc, observerConfig)
 	}
+}
+
+// hasNonEmptyItems 拒绝缺失列表和空白条目，避免无内容的结果通过步骤验收。
+func hasNonEmptyItems(items []string) bool {
+	if len(items) == 0 {
+		return false
+	}
+	for _, item := range items {
+		if strings.TrimSpace(item) == "" {
+			return false
+		}
+	}
+	return true
 }

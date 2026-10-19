@@ -33,6 +33,7 @@ func (w *Worker[T]) Run(reactContext *fileContext.ReactContext) (T, string, []*m
 	if err != nil {
 		return result, "", nil, err
 	}
+	client.SetContextLogLabel("react")
 	input, toolResults := reactContext.FormatForModel()
 	var messages []provider.ToolMessage
 	for _, tr := range toolResults {
@@ -53,12 +54,20 @@ func (w *Worker[T]) Run(reactContext *fileContext.ReactContext) (T, string, []*m
 	}
 	if _, ok := any(result).(ReactResult); ok {
 		// Go 字段标签不会自动进入模型请求，显式提供业务结构和所选格式的示例。
-		input += "\n\n# Required result schema\n\n" + reactResultInstructions
+		instructions := reactResultInstructions
+		jsonExample := `{"status":"completed","answer":"Task completed.","observation":[],"CompletionEvidence":[]}`
+		lineExample := "BEGIN RESULT\nSTATUS=\"completed\"\nANSWER=\"Task completed.\"\nEND RESULT"
+		if step := reactContext.DurableState.CurrentStep(); step != nil && step.Status == fileContext.RunningExecutionStatus {
+			instructions = stepReactResultInstructions
+			jsonExample = `{"status":"completed","answer":"Step completed.","observation":["Observed actual step result."],"CompletionEvidence":["Evidence satisfying the current step criteria."]}`
+			lineExample = "BEGIN RESULT\nSTATUS=\"completed\"\nANSWER=\"Step completed.\"\nOBSERVATION=\"Observed actual step result.\"\nCOMPLETION_EVIDENCE=\"Evidence satisfying the current step criteria.\"\nEND RESULT"
+		}
+		input += "\n\n# Required result schema\n\n" + instructions
 		switch w.agentConfig.LLMConfig.OutputSchema {
 		case config.JsonLLMOutputSchema:
-			input += "\nJSON example: {\"status\":\"completed\",\"answer\":\"Task completed.\"}"
+			input += "\nJSON example: " + jsonExample
 		case config.LineProtocolLLMOutputSchema:
-			input += "\nLine Protocol example:\nBEGIN RESULT\nSTATUS=\"completed\"\nANSWER=\"Task completed.\"\nEND RESULT"
+			input += "\nLine Protocol example:\n" + lineExample
 		}
 	}
 	result, toolCalls, assistantOutput, err := client.RunWithToolMessages(w.ctx, reactContext.DurableState.RunId, input, w.mcpClientSess, messages, criteria)
@@ -93,8 +102,19 @@ func (w *Worker[T]) Run(reactContext *fileContext.ReactContext) (T, string, []*m
 	return result, assistantOutput, toolParams, nil
 }
 
-const reactResultInstructions = `When no tools are called, return a result with exactly these required string fields:
+const reactResultInstructions = `When no tools are called, return a result with these required fields:
 - status: "completed" only when the task is complete; "failed" when blocked or unable to continue. No other status is valid.
 - answer: a non-empty final answer for "completed", or a concrete failure reason for "failed".
-For JSON use the field names status and answer. For Line Protocol use root RESULT and fields STATUS and ANSWER.
+- Observation and CompletionEvidence: empty string lists in standalone react mode.
+For JSON use the field names status, answer, Observation and CompletionEvidence. For Line Protocol use root RESULT and fields STATUS and ANSWER.
 When calling tools, use the supplied function tools; do not emit a final result until the task completes or fails.`
+
+// 步骤结果与最终答复区分：观察记录实际发生的情况，证据对应当前步骤验收标准。
+const stepReactResultInstructions = `When no tools are called, return these fields for the current plan step only:
+- status: "completed" only when the current step completion criteria are satisfied; "failed" when blocked or unable to continue.
+- observation: a non-empty list of concrete observed results and facts from executing the current step. Do not invent facts or report hidden reasoning.
+- CompletionEvidence: for "completed", a non-empty list of concrete evidence showing how the current step completion criteria were satisfied. Do not merely restate the criteria. For "failed", use an empty list if no evidence exists.
+- answer: a non-empty summary of the current step result for "completed"; a concrete failure reason for "failed".
+For JSON use status, answer, observation and CompletionEvidence; both lists contain strings.
+For Line Protocol use root RESULT and STATUS, ANSWER, repeated OBSERVATION and repeated COMPLETION_EVIDENCE fields. Omit empty lists.
+When calling tools, use the supplied function tools; do not emit a final result until the current step completes or fails.`

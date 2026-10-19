@@ -48,6 +48,14 @@ func TestOrchestratorModeRouting(t *testing.T) {
 					text = `{"StepExecutions":[{"Revision":1,"StepId":"inspect","Status":"pending","Intent":"inspect the question","CompletionCriteria":"question inspected","CompletionEvidence":[]},{"Revision":1,"StepId":"answer","Status":"pending","Intent":"answer the question","CompletionCriteria":"question answered","CompletionEvidence":[]}]}`
 				case "react":
 					if len(tt.wantModels) > 2 {
+						text = `{"status":"completed","answer":"done","observation":["observed step result"],"CompletionEvidence":["step criteria verified"]}`
+						if !strings.Contains(req.Input, stepReactResultInstructions) {
+							t.Error("executor missing structured step result instructions")
+						}
+						// 后续步骤必须能看到前一步的观察和验收证据。
+						if reactCalls > 0 && (!strings.Contains(req.Input, "observed step result") || !strings.Contains(req.Input, "step criteria verified")) {
+							t.Error("executor missing previous step results")
+						}
 						wantIntent := []string{"inspect the question", "answer the question"}[reactCalls]
 						if !strings.Contains(req.Input, "## CurrentStep\n\n> "+wantIntent) {
 							t.Errorf("executor missing current step %q: %s", wantIntent, req.Input)
@@ -97,6 +105,14 @@ func TestOrchestratorModeRouting(t *testing.T) {
 				t.Fatalf("models = %v; want %v", got, tt.wantModels)
 			}
 			if len(tt.wantModels) > 2 {
+				for _, step := range state.StepExecutions {
+					if !slices.Equal(step.Observation, []string{"observed step result"}) || !slices.Equal(step.CompletionEvidence, []string{"step criteria verified"}) {
+						t.Fatalf("step results not persisted: %+v", step)
+					}
+				}
+				if !slices.Equal(results[0].Observation, []string{"observed step result"}) || !slices.Equal(results[0].CompletionEvidence, []string{"step criteria verified"}) {
+					t.Fatalf("structured result not returned: %+v", results)
+				}
 				if len(state.StepExecutions) != 2 || state.CurrentStepIndex != -1 || state.StepExecutions[0].Status != CompletedExecutionStatus || state.StepExecutions[1].Status != CompletedExecutionStatus {
 					t.Fatalf("plan not completed: %+v", state)
 				}

@@ -210,6 +210,7 @@ func TestPlannerRunRejectsInvalidResponses(t *testing.T) {
 		{"completed status", func(s *StepExecution) { s.Status = CompletedExecutionStatus }, "planner step 1 requires"},
 		{"failed status", func(s *StepExecution) { s.Status = FailedExecutionStatus }, "planner step 1 requires"},
 		{"missing status", func(s *StepExecution) { s.Status = "" }, "planner step 1 requires"},
+		{"premature observation", func(s *StepExecution) { s.Observation = []string{"done"} }, "planner step 1 requires"},
 		{"premature evidence", func(s *StepExecution) { s.CompletionEvidence = []string{"done"} }, "planner step 1 requires"},
 		// ID 按去除空白后的值判重，防止看似不同的 ID 指向同一步骤。
 		{"duplicate ID", func(s *StepExecution) { s.StepId = " inspect " }, `duplicate StepId "inspect"`},

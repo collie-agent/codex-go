@@ -22,7 +22,7 @@ const reactSystemPrompt = `你是 ReAct agent 的单轮决策器。每次调用�
 
 # 单轮决策
 
-1. 如果 DurableState 包含 CurrentStep，本轮只执行该步骤，使用 Goal、StepExecutions 和 CompletionCriteria 作为背景，以末尾 CurrentStepCompletionCriteria 为当前步骤的验收标准；当前步骤达成后即返回 completed，并在 Answer 中报告实际结果与依据，后续步骤由 planner 调度。否则，根据 Goal、已有事实和工具结果，检查 CompletionCriteria 是否全部满足。
+1. 如果 DurableState 包含 CurrentStep，本轮只执行该步骤，使用 Goal、StepExecutions 和 CompletionCriteria 作为背景，以末尾 CurrentStepCompletionCriteria 为当前步骤的验收标准；当前步骤达成后即返回 completed，并在 Observation 中报告实际结果、在 CompletionEvidence 中逐项报告验收依据，后续步骤由 planner 调度。否则，根据 Goal、已有事实和工具结果，检查 CompletionCriteria 是否全部满足。
 2. 若全部满足，遵循调用方指定的结构和格式返回，不再选择工具。
 3. 若尚未完成，从当前传入的 MCP 工具中选择零个、一个或多个能推进目标或验证关键推断的调用，并提供符合各工具参数定义的参数。
 4. 同轮选择多个调用时，各调用必须能使用当前已知信息独立执行。依赖其他调用结果的操作留到获得结果后的下一轮。
@@ -112,7 +112,15 @@ func (c *ReactContext) ensureObservation() {
 func (c *ReactContext) Format() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.format()
+	return c.format(false)
+}
+
+// FormatForLog 输出完整持久状态（包含零值字段），便于排查实际运行状态。
+// 日志和模型输入分别格式化，避免调试字段改变模型提示词。
+func (c *ReactContext) FormatForLog() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.format(true)
 }
 
 // FormatForModel 在同一锁内快照文本和工具结果，防止并发更新造成两者不一致。
@@ -127,10 +135,10 @@ func (c *ReactContext) FormatForModel() (string, []*ToolResult) {
 			results = append(results, &copy)
 		}
 	}
-	return c.format(), results
+	return c.format(false), results
 }
 
-func (c *ReactContext) format() string {
+func (c *ReactContext) format(fullDurableState bool) string {
 	if c == nil {
 		return ""
 	}
@@ -163,7 +171,11 @@ func (c *ReactContext) format() string {
 	b.WriteString("# sysPrompt\n\n")
 	writeContent(c.sysPrompt)
 	b.WriteString("# DurableState\n\n")
-	if c.DurableState != nil {
+	if fullDurableState {
+		// DurableState 仅包含可 JSON 序列化的字段；不省略空值和步骤执行详情。
+		state, _ := json.MarshalIndent(c.DurableState, "", "  ")
+		b.WriteString("```json\n" + string(state) + "\n```\n\n")
+	} else if c.DurableState != nil {
 		writeField("RunId", c.DurableState.RunId)
 		if tail == "" {
 			writeField("Goal", c.DurableState.Goal)
@@ -245,6 +257,7 @@ type StepExecution struct {
 	Intent             string
 	CompletionCriteria string // planner 提供的当前步骤验收标准
 	CompletionEvidence []string
+	Observation        []string
 }
 
 // Clone 隔离分支和异步观察器的嵌套切片，避免执行记录被并发修改。
@@ -257,6 +270,7 @@ func (s *DurableState) Clone() *DurableState {
 	clone.StepExecutions = slices.Clone(s.StepExecutions)
 	for i := range clone.StepExecutions {
 		clone.StepExecutions[i].CompletionEvidence = slices.Clone(s.StepExecutions[i].CompletionEvidence)
+		clone.StepExecutions[i].Observation = slices.Clone(s.StepExecutions[i].Observation)
 	}
 	return &clone
 }

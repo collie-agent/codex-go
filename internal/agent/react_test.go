@@ -82,6 +82,37 @@ func TestReactObserveAsync(t *testing.T) {
 	}
 }
 
+func TestReactExecObservation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var request struct {
+			Input string `json:"input"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&request); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		for _, want := range []string{"verify tests", "exec", "call_exec", `{"args":["test"],"command":"npm"}`, "FAIL: TestExample", "exit_code", "影响后续决策"} {
+			if !strings.Contains(request.Input, want) {
+				t.Errorf("exec observation input missing %q: %s", want, request.Input)
+			}
+		}
+		writeObservationResponse(w, []any{observationMessage(`{"ConfirmedFacts":["exec call_exec: TestExample failed"],"ReportedErrors":["exec call_exec: tests exited with code 1"]}`)})
+	}))
+	defer server.Close()
+	r := &ReactProcess[ReactResult]{ctx: ctx}
+	rc := fileContext.NewReactContext(&fileContext.DurableState{RunId: "exec-task", Goal: "verify tests"})
+	r.updateContext(&mcpSdk.CallToolResult{Content: []mcpSdk.Content{&mcpSdk.TextContent{Text: `{"stdout":"FAIL: TestExample","exit_code":1}`}}},
+		&mcpSdk.CallToolParams{Name: "exec", Meta: mcpSdk.Meta{toolCallIDMetaKey: "call_exec"}, Arguments: map[string]any{"command": "npm", "args": []string{"test"}}},
+		rc, nil, &config.AgentConfig{LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema}})
+	waitForReactObservation(t, ctx, rc, "exec call_exec: tests exited with code 1")
+	if !strings.Contains(rc.Format(), "exec call_exec: TestExample failed") {
+		t.Fatal("exec observation facts were not merged into ReAct context")
+	}
+}
+
 func TestReactRetriesOutputParseErrors(t *testing.T) {
 	for _, schema := range []config.LLMOutputSchema{config.JsonLLMOutputSchema, config.LineProtocolLLMOutputSchema} {
 		for _, recover := range []bool{true, false} {

@@ -1,7 +1,38 @@
 package provider
 
+// 示例覆盖各处理器的实际结果结构；字段大小写与 JSON 标签保持一致。
 const jsonFewShotPrompt = `Output format: JSON.
 Return exactly one valid JSON value matching the requested output schema. Do not include Markdown fences, comments, or explanatory text. Use the field names and types requested by the task.
+
+The following examples illustrate the result schemas used by different processors. Select only the schema requested by the current task; do not combine schemas or copy example facts into your answer. Preserve field name casing exactly. Use JSON arrays for lists, including [] for empty lists.
+
+Example 1 input: Return ReactResult for a standalone task asking what 2 + 2 equals. The task is complete; standalone mode uses empty Observation and CompletionEvidence lists.
+Example 1 output:
+{"status":"completed","answer":"2 + 2 = 4.","Observation":[],"CompletionEvidence":[]}
+
+Example 2 input: Return ReactResult for the current plan step: create notes.txt containing hello. Tool call call_write to write_file succeeded, and call_read to read_file returned exactly hello. The step completion criteria require the file to exist with that content.
+Example 2 output:
+{"status":"completed","answer":"Created notes.txt containing hello and verified its content.","Observation":["write_file (call_write) reported that notes.txt was created.","read_file (call_read) returned hello from notes.txt."],"CompletionEvidence":["Reading notes.txt succeeded and returned exactly hello, verifying the required file and content."]}
+
+Example 3 input: Return ReactResult for a failed plan step that must read /workspace/private.txt. Tool call call_read to read_file returned permission denied, and the task cannot continue. No completion evidence exists.
+Example 3 output:
+{"status":"failed","answer":"Cannot read /workspace/private.txt: permission denied.","Observation":["read_file (call_read) failed to read /workspace/private.txt with permission denied."],"CompletionEvidence":[]}
+
+Example 4 input: Return ObserveResult for tool call call_read to read_file. The result contains the full content of notes.txt: hello. No errors occurred, and this fact has not previously been recorded.
+Example 4 output:
+{"ConfirmedFacts":["read_file (call_read) returned the full content of notes.txt: hello."],"ReportedErrors":[]}
+
+Example 5 input: Return ObserveResult for a tool result that adds no new facts or errors relevant to the next decision.
+Example 5 output:
+{"ConfirmedFacts":[],"ReportedErrors":[]}
+
+Example 6 input: Return TaskAnalyzerResult for the goal: read notes.txt and create summary.txt summarizing it. Tools are required, with two effective steps. Provide independently verifiable task completion criteria and a brief task summary.
+Example 6 output:
+{"NeedsTools":true,"ExpectedSteps":2,"ReasoningSummary":"The task requires reading a source file and writing a separate summary file.","CompletionCriteria":["notes.txt has been read successfully.","summary.txt exists and accurately summarizes notes.txt."]}
+
+Example 7 input: Return PlannerResult for the goal: read notes.txt and create summary.txt summarizing it. Plan the two steps in order without executing them. Every initial step has Revision 1, Status pending, and empty Observation and CompletionEvidence lists.
+Example 7 output:
+{"StepExecutions":[{"Revision":1,"StepId":"read-notes","Status":"pending","Intent":"Read notes.txt to obtain the source content for the summary.","CompletionCriteria":"notes.txt has been read successfully and its content is available for summarization.","CompletionEvidence":[],"Observation":[]},{"Revision":1,"StepId":"write-summary","Status":"pending","Intent":"Create summary.txt with an accurate summary of the source content.","CompletionCriteria":"summary.txt exists and its content accurately summarizes notes.txt.","CompletionEvidence":[],"Observation":[]}]}
 
 Now answer the original task using its requested schema and JSON format only.`
 

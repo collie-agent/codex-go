@@ -70,8 +70,62 @@ func TestObserveRun(t *testing.T) {
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("got %+v, want %+v", got, tc.want)
 			}
+			encoded, err := json.Marshal(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got.ConfirmedFacts) == 0 && len(got.ReportedErrors) == 0 && string(encoded) != "{}" {
+				t.Fatalf("empty observation must omit fields, got %s", encoded)
+			}
 			if rc.Format() != before {
 				t.Fatal("observer changed the input context")
+			}
+		})
+	}
+}
+
+func TestObserveExecDecisionRelevance(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		schema config.LLMOutputSchema
+		output string
+		want   ObserveResult
+	}{
+		{"facts only", config.JsonLLMOutputSchema, `{"ConfirmedFacts":["exec call_exec: all tests passed"],"ReportedErrors":[]}`, ObserveResult{ConfirmedFacts: []string{"exec call_exec: all tests passed"}, ReportedErrors: []string{}}},
+		{"errors only", config.JsonLLMOutputSchema, `{"ConfirmedFacts":[],"ReportedErrors":["exec call_exec: missing dependency"]}`, ObserveResult{ConfirmedFacts: []string{}, ReportedErrors: []string{"exec call_exec: missing dependency"}}},
+		{"irrelevant json", config.JsonLLMOutputSchema, `{"ConfirmedFacts":[],"ReportedErrors":[]}`, ObserveResult{ConfirmedFacts: []string{}, ReportedErrors: []string{}}},
+		{"irrelevant line protocol", config.LineProtocolLLMOutputSchema, "BEGIN OBSERVATION\nEND OBSERVATION", ObserveResult{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var request struct {
+					Input string `json:"input"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Error(err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				for _, want := range []string{"exec", "call_exec", `{"command":"npm","args":["test"]}`, "command output", "影响后续决策", "忽略重复信息、无关日志", "省略对应字段", "空数组"} {
+					if !strings.Contains(request.Input, want) {
+						t.Errorf("exec observation input missing %q: %s", want, request.Input)
+					}
+				}
+				writeObservationResponse(w, []any{observationMessage(tc.output)})
+			}))
+			defer server.Close()
+			state := &fileContext.DurableState{RunId: "observe-exec", Goal: "verify tests"}
+			observer := NewObserveProcess[ObserveResult](t.Context(), fileContext.NewObservationContext(state, nil, &fileContext.ToolResult{
+				ToolName: "exec", ToolCallId: "call_exec", Arguments: `{"command":"npm","args":["test"]}`, Result: "command output",
+			}))
+			got, _, err := observer.Run(&config.AgentConfig{LLMConfig: &config.LLMConfig{
+				ApiKey: "test", BaseUrl: server.URL, Model: "test", OutputSchema: tc.schema,
+			}}, state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("got %+v, want %+v", got, tc.want)
 			}
 		})
 	}

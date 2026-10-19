@@ -15,8 +15,14 @@ import (
 )
 
 type responsesApiClient[T any] struct {
-	client      *openai.Client
-	agentConfig *config.AgentConfig
+	client          *openai.Client
+	agentConfig     *config.AgentConfig
+	contextLogLabel string
+}
+
+// SetContextLogLabel 仅标记当前客户端的上下文日志，不修改任务 ID 或模型请求。
+func (c *responsesApiClient[T]) SetContextLogLabel(label string) {
+	c.contextLogLabel = label
 }
 
 // OutputParseError 区分可由模型纠正的输出格式错误和请求、配置等运行错误。
@@ -162,7 +168,11 @@ func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId,
 	if err != nil {
 		return result, nil, "", fmt.Errorf("task %s: encode LLM context: %w", taskId, err)
 	}
-	log.Printf("task %s: LLM context=\n%s", taskId, encodedContext)
+	if c.contextLogLabel != "" {
+		log.Printf("task %s: [%s] LLM context=\n%s", taskId, c.contextLogLabel, encodedContext)
+	} else {
+		log.Printf("task %s: LLM context=\n%s", taskId, encodedContext)
+	}
 	response, err := c.client.Responses.New(ctx, params)
 	if err != nil {
 		return result, nil, "", fmt.Errorf("task %s: create response: %w", taskId, err)

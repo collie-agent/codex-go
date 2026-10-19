@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -104,7 +105,7 @@ func TestOrchestratorRun(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) || len(got) != 0 {
 					t.Fatalf("Run() = %+v, %v; want zero result and error containing %q", got, err, tt.wantErr)
 				}
-			} else if err != nil || !slices.Equal(got, []ReactResult{{Status: CompletedReactStatus, Answer: "done"}}) {
+			} else if err != nil || !reflect.DeepEqual(got, []ReactResult{{Status: CompletedReactStatus, Answer: "done"}}) {
 				t.Fatalf("Run() = %+v, %v", got, err)
 			}
 			if !slices.Equal(state.CompletionCriteria, tt.criteria) || state.Goal != "verify file" || state.RunId != "orchestrator-task" {
@@ -217,7 +218,7 @@ func TestOrchestratorConcurrentBatches(t *testing.T) {
 		return output, nil
 	}
 	got, err := o.runBatches(&config.AgentConfig{}, state, run)
-	if err != nil || !slices.Equal(got, []ReactResult{{Status: CompletedReactStatus, Answer: "done"}, {Status: CompletedReactStatus, Answer: "done"}}) || started.Load() != 2 || analyzerCalls != 2 {
+	if err != nil || !reflect.DeepEqual(got, []ReactResult{{Status: CompletedReactStatus, Answer: "done"}, {Status: CompletedReactStatus, Answer: "done"}}) || started.Load() != 2 || analyzerCalls != 2 {
 		t.Fatalf("got %+v, %v; started=%d analyzerCalls=%d", got, err, started.Load(), analyzerCalls)
 	}
 	if !slices.Equal(state.CompletionCriteria, []string{"criterion"}) {
@@ -322,7 +323,7 @@ func TestOrchestratorFinalBranchResults(t *testing.T) {
 				return output, nil
 			}
 			got, err := o.runBatches(&config.AgentConfig{}, &fileContext.DurableState{Goal: "test"}, run)
-			if err != nil || !slices.Equal(got, tt.want) || calls != len(tt.nodes) {
+			if err != nil || !reflect.DeepEqual(got, tt.want) || calls != len(tt.nodes) {
 				t.Fatalf("runBatches() = %+v, %v; want %+v; calls=%d", got, err, tt.want, calls)
 			}
 		})
@@ -370,7 +371,7 @@ func TestOrchestratorBranchOrderIgnoresCompletionOrder(t *testing.T) {
 	}
 	got, err := o.runBatches(&config.AgentConfig{}, &fileContext.DurableState{Goal: "test"}, run)
 	want := []ReactResult{{Answer: "first"}, {Answer: "second"}}
-	if err != nil || !slices.Equal(got, want) {
+	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("runBatches() = %+v, %v; want %+v", got, err, want)
 	}
 }

@@ -86,8 +86,8 @@ func (p *PlannerProcess) Run(agentConfig *config.AgentConfig, durableState *file
 	ids := make(map[string]struct{}, len(result.StepExecutions))
 	for i, step := range result.StepExecutions {
 		id := strings.TrimSpace(step.StepId)
-		if id == "" || strings.TrimSpace(step.Intent) == "" || step.Revision != 1 || step.Status != PendingExecutionStatus || len(step.CompletionEvidence) != 0 {
-			return PlannerResult{}, nil, fmt.Errorf("task %s: planner step %d requires non-empty StepId and Intent, Revision 1, pending Status and empty CompletionEvidence", taskID, i+1)
+		if id == "" || strings.TrimSpace(step.Intent) == "" || step.Revision != 1 || step.Status != PendingExecutionStatus || len(step.CompletionEvidence) != 0 || len(step.Observation) != 0 {
+			return PlannerResult{}, nil, fmt.Errorf("task %s: planner step %d requires non-empty StepId and Intent, Revision 1, pending Status and empty Observation and CompletionEvidence", taskID, i+1)
 		}
 		if _, exists := ids[id]; exists {
 			return PlannerResult{}, nil, fmt.Errorf("task %s: planner returned duplicate StepId %q", taskID, id)

@@ -10,8 +10,9 @@ import (
 )
 
 type ObserveResult struct {
-	ConfirmedFacts []string
-	ReportedErrors []string
+	// 无决策相关的新信息时不对外输出空字段；LLM 的严格 JSON schema 仍要求返回空数组。
+	ConfirmedFacts []string `json:"ConfirmedFacts,omitempty"`
+	ReportedErrors []string `json:"ReportedErrors,omitempty"`
 }
 
 type ObserveProcess[T LLMSchema] struct {
@@ -46,6 +47,7 @@ func (o *ObserveProcess[T]) Run(agentConfig *config.AgentConfig, durableState *f
 		return zero, nil, fmt.Errorf("task %s: observation: %w", taskID, err)
 	}
 	// Observation only analyzes supplied data, so no MCP tools are exposed.
+	client.SetContextLogLabel("observe")
 	input := observationContext.FormatWithSysPrompt(agentConfig.SysPrompt)
 	result, toolCalls, _, err := client.Run(o.ctx, taskID, input, nil)
 	if err != nil {
