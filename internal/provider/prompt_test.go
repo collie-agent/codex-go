@@ -15,22 +15,22 @@ func TestLineProtocolFewShotExamples(t *testing.T) {
 		Empty  struct{} `json:"empty"`
 	}
 	type example struct {
-		Message      string       `json:"message"`
-		Count        int          `json:"count"`
-		Ratio        float64      `json:"ratio"`
-		OK           bool         `json:"ok"`
-		Enabled      bool         `json:"enabled"`
-		Goal         string       `json:"goal"`
-		Tags         []string     `json:"tags"`
-		Steps        []parserStep `json:"steps" lineprotocol:"STEP"`
-		Note         *string      `json:"note"`
-		Text         string       `json:"text"`
-		Raw          string       `json:"raw"`
-		Completed    bool         `json:"done" lineprotocol:"COMPLETED"`
-		MetaNote     string       `json:"meta_note" lineprotocol:"META.NOTE"`
-		Items        []item       `json:"items" lineprotocol:"ITEM"`
-		Observations []string     `json:"observations"`
-		Fallback     *detail      `json:"fallback"`
+		Message   string       `json:"message"`
+		Count     int          `json:"count"`
+		Ratio     float64      `json:"ratio"`
+		OK        bool         `json:"ok"`
+		Enabled   bool         `json:"enabled"`
+		Goal      string       `json:"goal"`
+		Tags      []string     `json:"tags"`
+		Steps     []parserStep `json:"steps" lineprotocol:"STEP"`
+		Note      *string      `json:"note"`
+		Text      string       `json:"text"`
+		Raw       string       `json:"raw"`
+		Completed bool         `json:"done" lineprotocol:"COMPLETED"`
+		MetaNote  string       `json:"meta_note" lineprotocol:"META.NOTE"`
+		Items     []item       `json:"items" lineprotocol:"ITEM"`
+		Aliases   []string     `json:"aliases"`
+		Fallback  *detail      `json:"fallback"`
 	}
 	sections := strings.Split(lineProtocolFewShotPrompt, " output:\n")[1:]
 	if len(sections) != 5 {
@@ -48,7 +48,7 @@ func TestLineProtocolFewShotExamples(t *testing.T) {
 				t.Fatalf("unexpected escaped strings or tagged fields: %+v", got)
 			}
 		case 3:
-			if len(got.Tags) != 1 || got.Tags[0] != "only" || len(got.Items) != 1 || got.Items[0].Detail.Message != "nested" || got.Observations != nil || got.Fallback != nil {
+			if len(got.Tags) != 1 || got.Tags[0] != "only" || len(got.Items) != 1 || got.Items[0].Detail.Message != "nested" || got.Aliases != nil || got.Fallback != nil {
 				t.Fatalf("unexpected lists or nested objects: %+v", got)
 			}
 		}

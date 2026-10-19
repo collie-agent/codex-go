@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/responses"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 type responsesApiClient[T any] struct {
@@ -138,6 +140,8 @@ func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId,
 		},
 		Tools: tools,
 		Text:  textConfig,
+		// 当前请求不重放 reasoning 项，显式关闭思考模式以支持后续工具结果回传。
+		Reasoning: shared.ReasoningParam{Effort: shared.ReasoningEffortNone},
 	}
 	if len(messages) > 0 {
 		items := make(responses.ResponseInputParam, 0, 2*len(messages)+1)
@@ -175,6 +179,20 @@ func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId,
 	}
 	response, err := c.client.Responses.New(ctx, params)
 	if err != nil {
+		// SDK 的 Error() 只含 HTTP 状态；补充服务端诊断，保留原始错误链。
+		var apiErr *openai.Error
+		if errors.As(err, &apiErr) {
+			detail := apiErr.RawJSON()
+			if key := c.agentConfig.LLMConfig.ApiKey; key != "" {
+				detail = strings.ReplaceAll(detail, key, "<REDACTED>")
+				// JSON 正文中的凭据也可能包含转义字符。
+				encodedKey, _ := json.Marshal(key)
+				detail = strings.ReplaceAll(detail, string(encodedKey[1:len(encodedKey)-1]), "<REDACTED>")
+			}
+			if detail != "" {
+				return result, nil, "", fmt.Errorf("task %s: create response: %w; provider error: %s", taskId, err, detail)
+			}
+		}
 		return result, nil, "", fmt.Errorf("task %s: create response: %w", taskId, err)
 	}
 	if response.Status != responses.ResponseStatusCompleted {

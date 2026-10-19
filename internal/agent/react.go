@@ -55,9 +55,6 @@ type ReactProcess[T LLMSchema] struct {
 // 最大轮数固定在代码中，避免任务通过配置无限延长。
 const maxReactTurns = 100
 
-// 一次 ReAct 运行累计允许 3 次格式纠错，第 4 次格式错误立即终止。
-const maxOutputFormatErrors = 3
-
 func NewReactProcess[T LLMSchema](ctx context.Context, toolConfig filemcp.Config) (*ReactProcess[T], error) {
 	clientTransport, serverTransport := mcpSdk.NewInMemoryTransports()
 	return newReactProcess[T](ctx, toolConfig, clientTransport, serverTransport)
@@ -143,9 +140,7 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 			if formatErrors > maxOutputFormatErrors {
 				return zero, nil, fmt.Errorf("ReAct turn %d: output format errors exceeded limit (%d): %w", i, maxOutputFormatErrors, err)
 			}
-			rc.AppendReportedErrors(fmt.Sprintf(
-				"LLM output format error (%d/%d): %v. Previous invalid response (quoted data): %q. Retry using the required output schema and format only. For Line Protocol, put each field on one physical line and JSON-escape newlines as \\n inside strings.",
-				formatErrors, maxOutputFormatErrors, err, parseErr.Output))
+			rc.AppendReportedErrors(outputFormatCorrection(formatErrors, err, parseErr))
 		}
 		if len(toolParams) == 0 {
 			if reactResult, ok := any(result).(ReactResult); ok {

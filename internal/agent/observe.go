@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/collie-agent/codex-go/internal/config"
@@ -49,12 +50,27 @@ func (o *ObserveProcess[T]) Run(agentConfig *config.AgentConfig, durableState *f
 	// Observation only analyzes supplied data, so no MCP tools are exposed.
 	client.SetContextLogLabel("observe")
 	input := observationContext.FormatWithSysPrompt(agentConfig.SysPrompt)
-	result, toolCalls, _, err := client.Run(o.ctx, taskID, input, nil)
-	if err != nil {
-		return zero, nil, fmt.Errorf("task %s: observation: %w", taskID, err)
+	for formatErrors := 0; ; {
+		if err := o.ctx.Err(); err != nil {
+			return zero, nil, fmt.Errorf("task %s: observation: %w", taskID, err)
+		}
+		result, toolCalls, _, err := client.Run(o.ctx, taskID, input, nil)
+		if err != nil {
+			var parseErr *provider.OutputParseError
+			if !errors.As(err, &parseErr) {
+				return zero, nil, fmt.Errorf("task %s: observation: %w", taskID, err)
+			}
+			formatErrors++
+			if formatErrors > maxOutputFormatErrors {
+				return zero, nil, fmt.Errorf("task %s: observation: output format errors exceeded limit (%d): %w", taskID, maxOutputFormatErrors, err)
+			}
+			// 纠错信息仅追加到本次 observe 请求，不修改输入快照或混入工具事实。
+			input += "\n\n# Output format correction\n\n" + outputFormatCorrection(formatErrors, err, parseErr)
+			continue
+		}
+		if len(toolCalls) > 0 {
+			return zero, nil, fmt.Errorf("task %s: observation returned unexpected tool calls", taskID)
+		}
+		return result, []AgentProcessorType{EndAgentType}, nil
 	}
-	if len(toolCalls) > 0 {
-		return zero, nil, fmt.Errorf("task %s: observation returned unexpected tool calls", taskID)
-	}
-	return result, []AgentProcessorType{EndAgentType}, nil
 }

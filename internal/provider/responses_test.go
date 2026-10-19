@@ -3,9 +3,12 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,7 +16,66 @@ import (
 	filemcp "github.com/collie-agent/codex-go/internal/mcp"
 	"github.com/google/jsonschema-go/jsonschema"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/openai/openai-go/v3"
 )
+
+func TestResponsesDisableThinkingAndExposeAPIError(t *testing.T) {
+	for _, schema := range []config.LLMOutputSchema{config.JsonLLMOutputSchema, config.LineProtocolLLMOutputSchema} {
+		for _, withHistory := range []bool{false, true} {
+			t.Run(string(schema)+"/history="+fmt.Sprint(withHistory), func(t *testing.T) {
+				const apiKey = "test-secret-credential"
+				const message = "The reasoning_text in the thinking mode must be passed back to the API."
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					var request struct {
+						Reasoning struct {
+							Effort string `json:"effort"`
+						} `json:"reasoning"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+						t.Error(err)
+					}
+					if request.Reasoning.Effort != "none" {
+						t.Errorf("reasoning effort = %q, want none", request.Reasoning.Effort)
+					}
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadRequest)
+					_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
+						"message": message + " key=" + apiKey, "type": "invalid_request_error", "code": "invalid_request_error", "param": "input",
+					}})
+				}))
+				defer server.Close()
+				client, err := NewResponsesApiClient[struct {
+					Answer string `json:"answer"`
+				}](&config.LLMConfig{
+					ApiKey: apiKey, BaseUrl: server.URL, Model: "test-model", OutputSchema: schema,
+				}, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var history []ToolMessage
+				if withHistory {
+					history = []ToolMessage{{ChatCompletionToolMessageParam: *openai.ToolMessage("result", "call_1").OfTool, Name: "grep", Arguments: `{"pattern":"agent"}`}}
+				}
+				_, _, _, err = client.RunWithToolMessages(context.Background(), "error-test", "inspect", nil, history)
+				if err == nil {
+					t.Fatal("expected API error")
+				}
+				for _, want := range []string{"400 Bad Request", message, "invalid_request_error", "input", "<REDACTED>"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error missing %q: %v", want, err)
+					}
+				}
+				if strings.Contains(err.Error(), apiKey) {
+					t.Fatal("error exposes API key")
+				}
+				var apiErr *openai.Error
+				if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+					t.Fatalf("lost API error chain: %v", err)
+				}
+			})
+		}
+	}
+}
 
 func TestNewResponsesApiClientRejectsNilConfig(t *testing.T) {
 	if client, err := NewResponsesApiClient[any](nil, nil); err == nil || client != nil {

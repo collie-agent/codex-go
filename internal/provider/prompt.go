@@ -36,7 +36,10 @@ Example 7 output:
 
 Now answer the original task using its requested schema and JSON format only.`
 
-const lineProtocolFewShotPrompt = `Output format: Line Protocol.
+// 通用示例使用与业务结果无关的字段；格式约束只作用于最终文本，不限制原生工具调用。
+const lineProtocolFewShotPrompt = `Final text output format: Line Protocol.
+
+If supplied function tools are needed to gather evidence or advance the task, call them through the native tool-call interface. Do not write tool calls as Line Protocol text and do not emit a final result while required tool results are still missing. The following contract applies only when returning a final text result without tool calls.
 
 Mandatory response contract:
 - Your entire response must contain only one Line Protocol document. Never combine prose with a protocol block.
@@ -102,7 +105,7 @@ COMPLETED=true
 META.NOTE="literal dotted field"
 END RESULT
 
-Example 4 input: In RESULT, return one tag "only" in a string list and one ITEM in a struct list. ITEM contains a DETAIL struct with message "nested" and an EMPTY struct with no fields. Omit the empty observations list and return optional struct pointer fallback null.
+Example 4 input: In RESULT, return one tag "only" in a string list and one ITEM in a struct list. ITEM contains a DETAIL struct with message "nested" and an EMPTY struct with no fields. Omit the empty aliases list and return optional struct pointer fallback null.
 Example 4 output:
 BEGIN RESULT
 TAGS="only"
@@ -123,4 +126,4 @@ END NO_TOOL
 
 Invalid forms (do not output these): TAGS=[]; DETAIL={}; MESSAGE=hello; COUNT=NaN; META.NOTE="x" when no such literal field is declared; BEGIN RESULT closed by END PLAN; two root blocks; or a field emitted both as FIELD=null and as a FIELD child block.
 
-Now answer the original task using its declared schema and Line Protocol format only. Before sending, check that the first line is the root BEGIN line, the last line is its matching END line, and every answer or explanation is inside a declared field. Output only that document.`
+Now handle the original task. If tools are needed, use the supplied native function tools. Otherwise, return the final result using its declared schema and Line Protocol format only. Before sending final text, check that the first line is the root BEGIN line, the last line is its matching END line, and every answer or explanation is inside a declared field. Output only that document for a final text result.`

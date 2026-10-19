@@ -42,7 +42,7 @@ func TestWorkerSendsNativeToolResults(t *testing.T) {
 				}
 				for i, want := range []struct{ id, name, args, output string }{
 					{"call_read", "read_file", `{"path":"notes.txt"}`, "file content"},
-					{"call_error", "grep", `{}`, "permission denied"},
+					{"call_error", "grep", `{}`, "worker-tool-error: access refused"},
 				} {
 					call, output := request.Input[2*i+1], request.Input[2*i+2]
 					if call.Type != "function_call" || call.CallID != want.id || call.Name != want.name || call.Arguments != want.args {
@@ -81,7 +81,8 @@ func TestWorkerSendsNativeToolResults(t *testing.T) {
 						}
 					}
 				}
-				for _, raw := range []string{"# MCP tools", "# ToolResult list", "file content", "permission denied"} {
+				// 使用独有错误文本，避免与格式示例中的通用错误描述碰撞。
+				for _, raw := range []string{"# MCP tools", "# ToolResult list", "file content", "worker-tool-error: access refused"} {
 					if strings.Contains(input.Content, raw) {
 						t.Errorf("raw tool data duplicated in user text: %q", raw)
 					}
@@ -98,7 +99,7 @@ func TestWorkerSendsNativeToolResults(t *testing.T) {
 				StepExecutions: []fileContext.StepExecution{{Status: fileContext.RunningExecutionStatus, CompletionCriteria: "notes verified"}},
 			})
 			rc.AppendToolResult(&fileContext.ToolResult{ToolCallId: "call_read", ToolName: "read_file", Arguments: `{"path":"notes.txt"}`, Result: "file content"})
-			rc.AppendToolResult(&fileContext.ToolResult{ToolCallId: "call_error", ToolName: "grep", Error: "permission denied"})
+			rc.AppendToolResult(&fileContext.ToolResult{ToolCallId: "call_error", ToolName: "grep", Error: "worker-tool-error: access refused"})
 			worker := NewWorker[ReactResult](context.Background(), &config.AgentConfig{AllowTools: map[config.McpToolName]struct{}{
 				config.ReadFileMCPToolName: {}, config.GrepMCPToolName: {},
 			}, LLMConfig: &config.LLMConfig{
@@ -108,10 +109,10 @@ func TestWorkerSendsNativeToolResults(t *testing.T) {
 			if err != nil || got.Answer != "done" || len(calls) != 0 {
 				t.Fatalf("Run() = %+v, %+v, %v", got, calls, err)
 			}
-			if strings.Contains(rc.Format(), "file content") || strings.Contains(rc.Format(), "permission denied") || strings.Contains(rc.Format(), "# ToolResult list") {
+			if strings.Contains(rc.Format(), "file content") || strings.Contains(rc.Format(), "worker-tool-error: access refused") || strings.Contains(rc.Format(), "# ToolResult list") {
 				t.Fatal("ReAct context contains raw tool results or errors")
 			}
-			if len(rc.ToolResults) != 2 || rc.ToolResults[0].Result != "file content" || rc.ToolResults[1].Error != "permission denied" {
+			if len(rc.ToolResults) != 2 || rc.ToolResults[0].Result != "file content" || rc.ToolResults[1].Error != "worker-tool-error: access refused" {
 				t.Fatal("formatting model input changed retained tool results")
 			}
 		})

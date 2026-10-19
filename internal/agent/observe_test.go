@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -12,6 +14,7 @@ import (
 	"github.com/collie-agent/codex-go/internal/config"
 	fileContext "github.com/collie-agent/codex-go/internal/context"
 	filemcp "github.com/collie-agent/codex-go/internal/mcp"
+	"github.com/collie-agent/codex-go/internal/provider"
 )
 
 func TestObserveRun(t *testing.T) {
@@ -136,13 +139,16 @@ func TestObserveRunResponseErrors(t *testing.T) {
 		name   string
 		output []any
 		want   string
+		calls  int
 	}{
-		{"invalid output", []any{observationMessage("invalid JSON")}, "parse response output"},
-		{"empty output", nil, "response output is empty"},
-		{"tool call", []any{map[string]any{"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "read_file", "arguments": `{}`}}, "unexpected tool calls"},
+		{"invalid output", []any{observationMessage("invalid JSON")}, "output format errors exceeded limit (3)", 4},
+		{"empty output", nil, "response output is empty", 1},
+		{"tool call", []any{map[string]any{"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "read_file", "arguments": `{}`}}, "unexpected tool calls", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
 				writeObservationResponse(w, tc.output)
 			}))
 			defer server.Close()
@@ -152,6 +158,9 @@ func TestObserveRunResponseErrors(t *testing.T) {
 			state := &fileContext.DurableState{RunId: "observe-task"}
 			observer := NewObserveProcess[ObserveResult](context.Background(), fileContext.NewObservationContext(state, nil, nil))
 			got, _, err := observer.Run(agentConfig, state)
+			if calls != tc.calls {
+				t.Fatalf("requests = %d, want %d", calls, tc.calls)
+			}
 			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "observe-task") {
 				t.Fatalf("got error %v, want task ID and %q", err, tc.want)
 			}
@@ -159,6 +168,93 @@ func TestObserveRunResponseErrors(t *testing.T) {
 				t.Fatalf("failed observation returned a result: %+v", got)
 			}
 		})
+	}
+}
+
+func TestObserveRetriesOutputParseErrors(t *testing.T) {
+	for _, schema := range []config.LLMOutputSchema{config.JsonLLMOutputSchema, config.LineProtocolLLMOutputSchema} {
+		for _, recover := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/recover=%t", schema, recover), func(t *testing.T) {
+				bad, good := `{"ConfirmedFacts":["broken`, `{"ConfirmedFacts":["verified"],"ReportedErrors":[]}`
+				wantError := "unexpected end of JSON input"
+				if schema == config.LineProtocolLLMOutputSchema {
+					bad = "BEGIN OBSERVATION\nCONFIRMEDFACTS=\"broken\nfact\"\nEND OBSERVATION"
+					good = "BEGIN OBSERVATION\nCONFIRMEDFACTS=\"verified\"\nEND OBSERVATION"
+					wantError = "invalid JSON literal for CONFIRMEDFACTS"
+				}
+				calls := 0
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+					calls++
+					var request struct {
+						Input string `json:"input"`
+					}
+					if err := json.NewDecoder(req.Body).Decode(&request); err != nil {
+						t.Error(err)
+					}
+					for _, want := range []string{"inspect notes", "previous fact", "previous error", "call_read", "hello", "custom observer prompt"} {
+						if !strings.Contains(request.Input, want) {
+							t.Errorf("input missing %q: %s", want, request.Input)
+						}
+					}
+					// 每次重试保留此前所有纠错信息及被引用的原始输出。
+					for attempt := 1; attempt < calls; attempt++ {
+						for _, want := range []string{fmt.Sprintf("LLM output format error (%d/3)", attempt), wantError, fmt.Sprintf("%q", bad), "Retry using the required output schema"} {
+							if !strings.Contains(request.Input, want) {
+								t.Errorf("retry input missing %q: %s", want, request.Input)
+							}
+						}
+					}
+					text := bad
+					if recover && calls == 4 {
+						text = good
+					}
+					writeObservationResponse(w, []any{observationMessage(text)})
+				}))
+				defer server.Close()
+				state := &fileContext.DurableState{RunId: "observe-retry", Goal: "inspect notes"}
+				rc := fileContext.NewObservationContext(state,
+					&fileContext.Observation{ConfirmedFacts: []string{"previous fact"}, ReportedErrors: []string{"previous error"}},
+					&fileContext.ToolResult{ToolName: "read_file", ToolCallId: "call_read", Result: "hello"})
+				before := rc.Format()
+				cfg := &config.AgentConfig{SysPrompt: "custom observer prompt", LLMConfig: &config.LLMConfig{
+					BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: schema,
+				}}
+				got, next, err := NewObserveProcess[ObserveResult](t.Context(), rc).Run(cfg, state)
+				if calls != 4 {
+					t.Fatalf("requests = %d, want 4; err = %v", calls, err)
+				}
+				if rc.Format() != before {
+					t.Fatal("retry changed the input observation context")
+				}
+				if recover {
+					if err != nil || !reflect.DeepEqual(got.ConfirmedFacts, []string{"verified"}) || len(got.ReportedErrors) != 0 || len(next) != 1 || next[0] != EndAgentType {
+						t.Fatalf("Run() = %+v, %v, %v", got, next, err)
+					}
+				} else {
+					var parseErr *provider.OutputParseError
+					if err == nil || !strings.Contains(err.Error(), "output format errors exceeded limit (3)") || !errors.As(err, &parseErr) || parseErr.Output != bad || !reflect.DeepEqual(got, ObserveResult{}) || len(next) != 0 {
+						t.Fatalf("Run() = %+v, %v, %v", got, next, err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestObserveDoesNotRetryRequestErrors(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		calls++
+		http.Error(w, "bad request", http.StatusBadRequest)
+	}))
+	defer server.Close()
+	state := &fileContext.DurableState{RunId: "request-error"}
+	cfg := &config.AgentConfig{LLMConfig: &config.LLMConfig{
+		BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema,
+	}}
+	_, _, err := NewObserveProcess[ObserveResult](t.Context(), fileContext.NewObservationContext(state, nil, nil)).Run(cfg, state)
+	if err == nil || !strings.Contains(err.Error(), "create response") || calls != 1 {
+		t.Fatalf("requests = %d, err = %v", calls, err)
 	}
 }
 
