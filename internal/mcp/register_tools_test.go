@@ -9,7 +9,7 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func TestRegisterToolsExposesAllFileTools(t *testing.T) {
+func TestRegisterToolsExposesAllWorkspaceTools(t *testing.T) {
 	server := sdk.NewServer(&sdk.Implementation{Name: "test"}, nil)
 	if err := RegisterTools(server, Config{Workspace: t.TempDir()}); err != nil {
 		t.Fatal(err)
@@ -43,7 +43,7 @@ func TestRegisterToolsExposesAllFileTools(t *testing.T) {
 		}
 		for name, property := range schema.Properties {
 			if property.Type == "null" || len(property.Types) != 0 {
-				t.Errorf("tool %s property %s must have a non-null scalar type: %s", tool.Name, name, encoded)
+				t.Errorf("tool %s property %s must have a non-null type: %s", tool.Name, name, encoded)
 			}
 		}
 		// 直接校验 MCP 定义，确保省略参数仍可用，但显式 null 会被拒绝。
@@ -58,7 +58,7 @@ func TestRegisterToolsExposesAllFileTools(t *testing.T) {
 			}
 		}
 	}
-	for _, name := range []string{"list_dir", "read_file", "glob", "grep", "apply_patch"} {
+	for _, name := range []string{"list_dir", "read_file", "glob", "grep", "apply_patch", "exec"} {
 		if !got[name] {
 			t.Errorf("registered tools missing %q: %#v", name, got)
 		}

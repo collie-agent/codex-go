@@ -38,7 +38,7 @@ make build
 - 顶层仅支持 `name`、`base`、`agents`。`name` 必填且当前只能是 `react`；`base` 必须提供完整有效的 `llm`。`agents` 可省略或为空。
 - `agents` 只接受 `react`、`task_analyzer`、`observe`。每种类型分别从自身设置和 `base` 解析，不会继承其他类型的独立设置；未设置某项时逐项回退到 base。
 - `llm` 是整块替换。提供独立 `llm` 后，base 中未列出的 LLM 字段不会回退；`model` 必填，`base_url` 默认 `https://api.openai.com/v1`，`output_schema` 默认 `json_llm_output`，也支持 `line_protocol_llm_output`。
-- `allow_tools` 列表整体替换，不与 base 合并。省略时回退到 base，显式 `[]` 禁用工具。合法工具为 `read_file`、`list_dir`、`glob`、`grep` 和 `apply_patch`。
+- `allow_tools` 列表整体替换，不与 base 合并。省略时回退到 base，显式 `[]` 禁用工具。合法工具为 `read_file`、`list_dir`、`glob`、`grep`、`apply_patch` 和 `exec`。
 - `sys_prompt` 省略时回退到 base；显式 `""` 清除自定义提示词。最终非空自定义提示词会追加在对应代理的内置提示词后。
 - `task_analyzer` 和 `observe` 始终没有工具能力，不会暴露或执行工具。base 的工具列表不会授予它们权限；为其显式设置非空 `allow_tools` 会导致启动报错，省略或 `[]` 均可。
 - 密钥可用 `api_key` 明文提供，或用 `api_key_env` 指定环境变量；两者互斥。两者都省略时读取 `OPENAI_API_KEY`。最终密钥不能为空，错误信息不会包含密钥值。示例只使用环境变量名，不含真实密钥。
@@ -60,6 +60,18 @@ agents:
 ```
 
 ## 启动参数与结果
+
+MCP 的 `exec` 工具调用示例：
+
+```json
+{"command":"git","args":["status","--short"]}
+```
+
+Agent 使用时需在 `allow_tools` 中加入 `exec`。入口仅允许 `find`、`git`、`grep`、`npm`、`poetry`、`python`、`python3`、`rg`、`sed`、`ts-node`、`tsx`；`args` 可省略，不接受 shell 字符串或工具级 `cwd`。命令固定在 Workspace 根目录执行，可读写整个 Workspace（包括 `.git` 和删除文件），默认禁网；stdin 为 EOF，结束或中断后清理全部子进程。
+
+三个 CLI 入口均可重复传入 `--runtime-dir /path/to/runtime`，由宿主授权额外只读运行时目录。对于 Node prefix 布局，可分别传入 `--runtime-dir /path/to/node/bin --runtime-dir /path/to/node/lib`。运行目录加入受控 PATH；命令调用不能追加挂载或继承宿主环境。执行需要 Linux、bwrap 和 seccomp，缺少隔离能力时仅 `exec` 调用失败，文件工具仍可用。命名 Unix socket、io_uring 和非本机 ABI 不可用；此版本没有 CPU、内存、进程数或磁盘配额。
+
+`exec` 返回 `stdout`、`stderr`、`exit_code`、`truncated`；普通非零退出返回执行结果。参数、启动、超时或取消错误设置 `isError`，并提供 `error_kind`、`error` 及已捕获输出；没有运行命令时退出码为 `-1`。两路捕获合计最多 1 MiB，完整 MCP 响应大小可能使输出进一步截断，不能续读。服务端 `--timeout` 生效，但 `exec` 最长运行 30 秒。
 
 Agent 模式要求非空 `--task` 和 `--workspace`；`--timeout` 必须为正值，默认 30 秒，仅限制单次工具调用。现有 CLI 参数保持不变，最大执行轮数仍固定为 100，不提供 YAML 或 CLI 配置项。成功完成时输出最终答案并以 0 退出；执行失败、配置错误或达到轮数上限时报告原因并以非 0 退出。
 

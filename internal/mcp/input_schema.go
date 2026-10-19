@@ -3,6 +3,7 @@ package mcp
 import (
 	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 )
@@ -21,6 +22,15 @@ func toolInputSchema[T any]() *jsonschema.Schema {
 	schema, err := jsonschema.ForType(reflect.StructOf(fields), nil)
 	if err != nil {
 		panic(fmt.Sprintf("generate MCP input schema: %v", err))
+	}
+	// Optional string slices mean an omitted array, not a nullable argument. Keep the
+	// SDK's element schema while removing the null alternative inferred for nil.
+	for _, field := range fields {
+		if field.Type == reflect.TypeFor[[]string]() {
+			name := strings.Split(field.Tag.Get("json"), ",")[0]
+			property := schema.Properties[name]
+			property.Type, property.Types = "array", nil
+		}
 	}
 	return schema
 }

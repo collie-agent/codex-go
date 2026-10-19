@@ -8,4 +8,5 @@ const (
 	GlobMCPToolName       McpToolName = "glob"
 	GrepMCPToolName       McpToolName = "grep"
 	ApplyPatchMCPToolName McpToolName = "apply_patch"
+	ExecMCPToolName       McpToolName = "exec"
 )

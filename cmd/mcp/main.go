@@ -17,6 +17,11 @@ import (
 func main() {
 	workspace := flag.String("workspace", "", "workspace directory (required)")
 	timeout := flag.Duration("timeout", 30*time.Second, "tool command timeout")
+	var runtimeDirs []string
+	flag.Func("runtime-dir", "host-authorized read-only exec runtime directory (repeatable)", func(dir string) error {
+		runtimeDirs = append(runtimeDirs, dir)
+		return nil
+	})
 	flag.Parse()
 	if *workspace == "" || *timeout <= 0 {
 		fmt.Fprintln(os.Stderr, "--workspace is required and --timeout must be positive")
@@ -29,7 +34,7 @@ func main() {
 		}
 	}
 	server := sdk.NewServer(&sdk.Implementation{Name: "codex-go-mcp", Version: "0.1.0"}, nil)
-	if err := filemcp.RegisterTools(server, filemcp.Config{Workspace: *workspace, Timeout: *timeout}); err != nil {
+	if err := filemcp.RegisterTools(server, filemcp.Config{Workspace: *workspace, Timeout: *timeout, RuntimeDirs: runtimeDirs}); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

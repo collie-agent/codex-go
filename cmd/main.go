@@ -22,13 +22,18 @@ func main() {
 	timeout := flag.Duration("timeout", 30*time.Second, "tool command timeout")
 	configPath := flag.String("config", "", "YAML agent configuration")
 	task := flag.String("task", "", "agent task")
+	var runtimeDirs []string
+	flag.Func("runtime-dir", "host-authorized read-only exec runtime directory (repeatable)", func(dir string) error {
+		runtimeDirs = append(runtimeDirs, dir)
+		return nil
+	})
 	flag.Parse()
 	var err error
 	if *configPath != "" {
 		// 指定配置才进入 Agent 模式；否则保留原有 MCP stdio 入口。
-		err = runAgent(*configPath, *task, *workspace, *timeout)
+		err = runAgent(*configPath, *task, *workspace, *timeout, runtimeDirs...)
 	} else {
-		err = run(*workspace, *timeout)
+		err = run(*workspace, *timeout, runtimeDirs...)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -36,7 +41,7 @@ func main() {
 	}
 }
 
-func runAgent(configPath, task, workspace string, timeout time.Duration) error {
+func runAgent(configPath, task, workspace string, timeout time.Duration, runtimeDirs ...string) error {
 	if strings.TrimSpace(task) == "" {
 		return fmt.Errorf("--task is required when --config is specified")
 	}
@@ -55,7 +60,7 @@ func runAgent(configPath, task, workspace string, timeout time.Duration) error {
 	defer cancel()
 	durableState := &fileContext.DurableState{RunId: "cli-task", Goal: task}
 	process, err := agent.NewReactProcess[agent.ReactResult](ctx,
-		filemcp.Config{Workspace: workspace, Timeout: timeout})
+		filemcp.Config{Workspace: workspace, Timeout: timeout, RuntimeDirs: runtimeDirs})
 	if err != nil {
 		return err
 	}
@@ -67,7 +72,7 @@ func runAgent(configPath, task, workspace string, timeout time.Duration) error {
 	return nil
 }
 
-func run(workspace string, timeout time.Duration) error {
+func run(workspace string, timeout time.Duration, runtimeDirs ...string) error {
 	if workspace == "" {
 		return fmt.Errorf("--workspace is required")
 	}
@@ -80,7 +85,7 @@ func run(workspace string, timeout time.Duration) error {
 		}
 	}
 	server := sdk.NewServer(&sdk.Implementation{Name: "codex-go", Version: "0.1.0"}, nil)
-	if err := filemcp.RegisterTools(server, filemcp.Config{Workspace: workspace, Timeout: timeout}); err != nil {
+	if err := filemcp.RegisterTools(server, filemcp.Config{Workspace: workspace, Timeout: timeout, RuntimeDirs: runtimeDirs}); err != nil {
 		return err
 	}
 	err := server.Run(context.Background(), &sdk.StdioTransport{})

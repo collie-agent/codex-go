@@ -25,6 +25,9 @@ const (
 type Config struct {
 	Workspace string
 	Timeout   time.Duration
+	// RuntimeDirs are host-authorized read-only directories for exec; tool
+	// arguments cannot add mounts or change the controlled executable PATH.
+	RuntimeDirs []string
 }
 
 type ReadFileLine struct {
@@ -38,7 +41,7 @@ type ReadFileResult struct {
 	NextOffset *int           `json:"next_offset"`
 }
 
-// RegisterTools registers the file tools on server. The workspace is resolved
+// RegisterTools registers workspace tools on server. The workspace is resolved
 // once so all relative paths share the same root.
 func RegisterTools(server *sdk.Server, config Config) error {
 	workspace, err := resolveWorkspace(config.Workspace)
@@ -74,6 +77,7 @@ func RegisterTools(server *sdk.Server, config Config) error {
 	registerGlobTool(server, workspace, config.Timeout)
 	registerGrepTool(server, workspace, config.Timeout)
 	registerApplyPatchTool(server, workspace, config.Timeout)
+	registerExecTool(server, workspace, config)
 	return nil
 }
 

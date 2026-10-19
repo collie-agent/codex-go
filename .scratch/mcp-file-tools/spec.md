@@ -4,7 +4,7 @@ Status: ready-for-agent
 
 ## 已确认的要求
 
-- 使用 `github.com/modelcontextprotocol/go-sdk/mcp` 提供 `list_dir`、`read_file`、`glob`、`grep`、`apply_patch`。
+- 使用 `github.com/modelcontextprotocol/go-sdk/mcp` 提供 `list_dir`、`read_file`、`glob`、`grep`、`apply_patch` 和 `exec`。
 - `list_dir` 通过 `find` 实现；`read_file` 通过 `sed` 实现；`glob` 和 `grep` 通过 `rg` 实现。
 - 启动时指定工作目录，相对路径以该目录为基准。只允许访问工作目录内的文件，符号链接同样遵守此范围。
 - `read_file.offset` 是从 1 开始的起始行，默认 1；`limit` 是最多读取的行数，默认 200；结果附带行号。
@@ -35,6 +35,7 @@ Status: ready-for-agent
 | `glob` | `pattern`、`path="."`、`include_ignored=false`、`offset=0`、`limit=200` |
 | `grep` | `pattern`、`path="."`、`glob`（可选文件过滤）、`literal=false`、`ignore_case=false`、`include_ignored=false`、`offset=0`、`limit=200` |
 | `apply_patch` | `patch` |
+| `exec` | `command`、`args=[]`（字符串数组） |
 
 - 不提供工具级 `cwd`。
 - `grep.path` 可以是文件或目录；`list_dir.path` 和 `glob.path` 必须是目录。
@@ -73,7 +74,58 @@ Status: ready-for-agent
 
 ## 设计状态
 
-全部访谈问题已由用户确认，当前无待定设计分支。实现以本规格及补丁 ADR 为准。
+原有文件工具及新增命令 sandbox 的完整设计均已由用户最终确认，无待定设计分支。实现以本规格及相关 ADR 为准。
+
+## 新增命令 sandbox（已确认）
+
+### 已确认
+
+- 在 `internal/mcp/exec.go` 新增独立的内部命令执行器；现有文件工具的命令调用不接入它。按后续用户要求将其注册为 MCP `exec` 工具。
+- 使用 bwrap 构建 sandbox，入口命令仅允许 `find`、`git`、`grep`、`npm`、`poetry`、`python`、`python3`、`rg`、`sed`、`ts-node`、`tsx`。
+- 白名单只约束入口命令；允许入口命令启动其他程序，整个子进程树受同一 sandbox 边界约束。
+- sandbox 内允许读写整个 Workspace，包括删除文件、修改 `.git` 和在工作区内安装依赖。
+- 禁止访问工作区外的用户数据；运行必需的系统文件只读暴露，临时目录单独隔离。
+- 默认完全禁网，包括访问宿主机网络服务；在线依赖下载与 Git 远程操作不可用。
+- 上述 sandbox 保证适用于新增执行器，不代表现有文件工具或 Go 进程中的 `apply_patch` 已由 bwrap 隔离。
+- 内部接口接受 context、Workspace、命令名和参数数组；固定在 Workspace 根目录执行，不提供 shell 字符串或独立 cwd。
+- 命令名必须精确匹配入口白名单，不接受可执行文件路径。
+- 仅自动暴露必要的系统运行目录；其他运行时目录由宿主配置显式加入并只读挂载，命令调用方不能扩大挂载范围。不自动挂载整个 HOME；显式加入目录的内容对 sandbox 内所有程序可读。
+- 清空继承环境，仅设置必要的 PATH、语言环境以及指向隔离目录的 HOME 和缓存目录；不继承 token、SSH agent 或代理配置。Workspace 内的敏感文件仍包含在完整读写授权内。
+- 非 Linux、bwrap 缺失、所需隔离不可用或 sandbox 创建失败均返回错误，绝不退回宿主执行；相关检查仅影响新增执行器。
+- 入口命令是否安装在调用时检查，不要求预先安装全部 11 个入口命令。
+- 默认超时 30 秒并支持 context 取消；超时、取消或入口命令退出后清理全部子进程，不支持跨调用存活的后台任务。
+- 非交互执行，stdin 关闭并呈现 EOF；分别返回 stdout、stderr、退出码及截断标记。两路输出合计最多保留 1 MiB，超出后继续排空并丢弃，避免因输出管道阻塞而挂起。
+- 普通非零退出码作为执行结果返回；参数错误、sandbox 启动失败、超时和取消返回可区分的错误，并保留已捕获输出。
+- 第一版只限制执行时间和捕获输出，不设置 CPU、内存、进程数或工作区磁盘配额；用户接受超时前仍可能耗尽这些宿主资源，不能将此版本描述为具备恶意代码资源隔离能力。
+- 执行器初始化时固定受控 PATH 的目录集合，包含必要系统目录和宿主显式配置的运行时目录；入口命令仅从该集合解析，不搜索 Workspace。子进程使用同一初始 PATH，仍允许项目脚本显式运行工作区内的程序。
+- 新增执行器额外拒绝将 `/` 用作 Workspace，拒绝 Workspace 与系统运行目录重叠，拒绝将整个宿主根目录或 HOME 作为额外运行时目录挂载。Workspace 本身仍由宿主明确授权；其中的虚拟环境按工作区权限访问。
+- 使用独立的进程、网络、IPC、主机名和用户命名空间并移除 capabilities；只提供隔离的 `/proc`、最小 `/dev`、临时目录和必需系统配置，不暴露宿主 socket 或额外文件描述符。
+- 使用继承到子进程的 seccomp 过滤器禁止创建 Unix socket，防止通过只读运行时目录或 Workspace 中的 pathname socket 连接宿主服务；允许匿名 `socketpair` 用于内部 IPC。禁止可绕过该限制的 `io_uring`、旧式 `socketcall` 和非本机 ABI；过滤器不可用时拒绝执行。
+- 所需隔离能力不可用时拒绝执行；进程树清理必须覆盖命令正常退出、超时和取消，不能只杀死入口命令。
+
+### 确认状态
+
+- Q1–Q14 均已逐项确认，当前设计问题前沿为空。
+- 用户已最终确认本节完整表达其意图，设计访谈结束，实现任务可执行。
+- 实现任务见 `issues/06-bwrap-command-executor.md`；安全边界见 `docs/adr/0002-command-sandbox-boundary.md`。
+
+### MCP exec 接入（后续用户要求）
+
+- MCP 默认注册 `exec`；Agent 通过 `allow_tools: [exec]` 显式允许调用，工具名配置接受 `exec`。
+- 接受必填字符串 `command` 和可省略的字符串数组 `args`（默认空数组）；拒绝 `null`、shell 字符串、可执行文件路径及 `cwd`、环境、挂载等额外参数。执行器保持现有入口白名单和 sandbox 边界。
+- Workspace 固定为启动时配置；宿主可通过 `Config.RuntimeDirs` 或可重复的 `--runtime-dir` 指定只读运行时目录，工具调用不能扩大挂载范围。三个 CLI 入口均支持该参数。
+- 返回 `stdout`、`stderr`、`exit_code`、`truncated`；普通非零退出仍为成功的工具调用。执行错误设置 MCP `isError`，另返回 `error_kind`（`parameter`、`sandbox_startup`、`timeout`、`canceled`）及 `error`，保留已有输出；未运行命令时 `exit_code=-1`。Schema 校验失败由 MCP SDK 返回工具错误。
+- 执行时限为服务端 `--timeout` 与内部 30 秒上限中的较短者，同时支持请求取消；不提供工具级超时参数。
+- 先遵守内部两路合计 1 MiB 捕获上限，再按完整 MCP 响应的 JSON 字节上限进一步截断，包含结构化结果、JSON 文本及 SDK 元数据空间；标记 `truncated=true`，没有继续读取或重新执行机制。非法 UTF-8 字节在文本表示中替换为 U+FFFD。
+- Linux、bwrap、seccomp 或宿主运行时配置不可用时，仅 `exec` 返回启动错误；文件工具及 MCP 工具发现仍可用，绝不退回宿主执行。
+- 任务见 `issues/10-register-exec-mcp-tool.md`。
+
+### 访谈记录
+
+- 第一轮：用户修正 Q1，现有命令调用不接入新增执行器；其余确认入口白名单语义、工作区读写边界和默认禁网。
+- 第二轮：用户全部确认 Q5–Q9，确定调用接口、显式只读运行时目录、环境清理、隔离失败时拒绝执行和进程树生命周期。
+- 第三轮：用户全部确认 Q10–Q14，确定非交互输入输出、错误与输出上限、资源配额不在第一版范围内、受控 PATH、根目录约束和命名空间隔离要求。
+- 最终确认：用户回复 `confirm`，确认完整设计，实现任务标记为 `ready-for-agent`。
 
 ## 参考实现事实
 

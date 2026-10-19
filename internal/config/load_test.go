@@ -18,6 +18,7 @@ base:
   allow_tools:
     - read_file
     - grep
+    - exec
 `), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -40,6 +41,9 @@ base:
 	}
 	if _, ok := got.AllowTools[GrepMCPToolName]; !ok {
 		t.Fatal("grep was not enabled")
+	}
+	if _, ok := got.AllowTools[ExecMCPToolName]; !ok {
+		t.Fatal("exec was not enabled")
 	}
 }
 
