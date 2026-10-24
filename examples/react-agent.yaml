@@ -1,4 +1,6 @@
 name: react
+# info 显示上下文和工具结果；error 仍显示工具调用名称、ID、参数和 LLM response text。
+log_level: info
 base:
   llm:
     # 留空 base_url 时默认使用 https://api.openai.com/v1。

@@ -1,9 +1,11 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,6 +33,10 @@ func TestOrchestratorModeRouting(t *testing.T) {
 		{"", "plan-execute", []string{"task_analyzer", "plan", "react", "react"}},
 	} {
 		t.Run(tt.mode+"/"+tt.configName, func(t *testing.T) {
+			var logs bytes.Buffer
+			writer := log.Writer()
+			log.SetOutput(&logs)
+			defer log.SetOutput(writer)
 			models := make(chan string, 10)
 			reactCalls := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -74,7 +80,7 @@ func TestOrchestratorModeRouting(t *testing.T) {
 			}))
 			defer server.Close()
 			path := filepath.Join(t.TempDir(), "agent.yaml")
-			yaml := "name: " + tt.configName + "\nbase:\n  llm:\n    base_url: " + server.URL + "\n    api_key: test\n    model: react\nagents:\n"
+			yaml := "name: " + tt.configName + "\nlog_level: error\nbase:\n  llm:\n    base_url: " + server.URL + "\n    api_key: test\n    model: react\nagents:\n"
 			for _, model := range []string{"task_analyzer", "plan"} {
 				yaml += "  " + model + ":\n    llm:\n      base_url: " + server.URL + "\n      api_key: test\n      model: " + model + "\n"
 			}
@@ -95,6 +101,14 @@ func TestOrchestratorModeRouting(t *testing.T) {
 			results, err := o.Run(cfg, state)
 			if err != nil || len(results) != 1 || results[0].Answer != "done" {
 				t.Fatalf("Run() = %+v, %v", results, err)
+			}
+			if tt.mode == "" {
+				want := "task mode-test: [task_analyzer] mode=" + tt.configName + "\n"
+				if strings.Count(logs.String(), "[task_analyzer] mode=") != 1 || !strings.Contains(logs.String(), want) {
+					t.Errorf("expected selected mode log %q, got %q", want, logs.String())
+				}
+			} else if strings.Contains(logs.String(), "[task_analyzer] mode=") {
+				t.Errorf("skipped analyzer emitted mode log: %s", logs.String())
 			}
 			close(models)
 			var got []string

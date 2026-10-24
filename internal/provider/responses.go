@@ -22,6 +22,11 @@ type responsesApiClient[T any] struct {
 	agentConfig     *config.AgentConfig
 	contextLogLabel string
 	systemPrompt    string
+	logLevel        config.LogLevel
+}
+
+func (c *responsesApiClient[T]) SetLogLevel(level config.LogLevel) {
+	c.logLevel = level
 }
 
 // SetContextLogLabel 仅标记当前客户端的上下文日志，不修改任务 ID 或模型请求。
@@ -90,8 +95,10 @@ func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId,
 			return result, nil, "", fmt.Errorf("task %s: generate JSON output schema: %w", taskId, err)
 		}
 		// Print the exact schema attached to text.format for JSON output runs.
-		if encodedSchema, err := json.MarshalIndent(schema, "", "  "); err == nil {
-			fmt.Fprintf(os.Stderr, "task %s: JSON schema=\n%s\n", taskId, encodedSchema)
+		if c.logLevel.InfoEnabled() {
+			if encodedSchema, err := json.MarshalIndent(schema, "", "  "); err == nil {
+				fmt.Fprintf(os.Stderr, "task %s: JSON schema=\n%s\n", taskId, encodedSchema)
+			}
 		}
 		// Responses API 通过 text.format 约束最终文本，工具调用仍按原有流程处理。
 		textConfig.Format.OfJSONSchema = &responses.ResponseFormatTextJSONSchemaConfigParam{
@@ -171,14 +178,16 @@ func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId,
 		params.Input = responses.ResponseNewParamsInputUnion{OfInputItemList: items}
 	}
 	// 从最终请求生成可读日志；单次日志调用避免并发请求交错。
-	encodedContext, err := formatLLMContext(params)
-	if err != nil {
-		return result, nil, "", fmt.Errorf("task %s: encode LLM context: %w", taskId, err)
-	}
-	if c.contextLogLabel != "" {
-		log.Printf("task %s: [%s] LLM context=\n%s", taskId, c.contextLogLabel, encodedContext)
-	} else {
-		log.Printf("task %s: LLM context=\n%s", taskId, encodedContext)
+	if c.logLevel.InfoEnabled() {
+		encodedContext, err := formatLLMContext(params)
+		if err != nil {
+			return result, nil, "", fmt.Errorf("task %s: encode LLM context: %w", taskId, err)
+		}
+		if c.contextLogLabel != "" {
+			log.Printf("task %s: [%s] LLM context=\n%s", taskId, c.contextLogLabel, encodedContext)
+		} else {
+			log.Printf("task %s: LLM context=\n%s", taskId, encodedContext)
+		}
 	}
 	response, err := c.client.Responses.New(ctx, params)
 	if err != nil {
@@ -206,6 +215,7 @@ func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId,
 	for _, item := range response.Output {
 		if item.Type == "function_call" {
 			call := item.AsFunctionCall()
+			// 两种日志级别均保留完整调用参数，便于追踪实际执行的操作。
 			fmt.Fprintf(os.Stderr, "task %s: tool calling name=%s call_id=%s arguments=%s\n",
 				taskId, call.Name, call.CallID, call.Arguments)
 			toolCalls = append(toolCalls, call)
@@ -213,13 +223,16 @@ func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId,
 	}
 
 	text := response.OutputText()
+	// 响应文本是用户可见输出；error 级别及携带工具调用的轮次也保留。
+	if strings.TrimSpace(text) != "" {
+		fmt.Fprintf(os.Stderr, "task %s: LLM response text=%s\n", taskId, text)
+	}
 	if len(toolCalls) > 0 {
 		return result, toolCalls, text, nil
 	}
 	if strings.TrimSpace(text) == "" {
 		return result, nil, "", fmt.Errorf("task %s: response output is empty", taskId)
 	}
-	fmt.Fprintf(os.Stderr, "task %s: LLM response text=%s\n", taskId, text)
 	if c.agentConfig.LLMConfig.OutputSchema == config.LineProtocolLLMOutputSchema {
 		text = lineProtocolResponseDocument(text)
 	}

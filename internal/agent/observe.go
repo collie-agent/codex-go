@@ -49,6 +49,7 @@ func (o *ObserveProcess[T]) Run(agentConfig *config.AgentConfig, durableState *f
 	}
 	// Observation only analyzes supplied data, so no MCP tools are exposed.
 	client.SetContextLogLabel("observe")
+	client.SetLogLevel(agentConfig.LogLevel)
 	input := observationContext.FormatWithSysPrompt(agentConfig.SysPrompt)
 	input = appendContextFewShot(input, &observationContext, agentConfig.LLMConfig.OutputSchema)
 	for formatErrors := 0; ; {

@@ -49,6 +49,8 @@ type pendingPatch struct {
 	rel     string
 }
 
+const patchFormatHelp = `Pass {"patch":"--- /dev/null\n+++ notes.txt\n@@ -0,0 +1 @@\n+hello\n"} (creation example). The patch string must contain actual newlines after JSON decoding. Use unified diff, not *** Begin Patch; prefix context lines with a space, removals with -, and additions with +.`
+
 var hunkRE = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
 
 // registerApplyPatchTool registers apply_patch against the shared workspace.
@@ -68,18 +70,18 @@ func registerApplyPatchTool(server *sdk.Server, workspace string, timeout time.D
 
 func ApplyPatch(ctx context.Context, workspace, text string) (applyPatchResult, error) {
 	if strings.TrimSpace(text) == "" {
-		return applyPatchResult{}, patchErr(patchInvalid, "patch must be a non-empty string")
+		return applyPatchResult{}, patchErr(patchInvalid, "patch must be a non-empty string. "+patchFormatHelp)
 	}
 	files, err := parsePatch(text)
 	if err != nil {
-		return applyPatchResult{}, patchErr(patchInvalid, err.Error())
+		return applyPatchResult{}, patchErr(patchInvalid, err.Error()+"\n"+patchFormatHelp)
 	}
 	root, err := resolveWorkspace(workspace)
 	if err != nil {
 		return applyPatchResult{}, patchErr(patchPath, err.Error())
 	}
 	if len(files) == 0 {
-		return applyPatchResult{}, patchErr(patchInvalid, "patch contains no file changes")
+		return applyPatchResult{}, patchErr(patchInvalid, "patch contains no file changes; expected ---/+++ file headers. "+patchFormatHelp)
 	}
 	type prepared struct {
 		fp       filePatch
@@ -88,7 +90,7 @@ func ApplyPatch(ctx context.Context, workspace, text string) (applyPatchResult, 
 	preparedFiles := make([]prepared, 0, len(files))
 	for _, fp := range files {
 		if fp.oldPath != "/dev/null" && fp.newPath != "/dev/null" && fp.oldPath != fp.newPath {
-			return applyPatchResult{}, patchErr(patchInvalid, "path change is not a valid unified diff")
+			return applyPatchResult{}, patchErr(patchInvalid, fmt.Sprintf("renames are not supported: old path %q differs from new path %q; use the same workspace-relative path for modifications", fp.oldPath, fp.newPath))
 		}
 		p := prepared{fp: fp}
 		if fp.oldPath != "/dev/null" {
@@ -154,11 +156,11 @@ func ApplyPatch(ctx context.Context, workspace, text string) (applyPatchResult, 
 		}
 		lines := splitKeepends(content)
 		cursor, delta := 0, 0
-		for _, h := range p.fp.hunks {
+		for hunkIndex, h := range p.fp.hunks {
 			var e error
 			lines, cursor, delta, e = applyHunk(lines, h, cursor, delta)
 			if e != nil {
-				return applyPatchResult{Affected: affected}, patchErr(patchConflict, "patch does not apply to "+p.fp.oldPath+": "+e.Error())
+				return applyPatchResult{Affected: affected}, patchErr(patchConflict, fmt.Sprintf("patch does not apply to %q, hunk %d (@@ -%d,%d +%d,%d @@): %s", p.fp.oldPath, hunkIndex+1, h.oldStart, h.oldCount, h.newStart, h.newCount, e))
 			}
 		}
 		if p.fp.newPath == "/dev/null" {
@@ -291,20 +293,22 @@ func parsePatch(text string) ([]filePatch, error) {
 	for i := 0; i < len(raw); {
 		if !strings.HasPrefix(raw[i], "--- ") {
 			if len(out) > 0 && strings.TrimSpace(raw[i]) != "" && !patchPreamble(raw[i]) {
-				return nil, fmt.Errorf("unexpected line outside hunk")
+				return nil, patchParseError(raw, i, "unexpected line outside hunk; expected --- file header or @@ hunk header")
 			}
 			i++
 			continue
 		}
 		if i+1 >= len(raw) || !strings.HasPrefix(raw[i+1], "+++ ") {
-			return nil, fmt.Errorf("expected +++ header")
+			return nil, patchParseError(raw, i+1, "expected +++ header immediately after --- header")
 		}
+		fileHeaderLine := i
 		fp := filePatch{oldPath: patchHeaderPath(raw[i][4:]), newPath: patchHeaderPath(raw[i+1][4:])}
 		i += 2
 		for i < len(raw) && strings.HasPrefix(raw[i], "@@") {
+			hunkHeaderLine := i
 			m := hunkRE.FindStringSubmatch(strings.TrimSuffix(raw[i], "\n"))
 			if m == nil {
-				return nil, fmt.Errorf("malformed hunk header")
+				return nil, patchParseError(raw, i, "malformed hunk header; expected @@ -oldStart,oldCount +newStart,newCount @@")
 			}
 			h := patchHunk{oldStart: atoi(m[1]), oldCount: atoiDefault(m[2]), newStart: atoi(m[3]), newCount: atoiDefault(m[4])}
 			i++
@@ -319,13 +323,13 @@ func parsePatch(text string) ([]filePatch, error) {
 						(oldSeen == h.oldCount && newSeen == h.newCount) ||
 						(i+2 == len(raw) && (oldSeen+1 != h.oldCount || newSeen+1 != h.newCount))) {
 					if oldSeen+1 == h.oldCount && newSeen+1 == h.newCount {
-						return nil, fmt.Errorf("ambiguous ---/+++ boundary; add context lines or separate files with diff --git")
+						return nil, patchParseError(raw, i, "ambiguous ---/+++ boundary; add context lines or separate files with diff --git")
 					}
 					break
 				}
 				if strings.TrimRight(line, "\r\n") == "\\ No newline at end of file" {
 					if len(h.lines) == 0 || strings.HasPrefix(raw[i-1], "\\") {
-						return nil, fmt.Errorf("invalid no-newline marker")
+						return nil, patchParseError(raw, i, "invalid no-newline marker; place it immediately after a context, removal, or addition line")
 					}
 					h.lines[len(h.lines)-1].text = strings.TrimRight(h.lines[len(h.lines)-1].text, "\r\n")
 					i++
@@ -339,7 +343,7 @@ func parsePatch(text string) ([]filePatch, error) {
 					continue
 				}
 				if line[0] != ' ' && line[0] != '+' && line[0] != '-' {
-					return nil, fmt.Errorf("invalid hunk body line")
+					return nil, patchParseError(raw, i, "invalid hunk body line; prefix context with a space, removals with -, and additions with +")
 				}
 				if line[0] != '+' {
 					oldSeen++
@@ -352,17 +356,40 @@ func parsePatch(text string) ([]filePatch, error) {
 			}
 			h.oldCount, h.newCount = oldSeen, newSeen
 			if len(h.lines) == 0 {
-				return nil, fmt.Errorf("empty hunk")
+				return nil, patchParseError(raw, hunkHeaderLine, "empty hunk; add context, removal, or addition lines")
 			}
 			fp.hunks = append(fp.hunks, h)
 		}
 		if len(fp.hunks) == 0 {
-			return nil, fmt.Errorf("no hunks for file")
+			return nil, patchParseError(raw, fileHeaderLine, fmt.Sprintf("no hunks for file %q; add an @@ -oldStart,oldCount +newStart,newCount @@ hunk", fp.newPath))
 		}
 		out = append(out, fp)
 	}
 	return out, nil
 }
+
+// Quote and bound input excerpts so invisible whitespace is visible without
+// letting a malformed patch consume the model's context or the response limit.
+func patchExcerpt(text string) string {
+	const limit = 240
+	if len(text) <= limit {
+		return fmt.Sprintf("%q", text)
+	}
+	end := limit
+	for end > 0 && !utf8.RuneStart(text[end]) {
+		end--
+	}
+	return fmt.Sprintf("%q... (truncated)", text[:end])
+}
+
+func patchParseError(lines []string, index int, message string) error {
+	got := "<end of patch>"
+	if index < len(lines) {
+		got = patchExcerpt(lines[index])
+	}
+	return fmt.Errorf("patch line %d: %s; got %s", index+1, message, got)
+}
+
 func patchPreamble(line string) bool {
 	for _, prefix := range []string{"diff --git ", "index ", "new file mode ", "deleted file mode ", "old mode ", "new mode "} {
 		if strings.HasPrefix(line, prefix) {
@@ -418,7 +445,7 @@ func applyHunk(lines []string, h patchHunk, cursor, delta int) ([]string, int, i
 	if len(old) == 0 {
 		pos := h.oldStart + delta
 		if pos < cursor || pos > len(lines) {
-			return nil, 0, 0, fmt.Errorf("insertion point out of range")
+			return nil, 0, 0, fmt.Errorf("insertion point out of range: requested position %d (oldStart %d + prior line delta %d), allowed positions %d..%d; re-read the file and correct the hunk start", pos, h.oldStart, delta, cursor, len(lines))
 		}
 		return append(append(append([]string{}, lines[:pos]...), neu...), lines[pos:]...), pos + len(neu), delta + h.newCount, nil
 	}
@@ -437,7 +464,14 @@ func applyHunk(lines []string, h patchHunk, cursor, delta int) ([]string, int, i
 			}
 		}
 	}
-	return nil, 0, 0, fmt.Errorf("hunk context does not match file content")
+	// These are the exact old lines the matcher searched for, not a guessed match.
+	var detail strings.Builder
+	fmt.Fprintf(&detail, "hunk context does not match file content; searched forward from line %d in a file with %d lines. Expected context/removal lines (up to 5):", cursor+1, len(lines))
+	for i := 0; i < len(old) && i < 5; i++ {
+		fmt.Fprintf(&detail, "\n  %s", patchExcerpt(old[i]))
+	}
+	detail.WriteString("\nRe-read the file and rebuild the hunk using its current contents; keep hunks in file order. Changing line numbers alone will not fix a context mismatch.")
+	return nil, 0, 0, errors.New(detail.String())
 }
 
 // Keep this table identical to atom-mcp's limited punctuation equivalents.

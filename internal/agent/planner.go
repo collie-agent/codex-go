@@ -73,6 +73,7 @@ func (p *PlannerProcess) Run(agentConfig *config.AgentConfig, durableState *file
 	if err != nil {
 		return PlannerResult{}, nil, fmt.Errorf("task %s: planner: %w", taskID, err)
 	}
+	client.SetLogLevel(agentConfig.LogLevel)
 	input := appendContextFewShot(plannerContext.Format(), plannerContext, agentConfig.LLMConfig.OutputSchema)
 	result, toolCalls, _, err := client.Run(p.ctx, taskID, input, nil)
 	if err != nil {

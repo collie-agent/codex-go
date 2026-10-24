@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os/exec"
 	"slices"
 	"strings"
@@ -246,6 +247,14 @@ func (o *ProcessorOrchestrator) runProcessor(agentType AgentProcessorType, agent
 		analysis, next, err := process.Run(agentConfig, state)
 		if err == nil && o.executionMode == PlanAgentType {
 			next = []AgentProcessorType{PlanAgentType}
+		}
+		if err == nil {
+			mode := "react"
+			if o.executionMode == PlanAgentType {
+				mode = "plan-execute"
+			}
+			// 在模式覆盖完成后记录实际执行模式；error 级别也保留此调度信息。
+			log.Printf("task %s: [task_analyzer] mode=%s", state.RunId, mode)
 		}
 		return processorResult{analysis: &analysis, next: next}, err
 	case PlanAgentType:

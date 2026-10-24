@@ -139,6 +139,7 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 			}
 			var callErr *toolCallError
 			if errors.As(err, &callErr) {
+				log.Printf("task %s: [react] tool calling error: %v", durableState.RunId, err)
 				// 非法调用整批拒绝，反馈原始错误后在当前轮重试，不放行任何工具副作用。
 				toolCallErrors++
 				if toolCallErrors > maxToolCallErrors {
@@ -320,7 +321,13 @@ func (r *ReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, toolP
 		}
 		return append(next, result)
 	})
-	log.Printf("tool result: %+v", result)
+	// 错误独立于结果详情打印，确保 error 级别也能看到可恢复的工具失败。
+	if result.Error != "" {
+		log.Printf("[react] tool calling error: %s", result.Error)
+	}
+	if agentConfig == nil || agentConfig.LogLevel.InfoEnabled() {
+		log.Printf("[react] tool calling result: %+v", result)
+	}
 	if config.McpToolName(toolParam.Name) == config.ApplyPatchMCPToolName || config.McpToolName(toolParam.Name) == config.ExecMCPToolName {
 		// exec 的参数和原始结果随快照交给观察器，由 LLM 筛选影响后续决策的新增信息。
 		// Observation is a separate processor and must use its own resolved

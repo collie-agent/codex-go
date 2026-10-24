@@ -7,6 +7,44 @@ import (
 	"testing"
 )
 
+func TestLoadAgentConfigLogLevel(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test")
+	for _, level := range []string{"", "info", "error", "debug"} {
+		t.Run("level="+level, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "agent.yaml")
+			data := "name: react\nbase:\n  llm:\n    model: test\nagents:\n  observe:\n    sys_prompt: observer\n"
+			if level != "" {
+				data += "log_level: " + level + "\n"
+			}
+			if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadAgentConfig(path)
+			if level == "debug" {
+				if err == nil || !strings.Contains(err.Error(), "unknown log_level") {
+					t.Fatalf("invalid log level error = %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := InfoLogLevel
+			if level != "" {
+				want = LogLevel(level)
+			}
+			if cfg.LogLevel != want {
+				t.Fatalf("log level = %q, want %q", cfg.LogLevel, want)
+			}
+			for _, name := range []string{"base", "react", "observe", "task_analyzer", "plan"} {
+				if got := cfg.ForAgent(name).LogLevel; got != want {
+					t.Errorf("%s log level = %q, want %q", name, got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestLoadAgentConfigAppliesDefaultsAndResolvesEnvironmentKey(t *testing.T) {
 	t.Setenv("YAML_AGENT_TEST_KEY", "secret-value")
 	path := filepath.Join(t.TempDir(), "agent.yaml")

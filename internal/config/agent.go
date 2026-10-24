@@ -12,6 +12,7 @@ import (
 
 type AgentConfig struct {
 	Name       string
+	LogLevel   LogLevel
 	LLMConfig  *LLMConfig
 	AllowTools map[McpToolName]struct{}
 	SysPrompt  string
@@ -45,7 +46,7 @@ func cloneAgentConfig(c *AgentConfig) *AgentConfig {
 	if c == nil {
 		return nil
 	}
-	clone := &AgentConfig{Name: c.Name, SysPrompt: c.SysPrompt, LLMConfig: nil, AllowTools: make(map[McpToolName]struct{}, len(c.AllowTools))}
+	clone := &AgentConfig{Name: c.Name, LogLevel: c.LogLevel, SysPrompt: c.SysPrompt, LLMConfig: nil, AllowTools: make(map[McpToolName]struct{}, len(c.AllowTools))}
 	if c.LLMConfig != nil {
 		llm := *c.LLMConfig
 		clone.LLMConfig = &llm
@@ -86,6 +87,12 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 	if strings.TrimSpace(raw.Name) == "" {
 		return nil, fmt.Errorf("config name is required")
 	}
+	if raw.LogLevel == "" {
+		raw.LogLevel = InfoLogLevel
+	}
+	if raw.LogLevel != InfoLogLevel && raw.LogLevel != ErrorLogLevel {
+		return nil, fmt.Errorf("unknown log_level %q: must be info or error", raw.LogLevel)
+	}
 	if raw.Name != "react" && raw.Name != "plan-execute" {
 		return nil, fmt.Errorf("unknown agent type %q", raw.Name)
 	}
@@ -122,6 +129,10 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 		if name != "react" {
 			resolved[name].AllowTools = map[McpToolName]struct{}{}
 		}
+	}
+	// 日志级别属于整个运行，所有独立代理及配置副本使用相同级别。
+	for _, cfg := range resolved {
+		cfg.LogLevel = raw.LogLevel
 	}
 	entry := raw.Name
 	if entry == "plan-execute" {
@@ -216,9 +227,10 @@ func rejectNull(node *yaml.Node) error {
 }
 
 type yamlAgentConfig struct {
-	Name   string                        `yaml:"name"`
-	Base   *yamlAgentSettings            `yaml:"base"`
-	Agents map[string]*yamlAgentSettings `yaml:"agents"`
+	Name     string                        `yaml:"name"`
+	LogLevel LogLevel                      `yaml:"log_level"`
+	Base     *yamlAgentSettings            `yaml:"base"`
+	Agents   map[string]*yamlAgentSettings `yaml:"agents"`
 }
 type yamlAgentSettings struct {
 	LLM        *yamlLLMConfig `yaml:"llm"`

@@ -49,6 +49,7 @@ func (w *Worker[T]) Run(modelContext fileContext.Contexter) (T, string, []*mcpSd
 		return result, "", nil, err
 	}
 	client.SetContextLogLabel(request.LogLabel)
+	client.SetLogLevel(w.agentConfig.LogLevel)
 	client.SetSystemPrompt(request.SystemPrompt)
 	input := appendContextFewShot(request.Input, modelContext, w.agentConfig.LLMConfig.OutputSchema)
 	// 当前步骤验收标准必须位于格式约束之后。
@@ -76,7 +77,9 @@ func (w *Worker[T]) Run(modelContext fileContext.Contexter) (T, string, []*mcpSd
 		return zero, "", nil, fmt.Errorf("task %s: %s returned unexpected tool calls", request.RunID, request.LogLabel)
 	}
 	// This is the assistant's visible response text for the ReAct turn, not hidden reasoning.
-	fmt.Fprintf(os.Stderr, "task %s: assistant output=%s\n", request.RunID, assistantOutput)
+	if w.agentConfig.LogLevel.InfoEnabled() {
+		fmt.Fprintf(os.Stderr, "task %s: assistant output=%s\n", request.RunID, assistantOutput)
+	}
 	var toolParams []*mcpSdk.CallToolParams
 	if len(toolCalls) > 0 {
 		for _, call := range toolCalls {

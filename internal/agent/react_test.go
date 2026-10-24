@@ -1,9 +1,11 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -324,23 +326,39 @@ func TestUpdateContextErrorDetails(t *testing.T) {
 		name      string
 		arguments any
 		result    *mcpSdk.CallToolResult
+		err       error
 		want      string
 	}{
 		{name: "arguments encoding", arguments: make(chan int), want: "failed to encode arguments as JSON (type chan int)"},
 		{name: "result encoding", result: &mcpSdk.CallToolResult{Content: []mcpSdk.Content{&mcpSdk.TextContent{Meta: mcpSdk.Meta{"invalid": make(chan int)}}}}, want: "failed to encode MCP result as JSON; result cannot be added to context"},
 		{name: "empty tool error", result: &mcpSdk.CallToolResult{IsError: true}, want: "MCP returned isError=true without a non-empty text error message"},
+		{name: "transport error", err: errors.New("connection closed"), want: "MCP call failed: connection closed"},
+		{name: "tool execution error", result: &mcpSdk.CallToolResult{IsError: true, Content: []mcpSdk.Content{&mcpSdk.TextContent{Text: "file does not exist"}}}, want: "tool execution failed (MCP isError=true): file does not exist"},
+		{name: "arguments validation", err: errors.New("invalid tool arguments: path is required"), want: "invalid tool arguments: path is required"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			writer := log.Writer()
+			log.SetOutput(&logs)
+			defer log.SetOutput(writer)
 			rc := fileContext.NewReactContext(nil)
 			r := &ReactProcess[ReactResult]{}
-			r.updateContext(tt.result, &mcpSdk.CallToolParams{Meta: mcpSdk.Meta{toolCallIDMetaKey: "call_failure"}, Name: "read_file", Arguments: tt.arguments}, rc, nil, nil)
+			r.updateContext(tt.result, &mcpSdk.CallToolParams{Meta: mcpSdk.Meta{toolCallIDMetaKey: "call_failure"}, Name: "read_file", Arguments: tt.arguments}, rc, tt.err, &config.AgentConfig{LogLevel: config.ErrorLogLevel})
 			got := rc.ToolResults[0]
 			if got.Status != filemcp.ToolCallFailedStatus {
 				t.Fatalf("unexpected status: %q", got.Status)
 			}
 			if got.ToolCallId != "call_failure" || !strings.Contains(got.Error, `tool "read_file" (call_id="call_failure")`) || !strings.Contains(got.Error, tt.want) {
 				t.Fatalf("missing error details: %+v", got)
+			}
+			for _, want := range []string{"[react] tool calling error:", `tool "read_file"`, `call_id="call_failure"`, tt.want} {
+				if !strings.Contains(logs.String(), want) {
+					t.Errorf("error log missing %q: %s", want, logs.String())
+				}
+			}
+			if strings.Contains(logs.String(), "tool calling result:") {
+				t.Errorf("error level printed result details: %s", logs.String())
 			}
 		})
 	}
