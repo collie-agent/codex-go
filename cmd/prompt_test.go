@@ -35,7 +35,7 @@ func TestRunAgentSendsYAMLSysPromptAfterBuiltInPrompt(t *testing.T) {
 	if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := runAgent(path, "完成任务", t.TempDir(), 5*time.Second); err != nil {
+	if err := runPersistedTestAgent(t, path, "完成任务", t.TempDir(), 5*time.Second); err != nil {
 		t.Fatal(err)
 	}
 
@@ -72,7 +72,7 @@ func TestRunAgentKeepsBuiltInPromptWhenYAMLSysPromptIsEmpty(t *testing.T) {
 			if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
 				t.Fatal(err)
 			}
-			if err := runAgent(path, "完成任务", t.TempDir(), 5*time.Second); err != nil {
+			if err := runPersistedTestAgent(t, path, "完成任务", t.TempDir(), 5*time.Second); err != nil {
 				t.Fatal(err)
 			}
 			if !strings.Contains(requestInput, "你是 ReAct agent 的单轮决策器。") {

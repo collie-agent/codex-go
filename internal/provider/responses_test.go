@@ -187,7 +187,7 @@ func TestResponsesRunToolsWithoutHistoryAndClientReuse(t *testing.T) {
 				t.Errorf("request missing tool %s", name)
 			}
 		}
-		if request.Input != "Read notes.txt\n\n"+jsonFewShotPrompt {
+		if request.Input != "Read notes.txt" {
 			t.Errorf("unexpected input: %q", request.Input)
 		}
 		if request.PreviousResponseID != "" {

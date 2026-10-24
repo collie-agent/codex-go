@@ -48,6 +48,13 @@ func TestObserveRun(t *testing.T) {
 						t.Errorf("observation input missing %q: %s", want, request.Input)
 					}
 				}
+				formatMarker := "Output format: JSON."
+				if tc.schema == config.LineProtocolLLMOutputSchema {
+					formatMarker = "Final text output format: Line Protocol."
+				}
+				if strings.Count(request.Input, formatMarker) != 1 {
+					t.Error("expected exactly one observation format contract")
+				}
 				if strings.Contains(request.Input, "单轮决策器") {
 					t.Error("observation contains worker instructions")
 				}
@@ -109,7 +116,7 @@ func TestObserveExecDecisionRelevance(t *testing.T) {
 					w.WriteHeader(http.StatusBadRequest)
 					return
 				}
-				for _, want := range []string{"exec", "call_exec", `{"command":"npm","args":["test"]}`, "command output", "影响后续决策", "忽略重复信息、无关日志", "省略对应字段", "空数组"} {
+				for _, want := range []string{"exec", "call_exec", `{"command":"npm","args":["test"]}`, "command output", "影响后续决策", "忽略重复信息、无关日志", "空数组"} {
 					if !strings.Contains(request.Input, want) {
 						t.Errorf("exec observation input missing %q: %s", want, request.Input)
 					}

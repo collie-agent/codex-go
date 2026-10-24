@@ -7,21 +7,24 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 	"time"
 
-	"github.com/collie-agent/codex-go/internal/agent"
-	"github.com/collie-agent/codex-go/internal/config"
-	fileContext "github.com/collie-agent/codex-go/internal/context"
+	"github.com/collie-agent/codex-go/internal/application"
 	filemcp "github.com/collie-agent/codex-go/internal/mcp"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func main() {
-	workspace := flag.String("workspace", "", "workspace directory (required)")
+	flag.Usage = func() {
+		fmt.Fprintln(flag.CommandLine.Output(), "Agent runs require CODEX_MYSQL_URL and an explicit migration (codex-migrate or go run ./cmd/migrate).")
+		flag.PrintDefaults()
+	}
+	workspace := flag.String("workspace", "", "workspace directory (required for new runs; optional when resuming)")
 	timeout := flag.Duration("timeout", 30*time.Second, "tool command timeout")
 	configPath := flag.String("config", "", "YAML agent configuration")
+	convID := flag.String("conv-id", "", "existing conversation ID (creates a conversation when omitted)")
 	task := flag.String("task", "", "agent task")
+	runID := flag.String("run-id", "", "resume an existing agent run")
 	var runtimeDirs []string
 	flag.Func("runtime-dir", "host-authorized read-only exec runtime directory (repeatable)", func(dir string) error {
 		runtimeDirs = append(runtimeDirs, dir)
@@ -29,9 +32,15 @@ func main() {
 	})
 	flag.Parse()
 	var err error
-	if *configPath != "" {
+	if *runID != "" && *configPath == "" {
+		err = fmt.Errorf("--config is required when --run-id is provided")
+	} else if *configPath != "" {
 		// 指定配置才进入 Agent 模式；否则保留原有 MCP stdio 入口。
-		err = runAgent(*configPath, *task, *workspace, *timeout, runtimeDirs...)
+		if *runID != "" {
+			err = resumeAgent(*configPath, *runID, *workspace, *timeout, runtimeDirs...)
+		} else {
+			err = runAgentInConversation(*configPath, *task, *workspace, *convID, *timeout, runtimeDirs...)
+		}
 	} else {
 		err = run(*workspace, *timeout, runtimeDirs...)
 	}
@@ -41,34 +50,34 @@ func main() {
 	}
 }
 
-func runAgent(configPath, task, workspace string, timeout time.Duration, runtimeDirs ...string) error {
-	if strings.TrimSpace(task) == "" {
-		return fmt.Errorf("--task is required when --config is specified")
-	}
-	if workspace == "" {
-		return fmt.Errorf("--workspace is required")
-	}
-	if timeout <= 0 {
-		return fmt.Errorf("--timeout must be positive")
-	}
-	loaded, err := config.LoadAgentConfig(configPath)
-	if err != nil {
-		return err
-	}
-	// --timeout 只限制单次工具调用；多轮模型决策不共享这个时限。
+func resumeAgent(configPath, runID, workspace string, timeout time.Duration, runtimeDirs ...string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	durableState := &fileContext.DurableState{RunId: "cli-task", Goal: task}
-	process, err := agent.NewReactProcess[agent.ReactResult](ctx,
-		filemcp.Config{Workspace: workspace, Timeout: timeout, RuntimeDirs: runtimeDirs})
+	results, err := application.Resume(ctx, application.Options{ConfigPath: configPath, RunID: runID, Workspace: workspace, Timeout: timeout, RuntimeDirs: runtimeDirs, Stderr: os.Stderr})
 	if err != nil {
 		return err
 	}
-	result, _, err := process.Run(loaded, durableState)
+	for _, result := range results {
+		fmt.Println(result.Answer)
+	}
+	return nil
+}
+
+func runAgent(configPath, task, workspace string, timeout time.Duration, runtimeDirs ...string) error {
+	return runAgentInConversation(configPath, task, workspace, "", timeout, runtimeDirs...)
+}
+
+func runAgentInConversation(configPath, task, workspace, convID string, timeout time.Duration, runtimeDirs ...string) error {
+	// 工具超时不限制整个模型运行；返回后取消异步观察器。
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	results, err := application.Run(ctx, application.Options{ConfigPath: configPath, Task: task, Workspace: workspace, ConvID: convID, Mode: "react", Timeout: timeout, RuntimeDirs: runtimeDirs, Stderr: os.Stderr})
 	if err != nil {
 		return err
 	}
-	fmt.Println(result.Answer)
+	for _, result := range results {
+		fmt.Println(result.Answer)
+	}
 	return nil
 }
 

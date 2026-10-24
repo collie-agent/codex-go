@@ -15,6 +15,45 @@ import (
 	fileContext "github.com/collie-agent/codex-go/internal/context"
 )
 
+func TestTaskAnalyzerFewShotMatchesOutputSchema(t *testing.T) {
+	for _, schema := range []config.LLMOutputSchema{config.JsonLLMOutputSchema, config.LineProtocolLLMOutputSchema} {
+		t.Run(string(schema), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var request struct {
+					Input string `json:"input"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Error(err)
+					return
+				}
+				wantLine := schema == config.LineProtocolLLMOutputSchema
+				if strings.Contains(request.Input, "# Task analyzer Line Protocol examples") != wantLine {
+					t.Error("task analyzer few-shot does not match configured output schema")
+				}
+				text := `{"NeedsTools":false,"ExpectedSteps":1,"ReasoningSummary":"direct answer","CompletionCriteria":[]}`
+				if wantLine {
+					text = "BEGIN TASK_ANALYZER_RESULT\nNEEDSTOOLS=false\nEXPECTEDSTEPS=1\nREASONINGSUMMARY=\"direct answer\"\nEND TASK_ANALYZER_RESULT"
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"id": "resp_analyzer", "status": "completed",
+					"output": []any{map[string]any{"type": "message", "role": "assistant", "status": "completed", "content": []any{
+						map[string]any{"type": "output_text", "text": text},
+					}}},
+				})
+			}))
+			defer server.Close()
+			cfg := &config.AgentConfig{LLMConfig: &config.LLMConfig{
+				BaseUrl: server.URL, ApiKey: "test", Model: "analyzer", OutputSchema: schema,
+			}}
+			_, _, err := NewTaskAnalyzerProcess[TaskAnalyzerResult](context.Background()).Run(cfg, &fileContext.DurableState{RunId: "few-shot", Goal: "translate hello"})
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestTaskAnalyzerRunUsesItsResolvedConfiguration(t *testing.T) {
 	var captured struct {
 		model string
@@ -52,8 +91,13 @@ func TestTaskAnalyzerRunUsesItsResolvedConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := &fileContext.DurableState{RunId: "analyzer-task", Goal: "translate hello"}
-	if _, _, err := NewTaskAnalyzerProcess[TaskAnalyzerResult](context.Background()).Run(loaded.ForAgent("task_analyzer"), state); err != nil {
+	process := NewTaskAnalyzerProcess[TaskAnalyzerResult](context.Background())
+	process.Workspace = t.TempDir()
+	if _, _, err := process.Run(loaded.ForAgent("task_analyzer"), state); err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(captured.input, "# Workspace\n\n> "+process.Workspace) || !strings.Contains(captured.input, "应判定需要读取文件（NeedsTools 为 true）") {
+		t.Fatalf("analyzer omitted workspace or project analysis rule: %s", captured.input)
 	}
 	if captured.model != "analyzer-model" {
 		t.Fatalf("analyzer used model %q", captured.model)

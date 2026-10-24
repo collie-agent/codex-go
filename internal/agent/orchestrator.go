@@ -30,6 +30,7 @@ type ProcessorOrchestrator struct {
 	executionMode AgentProcessorType
 	toolConfig    filemcp.Config
 	mcpCommand    func() *exec.Cmd
+	checkpoint    func(*fileContext.DurableState, string) error
 }
 
 // NewProcessorOrchestrator 从任务分析器开始，后续节点由各处理器的返回值决定。
@@ -65,6 +66,22 @@ func (o *ProcessorOrchestrator) SetMode(mode string) error {
 		return fmt.Errorf("unsupported mode %q: expected react or plan-execute", mode)
 	}
 	return nil
+}
+
+// SetCheckpoint 设置执行边界的持久化操作；失败时不再调度后续处理器。
+func (o *ProcessorOrchestrator) SetCheckpoint(save func(*fileContext.DurableState, string) error) {
+	o.checkpoint = save
+}
+
+func (o *ProcessorOrchestrator) saveCheckpoint(state *fileContext.DurableState) error {
+	if o.checkpoint == nil {
+		return nil
+	}
+	mode := "react"
+	if o.executionMode == PlanAgentType {
+		mode = "plan-execute"
+	}
+	return o.checkpoint(state.Clone(), mode)
 }
 
 // Run 按批次执行动态处理流程，按分支顺序返回每个终止分支的最后一个 ReAct 结果。
@@ -127,6 +144,15 @@ func (o *ProcessorOrchestrator) runBatches(agentConfig *config.AgentConfig, dura
 			case TaskAnalyzerAgentType, ReactAgentType, PlanAgentType, EndAgentType:
 			default:
 				return nil, fmt.Errorf("orchestrator: unsupported processor type %q", agentType)
+			}
+		}
+
+		// 整批 checkpoint 全部成功后才启动处理器，写入失败不能放行其他分支。
+		for _, branch := range batch {
+			if branch.agentType != EndAgentType {
+				if err := o.saveCheckpoint(branch.state); err != nil {
+					return nil, err
+				}
 			}
 		}
 
@@ -216,6 +242,7 @@ func (o *ProcessorOrchestrator) runProcessor(agentType AgentProcessorType, agent
 	switch agentType {
 	case TaskAnalyzerAgentType:
 		process := NewTaskAnalyzerProcess[TaskAnalyzerResult](o.ctx)
+		process.Workspace = o.toolConfig.Workspace
 		analysis, next, err := process.Run(agentConfig, state)
 		if err == nil && o.executionMode == PlanAgentType {
 			next = []AgentProcessorType{PlanAgentType}
@@ -237,6 +264,12 @@ func (o *ProcessorOrchestrator) runProcessor(agentType AgentProcessorType, agent
 				return processorResult{}, fmt.Errorf("plan executor: no pending step at index %d", state.CurrentStepIndex)
 			}
 			step.Status = RunningExecutionStatus
+			state.Error = ""
+			// Persist the running boundary before constructing the executor or
+			// making a model request, so recovery always has an explicit state.
+			if err := o.saveCheckpoint(state); err != nil {
+				return processorResult{state: state}, err
+			}
 		}
 		var process *ReactProcess[ReactResult]
 		var err error
@@ -248,22 +281,38 @@ func (o *ProcessorOrchestrator) runProcessor(agentType AgentProcessorType, agent
 		if err != nil {
 			if planExecute {
 				step.Status = FailedExecutionStatus
+				state.Error = err.Error()
+				if checkpointErr := o.saveCheckpoint(state); checkpointErr != nil {
+					return processorResult{state: state}, errors.Join(err, checkpointErr)
+				}
 				return processorResult{state: state}, fmt.Errorf("create processor %q: %w", agentType, err)
 			}
 			return processorResult{}, fmt.Errorf("create processor %q: %w", agentType, err)
 		}
+		process.SetCheckpoint(func() error { return o.saveCheckpoint(state) })
 		result, _, err := process.Run(agentConfig, state)
 		// ReAct 不负责选择运行模式；orchestrator 决定结束或回到 planner。
 		next := []AgentProcessorType{EndAgentType}
 		if planExecute {
 			if err != nil {
 				step.Status = FailedExecutionStatus
+				state.Error = err.Error()
+				if checkpointErr := o.saveCheckpoint(state); checkpointErr != nil {
+					return processorResult{state: state}, errors.Join(err, checkpointErr)
+				}
 				return processorResult{state: state}, err
 			}
 			step.Status = CompletedExecutionStatus
+			state.Error = ""
 			// 直接保留 executor 的结构化结果，供后续步骤读取。
 			step.Observation = slices.Clone(result.Observation)
 			step.CompletionEvidence = slices.Clone(result.CompletionEvidence)
+			// Persist the complete structured result together with the completed
+			// step, allowing finalization to replay without another model call.
+			state.Result = result
+			if err := o.saveCheckpoint(state); err != nil {
+				return processorResult{state: state}, err
+			}
 			next = []AgentProcessorType{PlanAgentType}
 			return processorResult{react: &result, state: state, next: next}, nil
 		}

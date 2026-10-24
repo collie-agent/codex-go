@@ -35,8 +35,8 @@ func TestWorkerSendsNativeToolResults(t *testing.T) {
 					w.WriteHeader(http.StatusBadRequest)
 					return
 				}
-				if len(request.Input) != 5 {
-					t.Errorf("expected two call/output pairs and current context: %+v", request.Input)
+				if len(request.Input) != 6 {
+					t.Errorf("expected system, user, and two call/output pairs: %+v", request.Input)
 					w.WriteHeader(http.StatusBadRequest)
 					return
 				}
@@ -44,7 +44,7 @@ func TestWorkerSendsNativeToolResults(t *testing.T) {
 					{"call_read", "read_file", `{"path":"notes.txt"}`, "file content"},
 					{"call_error", "grep", `{}`, "worker-tool-error: access refused"},
 				} {
-					call, output := request.Input[2*i+1], request.Input[2*i+2]
+					call, output := request.Input[2*i+2], request.Input[2*i+3]
 					if call.Type != "function_call" || call.CallID != want.id || call.Name != want.name || call.Arguments != want.args {
 						t.Errorf("unexpected function call: %+v", call)
 					}
@@ -52,7 +52,20 @@ func TestWorkerSendsNativeToolResults(t *testing.T) {
 						t.Errorf("unexpected tool result: %+v", output)
 					}
 				}
-				input := request.Input[0]
+				if request.Input[0].Role != "system" || !strings.Contains(request.Input[0].Content, "你是 ReAct agent 的单轮决策器。") {
+					t.Errorf("missing ReAct system message: %+v", request.Input[0])
+				}
+				input := request.Input[1]
+				formatMarker := "Output format: JSON."
+				if schema == config.LineProtocolLLMOutputSchema {
+					formatMarker = "Final text output format: Line Protocol."
+				}
+				if strings.Count(input.Content, formatMarker) != 1 || !strings.Contains(input.Content, "# Required result schema") {
+					t.Error("expected one format contract and the context's result schema")
+				}
+				if strings.Contains(input.Content, "# sysPrompt") {
+					t.Error("system prompt duplicated in user context")
+				}
 				if input.Role != "user" || !strings.Contains(input.Content, "inspect notes") || !strings.HasSuffix(input.Content, "> notes verified") {
 					t.Errorf("expected ReAct context with trailing completion criteria: %+v", input)
 				}
@@ -114,6 +127,69 @@ func TestWorkerSendsNativeToolResults(t *testing.T) {
 			}
 			if len(rc.ToolResults) != 2 || rc.ToolResults[0].Result != "file content" || rc.ToolResults[1].Error != "worker-tool-error: access refused" {
 				t.Fatal("formatting model input changed retained tool results")
+			}
+		})
+	}
+}
+
+// 自定义实现验证 worker 仅依赖接口，并且上下文的工具限制优先于 worker 配置。
+type workerTestContext struct {
+	request fileContext.ModelRequest
+}
+
+func (c workerTestContext) ModelRequest() fileContext.ModelRequest { return c.request }
+func (c workerTestContext) JsonFewShot() string                    { return "custom JSON contract" }
+func (c workerTestContext) LineProtocolFewShot() string            { return "custom line contract" }
+
+func TestWorkerAcceptsContextInterfaceAndHonorsToolRestriction(t *testing.T) {
+	process, err := NewReactProcess[ReactResult](t.Context(), filemcp.Config{Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer process.mcpClientSess.Close()
+	defer process.serverSess.Close()
+
+	for _, unexpectedCall := range []bool{false, true} {
+		t.Run(map[bool]string{false: "result", true: "unexpected tool call"}[unexpectedCall], func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var request struct {
+					Input string `json:"input"`
+					Tools []any  `json:"tools"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Error(err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				if len(request.Tools) != 0 {
+					t.Error("context forbids tools but worker exposed MCP tools")
+				}
+				if request.Input != "custom task\n\ncustom JSON contract\n\ncustom criteria" {
+					t.Errorf("unexpected assembled input: %q", request.Input)
+				}
+				output := []any{observationMessage(`{"status":"completed","answer":"done","Observation":[],"CompletionEvidence":[]}`)}
+				if unexpectedCall {
+					output = []any{map[string]any{"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "read_file", "arguments": `{}`}}
+				}
+				writeObservationResponse(w, output)
+			}))
+			defer server.Close()
+			worker := NewWorker[ReactResult](t.Context(), &config.AgentConfig{
+				AllowTools: map[config.McpToolName]struct{}{config.ReadFileMCPToolName: {}},
+				LLMConfig:  &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema},
+			}, process.mcpClientSess)
+			_, _, calls, err := worker.Run(workerTestContext{request: fileContext.ModelRequest{
+				RunID: "custom", Input: "custom task", TrailingContext: "custom criteria", LogLabel: "custom",
+			}})
+			if unexpectedCall {
+				if err == nil || !strings.Contains(err.Error(), "returned unexpected tool calls") {
+					t.Fatalf("expected rejection of tool calls, got %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if len(calls) != 0 {
+				t.Fatalf("unexpected executable tools: %+v", calls)
 			}
 		})
 	}

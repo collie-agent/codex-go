@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
+	"os"
 
 	"github.com/collie-agent/codex-go/internal/config"
 	fileContext "github.com/collie-agent/codex-go/internal/context"
@@ -13,6 +13,7 @@ import (
 	"github.com/openai/openai-go/v3"
 )
 
+// call responses api + tool calling handling
 type Worker[T LLMSchema] struct {
 	ctx           context.Context
 	agentConfig   *config.AgentConfig
@@ -27,16 +28,29 @@ func NewWorker[T LLMSchema](ctx context.Context, agentConfig *config.AgentConfig
 	}
 }
 
-func (w *Worker[T]) Run(reactContext *fileContext.ReactContext) (T, string, []*mcpSdk.CallToolParams, error) {
+func (w *Worker[T]) Run(modelContext fileContext.Contexter) (T, string, []*mcpSdk.CallToolParams, error) {
 	var result T
-	client, err := provider.NewResponsesApiClient[T](w.agentConfig.LLMConfig, w.agentConfig.AllowTools)
+	request := modelContext.ModelRequest()
+	// 上下文禁用工具时，即使 worker 带有 MCP 会话和权限，也不向模型暴露工具。
+	var allowTools map[config.McpToolName]struct{}
+	var session *mcpSdk.ClientSession
+	if request.AllowTools {
+		allowTools = w.agentConfig.AllowTools
+		session = w.mcpClientSess
+	}
+	client, err := provider.NewResponsesApiClient[T](w.agentConfig.LLMConfig, allowTools)
 	if err != nil {
 		return result, "", nil, err
 	}
-	client.SetContextLogLabel("react")
-	input, toolResults := reactContext.FormatForModel()
+	client.SetContextLogLabel(request.LogLabel)
+	client.SetSystemPrompt(request.SystemPrompt)
+	input := appendContextFewShot(request.Input, modelContext, w.agentConfig.LLMConfig.OutputSchema)
+	// 当前步骤验收标准必须位于格式约束之后。
+	if request.TrailingContext != "" {
+		input += "\n\n" + request.TrailingContext
+	}
 	var messages []provider.ToolMessage
-	for _, tr := range toolResults {
+	for _, tr := range request.ToolResults {
 		content := tr.Result
 		if tr.Error != "" {
 			// 传输错误也必须回填给对应调用，不能被空结果掩盖。
@@ -47,49 +61,28 @@ func (w *Worker[T]) Run(reactContext *fileContext.ReactContext) (T, string, []*m
 			Name:                           tr.ToolName, Arguments: tr.Arguments,
 		})
 	}
-	// 将目标、计划和当前步骤验收标准整体移到协议说明之后，保持相邻顺序。
-	criteria := reactContext.CurrentStepContext()
-	if criteria != "" {
-		input = strings.TrimSpace(strings.TrimSuffix(input, criteria))
-	}
-	if _, ok := any(result).(ReactResult); ok {
-		// Go 字段标签不会自动进入模型请求，显式提供业务结构和所选格式的示例。
-		instructions := reactResultInstructions
-		jsonExample := `{"status":"completed","answer":"Task completed.","Observation":[],"CompletionEvidence":[]}`
-		lineExample := "BEGIN RESULT\nSTATUS=\"completed\"\nANSWER=\"Task completed.\"\nEND RESULT"
-		if step := reactContext.DurableState.CurrentStep(); step != nil && step.Status == fileContext.RunningExecutionStatus {
-			instructions = stepReactResultInstructions
-			jsonExample = `{"status":"completed","answer":"Step completed.","Observation":["Observed actual step result."],"CompletionEvidence":["Evidence satisfying the current step criteria."]}`
-			lineExample = "BEGIN RESULT\nSTATUS=\"completed\"\nANSWER=\"Step completed.\"\nOBSERVATION=\"Observed actual step result.\"\nCOMPLETION_EVIDENCE=\"Evidence satisfying the current step criteria.\"\nEND RESULT"
-		}
-		input += "\n\n# Required result schema\n\n" + instructions
-		switch w.agentConfig.LLMConfig.OutputSchema {
-		case config.JsonLLMOutputSchema:
-			input += "\nJSON example: " + jsonExample
-		case config.LineProtocolLLMOutputSchema:
-			input += "\nLine Protocol example:\n" + lineExample
-		}
-	}
-	result, toolCalls, assistantOutput, err := client.RunWithToolMessages(w.ctx, reactContext.DurableState.RunId, input, w.mcpClientSess, messages, criteria)
+	result, toolCalls, assistantOutput, err := client.RunWithToolMessages(w.ctx, request.RunID, input, session, messages)
 	if err != nil {
 		return result, "", nil, err
 	}
-	// This is the assistant's visible response text for the ReAct turn, not hidden reasoning.
-	if _, ok := any(result).(ReactResult); ok {
-		fmt.Printf("task %s: assistant output=%s\n", reactContext.DurableState.RunId, assistantOutput)
+	if !request.AllowTools && len(toolCalls) > 0 {
+		var zero T
+		return zero, "", nil, fmt.Errorf("task %s: %s returned unexpected tool calls", request.RunID, request.LogLabel)
 	}
+	// This is the assistant's visible response text for the ReAct turn, not hidden reasoning.
+	fmt.Fprintf(os.Stderr, "task %s: assistant output=%s\n", request.RunID, assistantOutput)
 	var toolParams []*mcpSdk.CallToolParams
 	if len(toolCalls) > 0 {
 		for _, call := range toolCalls {
-			if _, ok := w.agentConfig.AllowTools[config.McpToolName(call.Name)]; !ok {
+			if _, ok := allowTools[config.McpToolName(call.Name)]; !ok {
 				return result, "", nil, fmt.Errorf("task %s: tool %s is not allowed",
-					reactContext.DurableState.RunId, call.Name)
+					request.RunID, call.Name)
 			}
 
 			var args map[string]any
 			if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
 				return result, "", nil, fmt.Errorf("task %s: decode tool %s arguments: %w",
-					reactContext.DurableState.RunId, call.Name, err)
+					request.RunID, call.Name, err)
 			}
 
 			toolParams = append(toolParams, &mcpSdk.CallToolParams{
@@ -102,19 +95,14 @@ func (w *Worker[T]) Run(reactContext *fileContext.ReactContext) (T, string, []*m
 	return result, assistantOutput, toolParams, nil
 }
 
-const reactResultInstructions = `When no tools are called, return a result with these required fields:
-- status: "completed" only when the task is complete; "failed" when blocked or unable to continue. No other status is valid.
-- answer: a non-empty final answer for "completed", or a concrete failure reason for "failed".
-- Observation and CompletionEvidence: empty lists of strings in standalone react mode.
-For JSON use the field names status, answer, Observation and CompletionEvidence, with [] for both empty lists. For Line Protocol use root RESULT and only fields STATUS and ANSWER; omit both empty lists entirely. Never emit OBSERVATION="" or COMPLETION_EVIDENCE="" as an empty list: each means a list containing one empty string.
-When calling tools, use the supplied function tools; do not emit a final result until the task completes or fails.`
-
-// 步骤结果与最终答复区分：观察记录实际发生的情况，证据对应当前步骤验收标准。
-const stepReactResultInstructions = `When no tools are called, return these fields for the current plan step only:
-- status: "completed" only when the current step completion criteria are satisfied; "failed" when blocked or unable to continue.
-- Observation: a non-empty list of concrete observed results and facts from executing the current step. Do not invent facts or report hidden reasoning.
-- CompletionEvidence: for "completed", a non-empty list of concrete evidence showing how the current step completion criteria were satisfied. Do not merely restate the criteria. For "failed", use an empty list if no evidence exists.
-- answer: a non-empty summary of the current step result for "completed"; a concrete failure reason for "failed".
-For JSON use status, answer, Observation and CompletionEvidence; both lists contain strings.
-For Line Protocol use root RESULT and STATUS, ANSWER, repeated OBSERVATION and repeated COMPLETION_EVIDENCE fields. Omit empty lists.
-When calling tools, use the supplied function tools; do not emit a final result until the current step completes or fails.`
+// appendContextFewShot 只通过接口选择格式约束，具体业务示例由各 Context 持有。
+func appendContextFewShot(input string, modelContext fileContext.Contexter, schema config.LLMOutputSchema) string {
+	switch schema {
+	case config.JsonLLMOutputSchema:
+		return input + "\n\n" + modelContext.JsonFewShot()
+	case config.LineProtocolLLMOutputSchema:
+		return input + "\n\n" + modelContext.LineProtocolFewShot()
+	default:
+		return input
+	}
+}

@@ -66,7 +66,7 @@ func TestOrchestratorRun(t *testing.T) {
 			requests := make(chan request, 4)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var req request
-				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				if err := decodeModelRequest(r.Body, &req); err != nil {
 					t.Error(err)
 					w.WriteHeader(http.StatusBadRequest)
 					return

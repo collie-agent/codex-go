@@ -14,6 +14,7 @@ import (
 	"github.com/collie-agent/codex-go/internal/agent"
 	"github.com/collie-agent/codex-go/internal/config"
 	fileContext "github.com/collie-agent/codex-go/internal/context"
+	"github.com/collie-agent/codex-go/internal/database"
 	filemcp "github.com/collie-agent/codex-go/internal/mcp"
 )
 
@@ -60,7 +61,7 @@ func TestRunAgentCompletesWithBothOutputSchemas(t *testing.T) {
 			if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
 				t.Fatal(err)
 			}
-			if err := runAgent(path, "完成任务", t.TempDir(), 5*time.Second); err != nil {
+			if err := runPersistedTestAgent(t, path, "完成任务", t.TempDir(), 5*time.Second); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -97,7 +98,7 @@ func TestRunAgentRejectsInvalidFinalResults(t *testing.T) {
 			if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
 				t.Fatal(err)
 			}
-			if err := runAgent(path, "完成任务", t.TempDir(), time.Second); err == nil || !strings.Contains(err.Error(), tc.want) {
+			if err := runPersistedTestAgent(t, path, "完成任务", t.TempDir(), time.Second); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error=%v, want %q", err, tc.want)
 			}
 		})
@@ -127,7 +128,7 @@ func TestRunAgentToolTimeoutDoesNotLimitModelRequests(t *testing.T) {
 	if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := runAgent(path, "完成任务", t.TempDir(), toolTimeout); err != nil {
+	if err := runPersistedTestAgent(t, path, "完成任务", t.TempDir(), toolTimeout); err != nil {
 		t.Fatalf("model request was limited by tool timeout: %v", err)
 	}
 }
@@ -186,7 +187,7 @@ func TestRunAgentUsesYAMLAllowedToolAndReturnsItsResultToModel(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := runAgent(configPath, "读取 notes.txt", workspace, 5*time.Second); err != nil {
+	if err := runPersistedTestAgent(t, configPath, "读取 notes.txt", workspace, 5*time.Second); err != nil {
 		t.Fatal(err)
 	}
 	if requests != 2 {
@@ -221,7 +222,7 @@ func TestRunAgentRejectsModelCallOutsideYAMLAllowedTools(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
 		t.Fatal(err)
 	}
-	err := runAgent(configPath, "列出目录", t.TempDir(), 5*time.Second)
+	err := runPersistedTestAgent(t, configPath, "列出目录", t.TempDir(), 5*time.Second)
 	if err == nil || !strings.Contains(err.Error(), "tool list_dir is not allowed") {
 		t.Fatalf("error=%v, want unallowed tool rejection", err)
 	}
@@ -321,7 +322,7 @@ func TestRunAgentUsesObserveAgentConfiguration(t *testing.T) {
 				t.Fatal(err)
 			}
 			if mode == "CLI" {
-				if err := runAgent(configPath, "修改文件", workspace, 5*time.Second); err != nil {
+				if err := runPersistedTestAgent(t, configPath, "修改文件", workspace, 5*time.Second); err != nil {
 					t.Fatal(err)
 				}
 			} else {
@@ -387,7 +388,7 @@ func TestRunAgentWithEmptyYAMLAllowedToolsExposesNoTools(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := runAgent(configPath, "直接回答", t.TempDir(), 5*time.Second); err != nil {
+	if err := runPersistedTestAgent(t, configPath, "直接回答", t.TempDir(), 5*time.Second); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -402,7 +403,7 @@ func TestRunAgentReportsModelFailure(t *testing.T) {
 	if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := runAgent(path, "完成任务", t.TempDir(), 5*time.Second); err == nil || !strings.Contains(err.Error(), "create response") {
+	if err := runPersistedTestAgent(t, path, "完成任务", t.TempDir(), 5*time.Second); err == nil || !strings.Contains(err.Error(), "create response") {
 		t.Fatalf("error=%v, want model failure", err)
 	}
 }
@@ -411,4 +412,23 @@ func TestRunRejectsMissingWorkspaceDirectory(t *testing.T) {
 	if err := run(t.TempDir()+"/missing", 30*time.Second); err == nil {
 		t.Fatal("expected invalid workspace to fail")
 	}
+}
+
+// 命令入口现在必须持久化；测试只能使用显式指定的隔离测试库。
+func runPersistedTestAgent(t *testing.T, configPath, task, workspace string, timeout time.Duration, runtimeDirs ...string) error {
+	t.Helper()
+	url := os.Getenv("CODEX_TEST_MYSQL_URL")
+	if url == "" {
+		t.Skip("set CODEX_TEST_MYSQL_URL for persistent command tests")
+	}
+	t.Setenv(database.MySQLURLEnv, url)
+	db, err := database.Open(context.Background(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close(db)
+	if err := database.Migrate(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	return runAgent(configPath, task, workspace, timeout, runtimeDirs...)
 }

@@ -141,3 +141,60 @@ func (c *ObservationContext) format(customPrompt string) string {
 	}
 	return strings.TrimSpace(b.String())
 }
+
+func (c *ObservationContext) LineProtocolFewShot() string {
+	return lineProtocolFormatPrompt + "\n\n" + observationLineProtocolFewShot
+}
+func (c *ObservationContext) JsonFewShot() string {
+	return jsonFormatPrompt + "\n\n" + observationJSONFewShot
+}
+
+var _ Contexter = (*ObservationContext)(nil)
+
+// ModelRequest 仅分析已提供的数据，不向模型开放工具。
+func (c *ObservationContext) ModelRequest() ModelRequest {
+	return ModelRequest{RunID: c.DurableState.RunId, Input: c.Format(), LogLabel: "observe"}
+}
+
+// 示例与本上下文的结果字段一致，空列表遵循对应协议。
+const observationJSONFewShot = `# Observation JSON examples
+
+The examples use only this result schema. Do not copy example facts into the original task.
+
+Example 1 input: Return ObserveResult for tool call call_read to read_file. The result contains the full content of notes.txt: hello. No errors occurred, and this fact has not previously been recorded.
+Example 1 output:
+{"ConfirmedFacts":["read_file (call_read) returned the full content of notes.txt: hello."],"ReportedErrors":[]}
+
+Example 2 input: Return ObserveResult for call_read to read_file failing to read private.txt with permission denied. This error has not previously been recorded.
+Example 2 output:
+{"ConfirmedFacts":[],"ReportedErrors":["read_file (call_read) failed to read private.txt: permission denied."]}
+
+Example 3 input: Return ObserveResult for a tool result that adds no new facts or errors relevant to the next decision.
+Example 3 output:
+{"ConfirmedFacts":[],"ReportedErrors":[]}
+
+Now answer the original task using only this schema and the requested format.`
+
+// 示例与本上下文的结果字段一致，空列表遵循对应协议。
+const observationLineProtocolFewShot = `# Observation Line Protocol examples
+
+The examples use only this result schema. Do not copy example facts into the original task.
+
+Example 1 input: Return ObserveResult for tool call call_read to read_file. The result contains the full content of notes.txt: hello. No errors occurred, and this fact has not previously been recorded.
+Example 1 output:
+BEGIN OBSERVE_RESULT
+CONFIRMEDFACTS="read_file (call_read) returned the full content of notes.txt: hello."
+END OBSERVE_RESULT
+
+Example 2 input: Return ObserveResult for call_read to read_file failing to read private.txt with permission denied. This error has not previously been recorded.
+Example 2 output:
+BEGIN OBSERVE_RESULT
+REPORTEDERRORS="read_file (call_read) failed to read private.txt: permission denied."
+END OBSERVE_RESULT
+
+Example 3 input: Return ObserveResult for a tool result that adds no new facts or errors relevant to the next decision.
+Example 3 output:
+BEGIN OBSERVE_RESULT
+END OBSERVE_RESULT
+
+Now answer the original task using only this schema and the requested format.`

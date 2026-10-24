@@ -37,3 +37,25 @@ func NewPlannerContext(ds *DurableState) *PlannerContext {
 		sysPrompt: strings.TrimSpace(plannerSystemPrompt), DurableState: ds,
 	}}
 }
+
+// PlannerContext 覆盖嵌入的分析器协议，避免规划请求带入任务分析结果示例。
+func (c *PlannerContext) LineProtocolFewShot() string { return lineProtocolFormatPrompt }
+func (c *PlannerContext) JsonFewShot() string         { return jsonFormatPrompt + "\n\n" + plannerJSONFewShot }
+
+var _ Contexter = (*PlannerContext)(nil)
+
+// ModelRequest 仅分析已提供的数据，不向模型开放工具。
+func (c *PlannerContext) ModelRequest() ModelRequest {
+	return ModelRequest{RunID: c.DurableState.RunId, Input: c.Format(), LogLabel: "planner"}
+}
+
+// 示例与本上下文的结果字段一致，空列表遵循对应协议。
+const plannerJSONFewShot = `# Planner JSON examples
+
+The examples use only this result schema. Do not copy example facts into the original task.
+
+Example 1 input: Return PlannerResult for the goal: read notes.txt and create summary.txt summarizing it. Plan the two steps in order without executing them. Every initial step has Revision 1, Status pending, and empty Observation and CompletionEvidence lists.
+Example 1 output:
+{"StepExecutions":[{"Revision":1,"StepId":"read-notes","Status":"pending","Intent":"Read notes.txt to obtain the source content for the summary.","CompletionCriteria":"notes.txt has been read successfully and its content is available for summarization.","CompletionEvidence":[],"Observation":[]},{"Revision":1,"StepId":"write-summary","Status":"pending","Intent":"Create summary.txt with an accurate summary of the source content.","CompletionCriteria":"summary.txt exists and its content accurately summarizes notes.txt.","CompletionEvidence":[],"Observation":[]}]}
+
+Now answer the original task using only this schema and the requested format.`

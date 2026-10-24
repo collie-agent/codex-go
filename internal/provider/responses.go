@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 
 	"github.com/collie-agent/codex-go/internal/config"
@@ -20,11 +21,17 @@ type responsesApiClient[T any] struct {
 	client          *openai.Client
 	agentConfig     *config.AgentConfig
 	contextLogLabel string
+	systemPrompt    string
 }
 
 // SetContextLogLabel 仅标记当前客户端的上下文日志，不修改任务 ID 或模型请求。
 func (c *responsesApiClient[T]) SetContextLogLabel(label string) {
 	c.contextLogLabel = label
+}
+
+// SetSystemPrompt 将系统指令作为独立的 system 消息发送。
+func (c *responsesApiClient[T]) SetSystemPrompt(prompt string) {
+	c.systemPrompt = prompt
 }
 
 // OutputParseError 区分可由模型纠正的输出格式错误和请求、配置等运行错误。
@@ -59,8 +66,8 @@ func NewResponsesApiClient[T any](llmConfig *config.LLMConfig, allowTools map[co
 // Responses without tool calls are parsed into T.
 // A nil MCP session sends a request without tools.
 // 方法不能独立声明泛型参数，因此在创建客户端时指定结果类型
-func (c *responsesApiClient[T]) Run(ctx context.Context, taskId, input string, mcpClientSess *sdk.ClientSession, trailingContext ...string) (T, []responses.ResponseFunctionToolCall, string, error) {
-	return c.RunWithToolMessages(ctx, taskId, input, mcpClientSess, nil, trailingContext...)
+func (c *responsesApiClient[T]) Run(ctx context.Context, taskId, input string, mcpClientSess *sdk.ClientSession) (T, []responses.ResponseFunctionToolCall, string, error) {
+	return c.RunWithToolMessages(ctx, taskId, input, mcpClientSess, nil)
 }
 
 // ToolMessage 保留 SDK 原生工具消息及调用信息，供无服务端历史的请求重放。
@@ -70,7 +77,8 @@ type ToolMessage struct {
 	Arguments string
 }
 
-func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId, input string, mcpClientSess *sdk.ClientSession, messages []ToolMessage, trailingContext ...string) (T, []responses.ResponseFunctionToolCall, string, error) {
+// RunWithToolMessages 原样发送调用方组装的 input；格式约束和末尾上下文由调用方负责。
+func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId, input string, mcpClientSess *sdk.ClientSession, messages []ToolMessage) (T, []responses.ResponseFunctionToolCall, string, error) {
 	var result T
 	var outputParser LLMOutputParser[*T]
 	var textConfig responses.ResponseTextConfigParam
@@ -83,26 +91,17 @@ func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId,
 		}
 		// Print the exact schema attached to text.format for JSON output runs.
 		if encodedSchema, err := json.MarshalIndent(schema, "", "  "); err == nil {
-			fmt.Printf("task %s: JSON schema=\n%s\n", taskId, encodedSchema)
+			fmt.Fprintf(os.Stderr, "task %s: JSON schema=\n%s\n", taskId, encodedSchema)
 		}
 		// Responses API 通过 text.format 约束最终文本，工具调用仍按原有流程处理。
 		textConfig.Format.OfJSONSchema = &responses.ResponseFormatTextJSONSchemaConfigParam{
 			Name: "llm_output", Schema: schema, Strict: openai.Bool(true),
 		}
 		outputParser = parser
-		input += "\n\n" + jsonFewShotPrompt
 	case config.LineProtocolLLMOutputSchema:
 		outputParser = &LineProtocolOutput[*T]{}
-		input += "\n\n" + lineProtocolFewShotPrompt
 	default:
 		return result, nil, "", fmt.Errorf("task %s: unsupported output schema %q", taskId, c.agentConfig.LLMConfig.OutputSchema)
-	}
-
-	// 当前步骤的验收标准必须位于整个文本输入末尾，包括输出协议指令之后。
-	for _, suffix := range trailingContext {
-		if strings.TrimSpace(suffix) != "" {
-			input += "\n\n" + suffix
-		}
 	}
 
 	var tools []responses.ToolUnionParam
@@ -143,8 +142,12 @@ func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId,
 		// 当前请求不重放 reasoning 项，显式关闭思考模式以支持后续工具结果回传。
 		Reasoning: shared.ReasoningParam{Effort: shared.ReasoningEffortNone},
 	}
-	if len(messages) > 0 {
+	if len(messages) > 0 || c.systemPrompt != "" {
 		items := make(responses.ResponseInputParam, 0, 2*len(messages)+1)
+		// 系统指令独立于任务数据，工具重放时也保持相同角色。
+		if c.systemPrompt != "" {
+			items = append(items, responses.ResponseInputItemParamOfMessage(c.systemPrompt, responses.EasyInputMessageRoleSystem))
+		}
 		// 先提供 ReAct 上下文，再附上独立的工具调用及结果。
 		items = append(items, responses.ResponseInputItemParamOfMessage(input, responses.EasyInputMessageRoleUser))
 		for _, message := range messages {
@@ -203,7 +206,7 @@ func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId,
 	for _, item := range response.Output {
 		if item.Type == "function_call" {
 			call := item.AsFunctionCall()
-			fmt.Printf("task %s: tool calling name=%s call_id=%s arguments=%s\n",
+			fmt.Fprintf(os.Stderr, "task %s: tool calling name=%s call_id=%s arguments=%s\n",
 				taskId, call.Name, call.CallID, call.Arguments)
 			toolCalls = append(toolCalls, call)
 		}
@@ -216,7 +219,7 @@ func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId,
 	if strings.TrimSpace(text) == "" {
 		return result, nil, "", fmt.Errorf("task %s: response output is empty", taskId)
 	}
-	fmt.Printf("task %s: LLM response text=%s\n", taskId, text)
+	fmt.Fprintf(os.Stderr, "task %s: LLM response text=%s\n", taskId, text)
 	if c.agentConfig.LLMConfig.OutputSchema == config.LineProtocolLLMOutputSchema {
 		text = lineProtocolResponseDocument(text)
 	}

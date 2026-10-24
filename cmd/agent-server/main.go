@@ -10,15 +10,20 @@ import (
 	"time"
 
 	"github.com/collie-agent/codex-go/internal/agent"
-	"github.com/collie-agent/codex-go/internal/config"
-	fileContext "github.com/collie-agent/codex-go/internal/context"
+	"github.com/collie-agent/codex-go/internal/application"
 )
 
 func main() {
-	workspace := flag.String("workspace", "", "workspace directory (required)")
+	flag.Usage = func() {
+		fmt.Fprintln(flag.CommandLine.Output(), "Agent runs require CODEX_MYSQL_URL and an explicit migration (codex-migrate or go run ./cmd/migrate).")
+		flag.PrintDefaults()
+	}
+	workspace := flag.String("workspace", "", "workspace directory (required for new runs; optional when resuming)")
 	timeout := flag.Duration("timeout", 30*time.Second, "tool command timeout")
 	configPath := flag.String("config", "", "YAML agent configuration (required)")
+	convID := flag.String("conv-id", "", "existing conversation ID (creates a conversation when omitted)")
 	task := flag.String("task", "", "agent task (required)")
+	runID := flag.String("run-id", "", "resume an existing agent run")
 	mcpCommand := flag.String("mcp-command", "codex-mcp", "path to MCP server executable")
 	mode := flag.String("mode", "", "execution mode: react or plan-execute (skips task analyzer when set)")
 	var runtimeDirs []string
@@ -27,33 +32,28 @@ func main() {
 		return nil
 	})
 	flag.Parse()
-	if strings.TrimSpace(*task) == "" || *configPath == "" || *workspace == "" || *timeout <= 0 {
-		fmt.Fprintln(os.Stderr, "--config, --task, --workspace are required and --timeout must be positive")
+	if *configPath == "" || (*runID == "" && *workspace == "") || *timeout <= 0 || (*runID == "" && strings.TrimSpace(*task) == "") || (*runID != "" && strings.TrimSpace(*task) != "") {
+		fmt.Fprintln(os.Stderr, "--config and either --task with --workspace or --run-id are required (--task and --run-id are mutually exclusive); --timeout must be positive")
 		os.Exit(2)
 	}
-	ctx := context.Background()
-	mcpArgs := []string{"--workspace", *workspace, "--timeout", timeout.String()}
-	for _, dir := range runtimeDirs {
-		mcpArgs = append(mcpArgs, "--runtime-dir", dir)
-	}
-	orchestrator := agent.NewProcessorOrchestratorWithCommand(ctx, *mcpCommand, mcpArgs...)
-	if err := orchestrator.SetMode(*mode); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+	if *mode != "" && *mode != "react" && *mode != "plan-execute" {
+		fmt.Fprintf(os.Stderr, "unsupported mode %q: expected react or plan-execute\n", *mode)
 		os.Exit(2)
 	}
-	loaded, err := config.LoadAgentConfig(*configPath)
-	if err == nil {
-		durableState := &fileContext.DurableState{RunId: "cli-task", Goal: *task}
-		results, runErr := orchestrator.Run(loaded, durableState)
-		err = runErr
-		if runErr == nil {
-			for _, result := range results {
-				fmt.Println(result.Answer)
-			}
-		}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var results []agent.ReactResult
+	var err error
+	if *runID != "" {
+		results, err = application.Resume(ctx, application.Options{ConfigPath: *configPath, RunID: *runID, Workspace: *workspace, Mode: *mode, MCPCommand: *mcpCommand, Timeout: *timeout, RuntimeDirs: runtimeDirs, Stderr: os.Stderr})
+	} else {
+		results, err = application.Run(ctx, application.Options{ConfigPath: *configPath, Task: *task, Workspace: *workspace, ConvID: *convID, Mode: *mode, MCPCommand: *mcpCommand, Timeout: *timeout, RuntimeDirs: runtimeDirs, Stderr: os.Stderr})
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+	for _, result := range results {
+		fmt.Println(result.Answer)
 	}
 }

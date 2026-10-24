@@ -27,7 +27,7 @@ func TestReactObserveAsync(t *testing.T) {
 		var request struct {
 			Input json.RawMessage `json:"input"`
 		}
-		if err := json.NewDecoder(req.Body).Decode(&request); err != nil {
+		if err := decodeModelRequest(req.Body, &request); err != nil {
 			t.Error(err)
 			return
 		}
@@ -89,7 +89,7 @@ func TestReactExecObservation(t *testing.T) {
 		var request struct {
 			Input string `json:"input"`
 		}
-		if err := json.NewDecoder(req.Body).Decode(&request); err != nil {
+		if err := decodeModelRequest(req.Body, &request); err != nil {
 			t.Error(err)
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -134,7 +134,7 @@ func TestReactRetriesOutputParseErrors(t *testing.T) {
 					var request struct {
 						Input string `json:"input"`
 					}
-					if err := json.NewDecoder(req.Body).Decode(&request); err != nil {
+					if err := decodeModelRequest(req.Body, &request); err != nil {
 						t.Error(err)
 					}
 					if calls > 1 {
@@ -273,7 +273,7 @@ func TestUpdateContext(t *testing.T) {
 	if got.ToolCallId != "call_123" || got.ToolName != "grep" || got.Arguments != `{"pattern":"test"}` {
 		t.Fatalf("unexpected tool parameters: %+v", got)
 	}
-	if !strings.Contains(got.Result, "permission denied") || !strings.Contains(got.Result, "a.go") || !strings.Contains(got.Error, `tool "grep" (call_id="call_123"): MCP call failed: transport error`) || !strings.Contains(got.Error, "tool execution failed (MCP isError=true): permission denied") || !strings.Contains(got.Error, `Tool arguments: {"pattern":"test"}`) {
+	if !strings.Contains(got.Result, "permission denied") || strings.Contains(got.Result, "a.go") || strings.Contains(got.Result, "structuredContent") || !strings.Contains(got.Error, `tool "grep" (call_id="call_123"): MCP call failed: transport error`) || !strings.Contains(got.Error, "tool execution failed (MCP isError=true): permission denied") || !strings.Contains(got.Error, `Tool arguments: {"pattern":"test"}`) {
 		t.Fatalf("unexpected result: %+v", got)
 	}
 	if formatted := rc.Format(); strings.Contains(formatted, "transport error") || strings.Contains(formatted, "permission denied") {
@@ -282,6 +282,24 @@ func TestUpdateContext(t *testing.T) {
 	r.updateContext(nil, &mcpSdk.CallToolParams{Name: "read_file"}, rc, errors.New("read failed"), nil)
 	if len(rc.ToolResults) != 3 || !strings.Contains(rc.ToolResults[2].Error, "MCP call failed: read failed") {
 		t.Fatal("nil result lost the tool error")
+	}
+}
+
+func TestUpdateContextUsesOnlyContent(t *testing.T) {
+	r := &ReactProcess[ReactResult]{}
+	rc := fileContext.NewReactContext(nil)
+	response := &mcpSdk.CallToolResult{
+		Content: []mcpSdk.Content{&mcpSdk.TextContent{Text: "file contents"}},
+		// An unusable structured payload must not affect content recording.
+		StructuredContent: make(chan int),
+	}
+	r.updateContext(response, &mcpSdk.CallToolParams{Name: "read_file"}, rc, nil, nil)
+	got := rc.ToolResults[0]
+	if got.Result != `[{"type":"text","text":"file contents"}]` || got.Status != filemcp.ToolCallSuceessStatus || got.Error != "" {
+		t.Fatalf("unexpected content result: %+v", got)
+	}
+	if response.StructuredContent == nil {
+		t.Fatal("original MCP response was mutated")
 	}
 }
 
@@ -309,7 +327,7 @@ func TestUpdateContextErrorDetails(t *testing.T) {
 		want      string
 	}{
 		{name: "arguments encoding", arguments: make(chan int), want: "failed to encode arguments as JSON (type chan int)"},
-		{name: "result encoding", result: &mcpSdk.CallToolResult{StructuredContent: make(chan int)}, want: "failed to encode MCP result as JSON; result cannot be added to context"},
+		{name: "result encoding", result: &mcpSdk.CallToolResult{Content: []mcpSdk.Content{&mcpSdk.TextContent{Meta: mcpSdk.Meta{"invalid": make(chan int)}}}}, want: "failed to encode MCP result as JSON; result cannot be added to context"},
 		{name: "empty tool error", result: &mcpSdk.CallToolResult{IsError: true}, want: "MCP returned isError=true without a non-empty text error message"},
 	}
 	for _, tt := range tests {

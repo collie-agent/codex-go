@@ -50,6 +50,7 @@ type ReactProcess[T LLMSchema] struct {
 	toolConfig    filemcp.Config
 	mcpClientSess *mcpSdk.ClientSession
 	serverSess    *mcpSdk.ServerSession
+	checkpoint    func() error
 }
 
 // 最大轮数固定在代码中，避免任务通过配置无限延长。
@@ -102,6 +103,9 @@ func newReactProcess[T LLMSchema](ctx context.Context, toolConfig filemcp.Config
 		serverSess:    serverSess,
 	}, nil
 }
+
+// SetCheckpoint 在每批工具执行前确认恢复状态可写；失败立即结束本次运行。
+func (r *ReactProcess[T]) SetCheckpoint(save func() error) { r.checkpoint = save }
 
 func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fileContext.DurableState) (T, []AgentProcessorType, error) {
 	var zero T
@@ -163,6 +167,12 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 				}
 			}
 			return result, []AgentProcessorType{EndAgentType}, nil
+		}
+		// 模型请求期间数据库也可能失效，必须在放行副作用前重新写 checkpoint。
+		if r.checkpoint != nil {
+			if err := r.checkpoint(); err != nil {
+				return zero, nil, err
+			}
 		}
 		r.batchToolCallings(toolParams, rc, agentConfig)
 		if r.ctx.Err() != nil {
@@ -255,7 +265,8 @@ func (r *ReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, toolP
 		}
 	}
 	if callResult != nil {
-		encoded, marshalErr := json.Marshal(callResult)
+		// 只保存 content，避免 structuredContent 的重复数据占用模型上下文。
+		encoded, marshalErr := json.Marshal(callResult.Content)
 		if marshalErr != nil {
 			errors = append(errors, fmt.Sprintf("%s: failed to encode MCP result as JSON; result cannot be added to context: %v", callDescription, marshalErr))
 		} else {

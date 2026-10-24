@@ -50,7 +50,7 @@ func TestFormatForLogIncludesCompleteDurableState(t *testing.T) {
 			}
 		}
 		modelInput, _ := rc.FormatForModel()
-		if modelInput != rc.Format() || strings.Contains(modelInput, "```json") {
+		if modelInput != rc.format(false, false) || strings.Contains(modelInput, "```json") || strings.Contains(modelInput, "# sysPrompt") {
 			t.Fatal("log formatting changed model input")
 		}
 	}

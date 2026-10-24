@@ -1,6 +1,7 @@
 package provider
 
 import (
+	fileContext "github.com/collie-agent/codex-go/internal/context"
 	"strings"
 	"testing"
 )
@@ -32,7 +33,7 @@ func TestLineProtocolFewShotExamples(t *testing.T) {
 		Aliases   []string     `json:"aliases"`
 		Fallback  *detail      `json:"fallback"`
 	}
-	sections := strings.Split(lineProtocolFewShotPrompt, " output:\n")[1:]
+	sections := strings.Split((&fileContext.PlannerContext{}).LineProtocolFewShot(), " output:\n")[1:]
 	if len(sections) != 5 {
 		t.Fatalf("expected five examples, got %d", len(sections))
 	}

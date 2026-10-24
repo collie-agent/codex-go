@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -34,7 +35,7 @@ func TestOrchestratorModeRouting(t *testing.T) {
 			reactCalls := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var req struct{ Model, Input string }
-				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				if err := decodeModelRequest(r.Body, &req); err != nil {
 					t.Error(err)
 					w.WriteHeader(http.StatusBadRequest)
 					return
@@ -49,7 +50,7 @@ func TestOrchestratorModeRouting(t *testing.T) {
 				case "react":
 					if len(tt.wantModels) > 2 {
 						text = `{"status":"completed","answer":"done","observation":["observed step result"],"CompletionEvidence":["step criteria verified"]}`
-						if !strings.Contains(req.Input, stepReactResultInstructions) {
+						if !strings.Contains(req.Input, "return these fields for the current plan step only:") {
 							t.Error("executor missing structured step result instructions")
 						}
 						// 后续步骤必须能看到前一步的观察和验收证据。
@@ -128,5 +129,139 @@ func TestOrchestratorRejectsInvalidMode(t *testing.T) {
 	}
 	if o.rootAgentType != TaskAnalyzerAgentType {
 		t.Fatal("invalid mode changed the entry processor")
+	}
+}
+
+func TestPlanOrchestratorContinuesSavedPendingStepWithoutReplanning(t *testing.T) {
+	models := make(chan string, 3)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct{ Model, Input string }
+		if err := decodeModelRequest(r.Body, &req); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		models <- req.Model
+		if req.Model != "executor" || !strings.Contains(req.Input, "## CurrentStep\n\n> finish report") {
+			t.Errorf("unexpected recovery request: model=%q input=%s", req.Model, req.Input)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "resume", "status": "completed",
+			"output": []any{map[string]any{
+				"type": "message", "role": "assistant",
+				"content": []any{map[string]any{"type": "output_text", "text": `{"status":"completed","answer":"resumed","observation":["report saved"],"CompletionEvidence":["report checked"]}`}},
+			}},
+		})
+	}))
+	defer server.Close()
+	path := filepath.Join(t.TempDir(), "agent.yaml")
+	yaml := "name: plan-execute\nbase:\n  llm:\n    base_url: " + server.URL + "\n    api_key: test\n    model: executor\nagents:\n  plan:\n    llm:\n      base_url: " + server.URL + "\n      api_key: test\n      model: planner\n"
+	if err := os.WriteFile(path, []byte(yaml), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadAgentConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &fileContext.DurableState{RunId: "saved-run", Goal: "inspect and report", CompletionCriteria: []string{"report checked"}, StepExecutions: []StepExecution{
+		{Revision: 3, StepId: "inspect", Position: 0, Status: CompletedExecutionStatus, Intent: "inspect source", CompletionCriteria: "source inspected", Observation: []string{"source read"}, CompletionEvidence: []string{"read verified"}},
+		{Revision: 2, StepId: "report", Position: 1, Status: PendingExecutionStatus, Intent: "finish report", CompletionCriteria: "report checked"},
+	}}
+	o := NewProcessorOrchestrator(context.Background(), filemcp.Config{Workspace: t.TempDir()})
+	if err := o.SetMode("plan-execute"); err != nil {
+		t.Fatal(err)
+	}
+	var savedRunning, savedResult bool
+	o.SetCheckpoint(func(snapshot *fileContext.DurableState, _ string) error {
+		if step := snapshot.CurrentStep(); step != nil && step.Status == RunningExecutionStatus {
+			savedRunning = true
+		}
+		if snapshot.Result != nil {
+			savedResult = true
+		}
+		return nil
+	})
+	results, err := o.Run(cfg, state)
+	if err != nil || len(results) != 1 || results[0].Answer != "resumed" {
+		t.Fatalf("Run() = %+v, %v", results, err)
+	}
+	if len(models) != 1 || <-models != "executor" {
+		t.Fatal("resume must execute only the saved pending step without calling planner")
+	}
+	if !savedRunning || !savedResult || state.StepExecutions[0].Observation[0] != "source read" || state.StepExecutions[0].Revision != 3 || state.StepExecutions[1].Revision != 2 {
+		t.Fatalf("recovery lost checkpoint data: savedRunning=%v savedResult=%v state=%+v", savedRunning, savedResult, state)
+	}
+}
+
+func TestPlanFailureCheckpointIncludesRunError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "failed-step", "status": "completed",
+			"output": []any{map[string]any{
+				"type": "message", "role": "assistant",
+				"content": []any{map[string]any{"type": "output_text", "text": `{"status":"failed","answer":"permission denied"}`}},
+			}},
+		})
+	}))
+	defer server.Close()
+	cfg := &config.AgentConfig{LLMConfig: &config.LLMConfig{ApiKey: "test", BaseUrl: server.URL, Model: "executor", OutputSchema: config.JsonLLMOutputSchema}}
+	state := &fileContext.DurableState{
+		RunId: "failed-run", Goal: "inspect protected file", CurrentStepIndex: 0,
+		StepExecutions: []fileContext.StepExecution{{
+			StepId: "read", Status: PendingExecutionStatus, Intent: "read the file",
+			CompletionCriteria: "file content available", Revision: 1,
+		}},
+	}
+	o := NewProcessorOrchestrator(context.Background(), filemcp.Config{Workspace: t.TempDir()})
+	if err := o.SetMode("plan-execute"); err != nil {
+		t.Fatal(err)
+	}
+	var failedCheckpoint *fileContext.DurableState
+	o.SetCheckpoint(func(snapshot *fileContext.DurableState, _ string) error {
+		if step := snapshot.CurrentStep(); step != nil && step.Status == FailedExecutionStatus {
+			failedCheckpoint = snapshot
+		}
+		return nil
+	})
+	if _, err := o.Run(cfg, state); err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("Run() error = %v, want permission denied", err)
+	}
+	if failedCheckpoint == nil || failedCheckpoint.Error == "" || failedCheckpoint.CurrentStep().Status != FailedExecutionStatus {
+		t.Fatalf("failure checkpoint did not include the step and run error: %+v", failedCheckpoint)
+	}
+}
+
+func TestPlanCheckpointFailureStopsStepScheduling(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "plan", "status": "completed",
+			"output": []any{map[string]any{
+				"type": "message", "role": "assistant",
+				"content": []any{map[string]any{"type": "output_text", "text": `{"StepExecutions":[{"Revision":1,"StepId":"inspect","Status":"pending","Intent":"inspect files","CompletionCriteria":"files inspected","CompletionEvidence":[],"Observation":[]}]}`}},
+			}},
+		})
+	}))
+	defer server.Close()
+	o := NewProcessorOrchestrator(context.Background(), filemcp.Config{Workspace: t.TempDir()})
+	if err := o.SetMode("plan-execute"); err != nil {
+		t.Fatal(err)
+	}
+	o.SetCheckpoint(func(snapshot *fileContext.DurableState, _ string) error {
+		if len(snapshot.StepExecutions) > 0 {
+			return errors.New("plan checkpoint rejected")
+		}
+		return nil
+	})
+	_, err := o.Run(plannerTestConfig(server.URL, config.JsonLLMOutputSchema), &fileContext.DurableState{RunId: "plan-write-failure", Goal: "inspect files"})
+	if err == nil || !strings.Contains(err.Error(), "plan checkpoint rejected") {
+		t.Fatalf("Run() error = %v, want plan checkpoint failure", err)
+	}
+	if requests != 1 {
+		t.Fatalf("model requests=%d; no step executor should run after plan persistence failed", requests)
 	}
 }

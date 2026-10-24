@@ -23,13 +23,30 @@ func TestReactRunSendsBuiltInPromptBeforeCustomPrompt(t *testing.T) {
 	inputReceived := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
-			Input string `json:"input"`
+			Input []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"input"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Errorf("decode model request: %v", err)
 			return
 		}
-		inputReceived <- request.Input
+		if len(request.Input) != 2 || request.Input[0].Role != "system" || request.Input[1].Role != "user" {
+			t.Errorf("unexpected message roles: %+v", request.Input)
+		} else {
+			if strings.Contains(request.Input[1].Content, builtInMarker) || strings.Contains(request.Input[1].Content, customPrompt) {
+				t.Error("system instructions duplicated in user message")
+			}
+			if strings.Contains(request.Input[0].Content, "本次运行目标") {
+				t.Error("task goal included in system message")
+			}
+		}
+		var combined string
+		for _, item := range request.Input {
+			combined += item.Content + "\n"
+		}
+		inputReceived <- combined
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"resp_final","status":"completed","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"{\"status\":\"completed\",\"answer\":\"done\"}"}]}]}`))
 	}))

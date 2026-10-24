@@ -7,7 +7,6 @@ import (
 
 	"github.com/collie-agent/codex-go/internal/config"
 	fileContext "github.com/collie-agent/codex-go/internal/context"
-	"github.com/collie-agent/codex-go/internal/provider"
 )
 
 type TaskAnalyzerResult struct {
@@ -18,7 +17,8 @@ type TaskAnalyzerResult struct {
 }
 
 type TaskAnalyzerProcess[T LLMSchema] struct {
-	ctx context.Context
+	ctx       context.Context
+	Workspace string // 当前任务的工作区，由编排器传入，避免使用进程工作目录代替。
 }
 
 func NewTaskAnalyzerProcess[T LLMSchema](ctx context.Context) *TaskAnalyzerProcess[T] {
@@ -41,18 +41,13 @@ func (p *TaskAnalyzerProcess[T]) Run(agentConfig *config.AgentConfig, durableSta
 
 	taskID := durableState.RunId
 	analyzerContext := fileContext.NewTaskAnalyzerContext(durableState)
+	analyzerContext.Workspace = p.Workspace
 	analyzerContext.SetSysPrompt(agentConfig.SysPrompt)
-	// 分析器只评估提供的目标，不暴露或执行工具。
-	client, err := provider.NewResponsesApiClient[T](agentConfig.LLMConfig, nil)
+	// 分析器通过 worker 发起请求，保持工具隔离和协议示例选择集中处理。
+	worker := NewWorker[T](p.ctx, agentConfig, nil)
+	result, _, _, err := worker.Run(analyzerContext)
 	if err != nil {
 		return zero, nil, fmt.Errorf("task %s: task analyzer: %w", taskID, err)
-	}
-	result, toolCalls, _, err := client.Run(p.ctx, taskID, analyzerContext.Format(), nil)
-	if err != nil {
-		return zero, nil, fmt.Errorf("task %s: task analyzer: %w", taskID, err)
-	}
-	if len(toolCalls) > 0 {
-		return zero, nil, fmt.Errorf("task %s: task analyzer returned unexpected tool calls", taskID)
 	}
 	// 仅对任务分析结果检查业务约束，其他输出类型沿用各自的协议解析。
 	if analyzerResult, ok := any(result).(TaskAnalyzerResult); ok {
