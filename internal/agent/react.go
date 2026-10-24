@@ -123,6 +123,7 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 	rc.SetSysPrompt(agentConfig.SysPrompt)
 	worker := NewWorker[T](r.ctx, agentConfig, r.mcpClientSess)
 	formatErrors := 0
+	toolCallErrors := 0
 	for i := 1; i <= r.maxTurn; i++ {
 		var result T
 		var toolParams []*mcpSdk.CallToolParams
@@ -135,6 +136,16 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 			result, _, toolParams, err = worker.Run(rc)
 			if err == nil {
 				break
+			}
+			var callErr *toolCallError
+			if errors.As(err, &callErr) {
+				// 非法调用整批拒绝，反馈原始错误后在当前轮重试，不放行任何工具副作用。
+				toolCallErrors++
+				if toolCallErrors > maxToolCallErrors {
+					return zero, nil, fmt.Errorf("ReAct turn %d: tool call errors exceeded limit (%d): %w", i, maxToolCallErrors, err)
+				}
+				rc.AppendReportedErrors(fmt.Sprintf("LLM tool call error (%d/%d): %v. Retry using only the supplied native tools with their exact names and valid JSON arguments. If the task is complete, return the result as final text in the required output format; BEGIN RESULT is a text delimiter, not a tool name. The rejected batch was not executed.", toolCallErrors, maxToolCallErrors, err))
+				continue
 			}
 			var parseErr *provider.OutputParseError
 			if !errors.As(err, &parseErr) {
@@ -309,9 +320,7 @@ func (r *ReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, toolP
 		}
 		return append(next, result)
 	})
-	// Log the recorded result and the resulting ReAct context together so
-	// concurrent tool calls remain distinguishable in the process output.
-	log.Printf("tool result: %+v\nReact context:\n%s", result, rc.FormatForLog())
+	log.Printf("tool result: %+v", result)
 	if config.McpToolName(toolParam.Name) == config.ApplyPatchMCPToolName || config.McpToolName(toolParam.Name) == config.ExecMCPToolName {
 		// exec 的参数和原始结果随快照交给观察器，由 LLM 筛选影响后续决策的新增信息。
 		// Observation is a separate processor and must use its own resolved

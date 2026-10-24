@@ -20,6 +20,12 @@ type Worker[T LLMSchema] struct {
 	mcpClientSess *mcpSdk.ClientSession
 }
 
+// toolCallError 表示模型生成的调用不合法，可反馈纠正；请求和传输错误不属于此类。
+type toolCallError struct{ err error }
+
+func (e *toolCallError) Error() string { return e.err.Error() }
+func (e *toolCallError) Unwrap() error { return e.err }
+
 func NewWorker[T LLMSchema](ctx context.Context, agentConfig *config.AgentConfig, mcpClientSess *mcpSdk.ClientSession) *Worker[T] {
 	return &Worker[T]{
 		ctx:           ctx,
@@ -75,14 +81,14 @@ func (w *Worker[T]) Run(modelContext fileContext.Contexter) (T, string, []*mcpSd
 	if len(toolCalls) > 0 {
 		for _, call := range toolCalls {
 			if _, ok := allowTools[config.McpToolName(call.Name)]; !ok {
-				return result, "", nil, fmt.Errorf("task %s: tool %s is not allowed",
-					request.RunID, call.Name)
+				return result, "", nil, &toolCallError{err: fmt.Errorf("task %s: tool %s is not allowed",
+					request.RunID, call.Name)}
 			}
 
 			var args map[string]any
 			if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
-				return result, "", nil, fmt.Errorf("task %s: decode tool %s arguments: %w",
-					request.RunID, call.Name, err)
+				return result, "", nil, &toolCallError{err: fmt.Errorf("task %s: decode tool %s arguments: %w",
+					request.RunID, call.Name, err)}
 			}
 
 			toolParams = append(toolParams, &mcpSdk.CallToolParams{

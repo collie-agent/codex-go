@@ -417,3 +417,43 @@ func TestBatchToolCallings(t *testing.T) {
 		t.Fatalf("missing call IDs: %v", ids)
 	}
 }
+
+func TestReactRetriesInvalidToolCalls(t *testing.T) {
+	for _, recover := range []bool{true, false} {
+		t.Run(map[bool]string{true: "recover", false: "limit"}[recover], func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				calls++
+				var request struct {
+					Input string `json:"input"`
+				}
+				if err := decodeModelRequest(req.Body, &request); err != nil {
+					t.Error(err)
+				}
+				if calls > 1 {
+					for _, want := range []string{"tool BEGIN RESULT is not allowed", "Retry", "final text"} {
+						if !strings.Contains(request.Input, want) {
+							t.Errorf("retry missing %q", want)
+						}
+					}
+				}
+				if recover && calls == 2 {
+					writeObservationResponse(w, []any{observationMessage("BEGIN RESULT\nSTATUS=\"completed\"\nANSWER=\"done\"\nEND RESULT")})
+					return
+				}
+				writeObservationResponse(w, []any{map[string]any{"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "BEGIN RESULT", "arguments": `{"status":"completed","answer":"done"}`}})
+			}))
+			defer server.Close()
+			process := &ReactProcess[ReactResult]{ctx: t.Context(), maxTurn: 1}
+			cfg := &config.AgentConfig{LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.LineProtocolLLMOutputSchema}}
+			got, _, err := process.Run(cfg, &fileContext.DurableState{RunId: "retry-tool-task", Goal: "answer"})
+			if recover {
+				if err != nil || got.Answer != "done" || calls != 2 {
+					t.Fatalf("result=%+v calls=%d err=%v", got, calls, err)
+				}
+			} else if calls != 4 || err == nil || !strings.Contains(err.Error(), "tool call errors exceeded limit (3)") || !strings.Contains(err.Error(), "tool BEGIN RESULT is not allowed") {
+				t.Fatalf("calls=%d err=%v", calls, err)
+			}
+		})
+	}
+}

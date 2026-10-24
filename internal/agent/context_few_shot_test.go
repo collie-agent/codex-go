@@ -32,13 +32,7 @@ func checkContextFewShots[T any](t *testing.T, ctx fileContext.Contexter, count 
 		}
 		// Line Protocol 通过省略表示空列表，JSON 使用 []；比较前统一零长度列表。
 		for _, result := range []any{&want, &got} {
-			value := reflect.ValueOf(result).Elem()
-			for j := 0; j < value.NumField(); j++ {
-				field := value.Field(j)
-				if field.Kind() == reflect.Slice && field.Len() == 0 {
-					field.SetZero()
-				}
-			}
+			normalizeFewShotSlices(reflect.ValueOf(result).Elem())
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("example %d differs between protocols: got %+v, want %+v", i+1, got, want)
@@ -46,7 +40,28 @@ func checkContextFewShots[T any](t *testing.T, ctx fileContext.Contexter, count 
 	}
 }
 
+// 规划结果包含嵌套步骤，递归统一其中的空列表。
+func normalizeFewShotSlices(value reflect.Value) {
+	switch value.Kind() {
+	case reflect.Struct:
+		for i := 0; i < value.NumField(); i++ {
+			normalizeFewShotSlices(value.Field(i))
+		}
+	case reflect.Slice:
+		if value.Len() == 0 {
+			value.SetZero()
+			return
+		}
+		for i := 0; i < value.Len(); i++ {
+			normalizeFewShotSlices(value.Index(i))
+		}
+	}
+}
+
 func TestContextFewShotsMatchResultSchemas(t *testing.T) {
+	t.Run("planner", func(t *testing.T) {
+		checkContextFewShots[PlannerResult](t, fileContext.NewPlannerContext(&fileContext.DurableState{}), 1)
+	})
 	t.Run("standalone", func(t *testing.T) {
 		checkContextFewShots[ReactResult](t, fileContext.NewReactContext(&fileContext.DurableState{}), 2)
 	})

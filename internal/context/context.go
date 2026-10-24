@@ -152,11 +152,12 @@ func (c *ReactContext) Format() string {
 }
 
 // FormatForLog 输出完整持久状态（包含零值字段），便于排查实际运行状态。
+// 系统提示词不写入日志，避免重复输出大段静态指令。
 // 日志和模型输入分别格式化，避免调试字段改变模型提示词。
 func (c *ReactContext) FormatForLog() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.format(true, true)
+	return c.format(true, false)
 }
 
 // FormatForModel 在同一锁内快照文本和工具结果，防止并发更新造成两者不一致。
