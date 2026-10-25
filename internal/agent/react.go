@@ -46,12 +46,13 @@ type ReactResult struct {
 }
 
 type ReactProcess[T LLMSchema] struct {
-	ctx           context.Context
-	maxTurn       int
-	toolConfig    filemcp.Config
-	mcpClientSess *mcpSdk.ClientSession
-	serverSess    *mcpSdk.ServerSession
-	checkpoint    func() error
+	ctx             context.Context
+	maxTurn         int
+	toolConfig      filemcp.Config
+	mcpClientSess   *mcpSdk.ClientSession
+	serverSess      *mcpSdk.ServerSession
+	checkpoint      func() error
+	allowPlanSwitch bool
 }
 
 // 最大轮数固定在代码中，避免任务通过配置无限延长。
@@ -118,6 +119,12 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 	}
 	if r.serverSess != nil {
 		defer r.serverSess.Close()
+	}
+	// 控制流工具仅由支持交接的编排器开放，不依赖 YAML 工具权限。
+	agentConfig = agentConfig.ForAgent("react")
+	delete(agentConfig.AllowTools, config.SwitchToPlanExecuteMCPToolName)
+	if r.allowPlanSwitch && len(durableState.StepExecutions) == 0 {
+		agentConfig.AllowTools[config.SwitchToPlanExecuteMCPToolName] = struct{}{}
 	}
 	rc := fileContext.NewReactContext(durableState)
 	// 先保留内置 ReAct 执行约束，再把 YAML 的长期约束追加到其后。
@@ -187,12 +194,44 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 				return zero, nil, err
 			}
 		}
+		if len(toolParams) == 1 && toolParams[0].Name == string(config.SwitchToPlanExecuteMCPToolName) {
+			switched, err := r.switchToPlanExecute(toolParams[0], rc, durableState)
+			if err != nil {
+				return zero, nil, err
+			}
+			if switched {
+				return zero, []AgentProcessorType{PlanAgentType}, nil
+			}
+			continue
+		}
 		r.batchToolCallings(toolParams, rc, agentConfig)
 		if r.ctx.Err() != nil {
 			return zero, nil, r.ctx.Err()
 		}
 	}
 	return zero, nil, fmt.Errorf("ReAct exhausted maximum turns (%d)", r.maxTurn)
+}
+
+// switchToPlanExecute handles the MCP control tool and records the handoff context.
+func (r *ReactProcess[T]) switchToPlanExecute(toolParam *mcpSdk.CallToolParams, rc *fileContext.ReactContext, durableState *fileContext.DurableState) (bool, error) {
+	response, err := r.mcpClientSess.CallTool(r.ctx, toolParam)
+	if err != nil {
+		return false, fmt.Errorf("switch to plan-execute: %w", err)
+	}
+	if response == nil {
+		return false, fmt.Errorf("switch to plan-execute: missing MCP response")
+	}
+	if response.IsError {
+		encoded, _ := json.Marshal(response.Content)
+		rc.AppendReportedErrors("switch_to_plan_execute rejected: " + string(encoded))
+		return false, nil
+	}
+	// 保存原始决策上下文与模型交接摘要，避免规划阶段丢失已经完成的工作。
+	args, _ := json.Marshal(toolParam.Arguments)
+	handoff, _ := rc.FormatForModel()
+	durableState.PlanningContext = handoff + "\n\n# Switch request\n" + string(args)
+	log.Printf("task %s: [react] switching to plan-execute", durableState.RunId)
+	return true, nil
 }
 
 func (r *ReactProcess[T]) observe(toolResult *fileContext.ToolResult, rc *fileContext.ReactContext, agentConfig *config.AgentConfig) {

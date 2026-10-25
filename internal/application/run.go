@@ -50,9 +50,6 @@ func Run(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 	mode := opts.Mode
 	if mode == "" {
 		mode = "react"
-		if loaded.Name == "plan-execute" {
-			mode = "plan-execute"
-		}
 	}
 	db, err := database.OpenFromEnv(ctx)
 	if err != nil {

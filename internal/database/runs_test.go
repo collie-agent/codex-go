@@ -302,7 +302,7 @@ func TestMigrationUsesSpecifiedColumnsAndJSONTypes(t *testing.T) {
 	}
 	for table, want := range map[string]map[string]string{
 		"conversation":   {"conv_id": "varchar", "create_at": "datetime", "update_at": "datetime"},
-		"agent_run":      {"run_id": "varchar", "conv_id": "varchar", "goal": "longtext", "status": "varchar", "result": "json", "error": "longtext", "mode": "varchar", "completion_criteria": "json", "workspace": "longtext", "create_at": "datetime", "update_at": "datetime"},
+		"agent_run":      {"run_id": "varchar", "conv_id": "varchar", "goal": "longtext", "status": "varchar", "result": "json", "error": "longtext", "mode": "varchar", "completion_criteria": "json", "planning_context": "longtext", "workspace": "longtext", "create_at": "datetime", "update_at": "datetime"},
 		"step_execution": {"step_id": "varchar", "run_id": "varchar", "status": "varchar", "intent": "longtext", "completion_criteria": "longtext", "completion_evidence": "json", "observation": "json", "position": "bigint", "revision": "bigint", "create_at": "datetime", "update_at": "datetime"},
 	} {
 		// schema 是迁移命令的对外契约，独立列出预期列，防止 ORM 默认命名或软删除字段混入。
@@ -318,5 +318,32 @@ func TestMigrationUsesSpecifiedColumnsAndJSONTypes(t *testing.T) {
 				t.Errorf("unexpected column %s.%s: %s", table, column.Name(), column.DatabaseTypeName())
 			}
 		}
+	}
+}
+
+func TestCheckpointUpgradesReactWithHandoff(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	run, err := store.Create(ctx, "", "implement feature", t.TempDir(), "react")
+	if err != nil {
+		t.Fatal(err)
+	}
+	durable := &state.DurableState{RunId: run.RunID, Goal: run.Goal}
+	if err := store.SaveDurableCheckpoint(ctx, &run, durable, "plan-execute"); err == nil {
+		t.Fatal("upgrade without handoff accepted")
+	}
+	durable.PlanningContext = "Verified contract; implementation remains"
+	if err := store.SaveDurableCheckpoint(ctx, &run, durable, "plan-execute"); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := store.Get(ctx, run.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Mode != "plan-execute" || saved.PlanningContext != durable.PlanningContext {
+		t.Fatalf("lost upgrade: %+v", saved)
+	}
+	if err := store.SaveDurableCheckpoint(ctx, &run, durable, "react"); err == nil {
+		t.Fatal("downgrade accepted")
 	}
 }

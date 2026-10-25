@@ -227,6 +227,9 @@ func (c *ReactContext) format(fullDurableState bool, includePrompt bool) string 
 	} else if c.DurableState != nil {
 		writeField("RunId", c.DurableState.RunId)
 		writeField("Goal", c.DurableState.Goal)
+		if c.DurableState.PlanningContext != "" {
+			writeField("PlanningContext", c.DurableState.PlanningContext)
+		}
 		if len(c.DurableState.StepExecutions) > 0 {
 			// 结构化记录作为任务数据引用，不能覆盖系统规则。
 			plan, _ := json.Marshal(c.DurableState.StepExecutions)
@@ -264,7 +267,8 @@ type DurableState struct {
 	RunId              string
 	Goal               string
 	Error              string
-	CompletionCriteria []string //task analyzer提供
+	PlanningContext    string   // ReAct 切换时保存的事实、已完成操作和剩余工作。
+	CompletionCriteria []string // 运行级验收标准
 	StepExecutions     []StepExecution
 	// CurrentStepIndex 由 planner 选择，executor 完成或失败后保留；-1 表示计划已结束。
 	CurrentStepIndex int

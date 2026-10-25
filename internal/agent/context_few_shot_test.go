@@ -73,7 +73,4 @@ func TestContextFewShotsMatchResultSchemas(t *testing.T) {
 	t.Run("observation", func(t *testing.T) {
 		checkContextFewShots[ObserveResult](t, &fileContext.ObservationContext{}, 3)
 	})
-	t.Run("analyzer", func(t *testing.T) {
-		checkContextFewShots[TaskAnalyzerResult](t, fileContext.NewTaskAnalyzerContext(&fileContext.DurableState{}), 2)
-	})
 }

@@ -99,16 +99,11 @@ func Resume(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 		}
 	}
 	orchestrator := newOrchestrator(ctx, workspace, opts)
-	startMode := mode
-	if mode == "plan-execute" && len(durableSteps) == 0 && len(run.CompletionCriteria) == 0 {
-		// 尚未保存分析结果时继续准备阶段，但模式必须来自原运行，不能由新 YAML 改写。
-		loaded.Name = mode
-		startMode = ""
-	}
-	if err := orchestrator.SetMode(startMode); err != nil {
+	// 恢复始终沿用已保存的模式，尚未生成计划时直接进入 planner。
+	if err := orchestrator.SetMode(mode); err != nil {
 		return nil, err
 	}
-	durable := &state.DurableState{RunId: run.RunID, Goal: run.Goal, CompletionCriteria: run.CompletionCriteria, StepExecutions: durableSteps, CurrentStepIndex: -1}
+	durable := &state.DurableState{RunId: run.RunID, Goal: run.Goal, PlanningContext: run.PlanningContext, CompletionCriteria: run.CompletionCriteria, StepExecutions: durableSteps, CurrentStepIndex: -1}
 	if mode == "plan-execute" {
 		allComplete := len(durable.StepExecutions) > 0
 		for i := range durable.StepExecutions {

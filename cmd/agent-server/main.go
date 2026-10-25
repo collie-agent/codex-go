@@ -25,7 +25,7 @@ func main() {
 	task := flag.String("task", "", "agent task (required)")
 	runID := flag.String("run-id", "", "resume an existing agent run")
 	mcpCommand := flag.String("mcp-command", "codex-mcp", "path to MCP server executable")
-	mode := flag.String("mode", "", "execution mode: react or plan-execute (skips task analyzer when set)")
+	mode := flag.String("mode", "", "execution mode: react (default) or plan-execute")
 	var runtimeDirs []string
 	flag.Func("runtime-dir", "host-authorized read-only exec runtime directory (repeatable)", func(dir string) error {
 		runtimeDirs = append(runtimeDirs, dir)

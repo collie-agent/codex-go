@@ -40,7 +40,7 @@ func agentConfig(t *testing.T, endpoint string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "agent.yaml")
 	// 恢复使用更新后的 react 配置，但原运行的 plan-execute 模式必须保留。
-	yaml := "name: react\nbase:\n  llm:\n    base_url: " + endpoint + "\n    api_key: test\n    model: executor\nagents:\n  task_analyzer:\n    llm:\n      base_url: " + endpoint + "\n      api_key: test\n      model: analyzer\n  plan:\n    llm:\n      base_url: " + endpoint + "\n      api_key: test\n      model: planner\n"
+	yaml := "name: react\nbase:\n  llm:\n    base_url: " + endpoint + "\n    api_key: test\n    model: executor\nagents:\n  plan:\n    llm:\n      base_url: " + endpoint + "\n      api_key: test\n      model: planner\n"
 	if err := os.WriteFile(path, []byte(yaml), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -68,8 +68,6 @@ func TestResumePreparationPreservesOriginalPlanMode(t *testing.T) {
 		}
 		models <- req.Model
 		switch req.Model {
-		case "analyzer":
-			writeResult(w, `{"NeedsTools":true,"ExpectedSteps":2,"ReasoningSummary":"inspect and report","CompletionCriteria":["report checked"]}`)
 		case "planner":
 			writeResult(w, `{"StepExecutions":[{"Revision":1,"StepId":"report","Status":"pending","Intent":"finish report","CompletionCriteria":"report checked","Observation":[],"CompletionEvidence":[]}]}`)
 		default:
@@ -89,7 +87,7 @@ func TestResumePreparationPreservesOriginalPlanMode(t *testing.T) {
 	for len(models) > 0 {
 		requested = append(requested, <-models)
 	}
-	if saved.Mode != "plan-execute" || len(saved.CompletionCriteria) != 1 || len(results) != 1 || results[0].Answer != "done" || strings.Join(requested, ",") != "analyzer,planner,executor" {
+	if saved.Mode != "plan-execute" || len(saved.CompletionCriteria) != 0 || len(results) != 1 || results[0].Answer != "done" || strings.Join(requested, ",") != "planner,executor" {
 		t.Fatalf("resume changed preparation: mode=%q criteria=%v results=%+v models=%v", saved.Mode, saved.CompletionCriteria, results, requested)
 	}
 	steps, err := store.Steps(ctx, run.RunID)

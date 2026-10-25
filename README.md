@@ -1,15 +1,14 @@
 # codex-go
 
-Go 实现的代码代理，通过 OpenAI Responses API 进行模型决策，通过 MCP 读取、搜索和修改工作目录中的文件，并执行受隔离的项目命令。支持直接运行 ReAct、先分析任务再执行，以及先规划再逐步执行的流程。
+Go 实现的代码代理，通过 OpenAI Responses API 进行模型决策，通过 MCP 读取、搜索和修改工作目录中的文件，并执行受隔离的项目命令。默认从 ReAct 开始，支持显式规划执行以及运行中升级为计划执行。
 
 ## 项目特性
 
 - **ReAct 循环**：模型在每轮选择调用工具或返回结果，执行器回填工具结果，直到任务完成、失败或达到轮数上限。
 - **计划执行**：planner 生成有序步骤，ReAct 逐步执行，并记录步骤状态、观察结果和完成证据。
-- **任务分析**：分析任务是否需要工具、预计步骤数，以及多步骤工具任务的完成标准。
 - **异步观察**：对 `apply_patch` 和 `exec` 的结果提取新增事实与错误，供后续决策使用。
 - **内置 MCP 工具**：提供文件读取、目录浏览、文件匹配、内容搜索、补丁写入和命令执行，可独立作为 stdio 服务使用。
-- **按代理类型配置**：共享基础代理配置，可为 ReAct、任务分析器、观察器和 planner 设置独立模型与提示词；工具权限仅授予 ReAct。
+- **按代理类型配置**：共享基础代理配置，可为 ReAct、观察器和 planner 设置独立模型与提示词；工具权限仅授予 ReAct。
 - **结构化输出**：支持 JSON 和 Line Protocol，结合输出解析、业务校验和工具参数 schema 校验控制执行流程。
 - **工作目录边界**：文件工具限制路径范围；`exec` 使用 Linux bwrap 与 seccomp 隔离整个命令进程树。
 
@@ -54,7 +53,7 @@ export CODEX_MYSQL_URL='mysql://user:password@127.0.0.1:3306/codex-go'
   --mcp-command ./bin/codex-mcp
 ```
 
-默认先分析任务，再进入 ReAct。需要规划后逐步执行时，将 YAML 的 `name` 改为 `plan-execute`，或指定 `--mode plan-execute`：
+默认直接进入 ReAct，YAML `name` 不参与入口选择。需要规划后逐步执行时，指定 `--mode plan-execute`：
 
 ```sh
 ./bin/agent-server --config agent.yaml \
@@ -85,13 +84,13 @@ export CODEX_MYSQL_URL='mysql://user:password@127.0.0.1:3306/codex-go'
 
 执行期间每 100ms 检查持锁连接及锁归属，单次检查超时为 1 秒；检测到失效后取消模型请求、MCP 子进程和正在执行的工具。健康检查与检查点事务串行使用同一连接，不引入租约或续租机制。
 
-显式 `--mode` 会跳过任务分析器。完整的配置覆盖示例见 [`examples/react-agent.yaml`](examples/react-agent.yaml)，其中 `your-model` 和 `analyzer-model` 都需要替换，并设置 `OPENAI_API_KEY`、`ANALYZER_API_KEY`。
+完整的配置覆盖示例见 [`examples/react-agent.yaml`](examples/react-agent.yaml)，其中 `your-model` 需要替换，并设置 `OPENAI_API_KEY`。
 
 ### 入口对照
 
 | 入口 | 用途与执行方式 |
 | --- | --- |
-| `./bin/agent-server --config agent.yaml --task '目标' --workspace /path/to/workspace --mcp-command ./bin/codex-mcp` | 通过编排器执行，ReAct 通过 MCP stdio 连接独立子进程；支持任务分析和计划执行 |
+| `./bin/agent-server --config agent.yaml --task '目标' --workspace /path/to/workspace --mcp-command ./bin/codex-mcp` | 通过编排器执行，ReAct 通过 MCP stdio 连接独立子进程；支持 ReAct 和计划执行 |
 | `./bin/codex-mcp --workspace /path/to/workspace --timeout 30s` | 单独提供 MCP stdio 工具服务，供 MCP 客户端连接 |
 
 `agent-server` 是命令行任务执行入口，通过 stdio 连接 MCP 子进程，当前不提供 HTTP 服务。`--mcp-command` 默认是 `codex-mcp`，需能从 PATH 找到；使用构建目录时建议像示例一样显式传入路径。
@@ -104,31 +103,33 @@ export CODEX_MYSQL_URL='mysql://user:password@127.0.0.1:3306/codex-go'
 
 | agent-server 配置 | 起点与后续流程 |
 | --- | --- |
-| `name: react`，不传 `--mode` | task analyzer → ReAct → end |
-| `name: plan-execute`，不传 `--mode` | task analyzer → planner → ReAct 执行各步骤 → end |
-| `--mode react` | 直接 ReAct → end，优先于 YAML `name` |
-| `--mode plan-execute` | 直接 planner → ReAct 执行各步骤 → end，优先于 YAML `name` |
+| `name: react`，不传 `--mode` | ReAct → end |
+| `name: plan-execute`，不传 `--mode` | ReAct → end |
+| `--mode react` | 直接 ReAct → end，由显式模式指定 |
+| `--mode plan-execute` | 直接 planner → ReAct 执行各步骤 → end，由显式模式指定 |
 
-任务分析器输出 `NeedsTools`、`ExpectedSteps`、`ReasoningSummary` 和 `CompletionCriteria`。当前这些任务特征用于提供上下文与完成标准，不会自动根据任务复杂度切换执行模式；后续采用 ReAct 还是计划执行由上述配置决定。
+未传 `--mode` 时固定以 ReAct 为入口；`name` 不再决定执行模式。恢复运行时沿用已保存的模式。
 
 ```mermaid
 flowchart TD
     A[agent-server 加载配置与任务] --> B{显式指定 mode?}
-    B -->|否| C[任务分析器：生成任务特征与完成标准]
+    B -->|未传| R[ReAct 执行]
     B -->|react| R[ReAct 执行]
     B -->|plan-execute| P[planner]
-    C --> D{YAML name}
-    D -->|react| R
-    D -->|plan-execute| P
     P --> E{存在待执行步骤?}
     E -->|是| S[标记 running，ReAct 执行当前步骤]
     S --> T[记录 completed、Observation、CompletionEvidence]
     T --> P
     E -->|否| F[结束并输出结果]
-    R --> F
+    R -->|完成| F
+    R -->|switch_to_plan_execute| P
     R -->|失败| X[报告错误并退出]
     S -->|失败，标记 failed| X
 ```
+
+普通 ReAct 由编排器执行时，会自动获得 `switch_to_plan_execute` 控制工具，无需在 `allow_tools` 中配置。模型判断剩余工作需要多个相互依赖、可独立验收的阶段时，可单独调用该工具，提供 `reason` 和 `summary`（已有事实、已完成操作和剩余工作）。编排器保存交接上下文后进入 planner；计划步骤内不开放该工具，不能再次升级。同批调用其他工具会被拒绝。直接运行 `ReactProcess` 的入口不提供此工具。
+
+切换后检查点保存 `plan-execute` 模式及交接上下文，恢复时继续规划或执行剩余步骤。已有数据库需重新执行迁移命令，新增 `agent_run.planning_context` 列。
 
 ### ReAct 单轮循环
 
@@ -148,7 +149,8 @@ flowchart LR
     T -. apply_patch / exec .-> O[异步观察器]
     O -. 新增事实与错误 .-> C
     D -->|否| R[解析并校验结果]
-    R --> F[完成或失败]
+    R -->|完成| F
+    R -->|switch_to_plan_execute| P[完成或失败]
 ```
 
 观察器使用工具结果和上下文的独立快照，不阻塞下一轮；因此观察结论可能在后续轮次才可见，原始工具结果仍直接回传模型。`list_dir`、`glob` 的旧结果会在后续工具结果写入时清除；`read_file`、`grep` 等其他结果会继续保留。
@@ -175,17 +177,17 @@ planner 首次调用模型生成至少一个有序步骤，每步包含：
 ## 配置规则
 
 - 顶层仅支持 `name`、`log_level`、`base`、`agents`。`name` 必填，支持 `react` 和 `plan-execute`；`base` 必须提供完整有效的 `llm`。`agents` 可省略或为空。
-- `log_level` 可设为 `info`（默认）或 `error`，对所有代理生效。`info` 显示 LLM 上下文、JSON schema 和工具调用结果；`error` 隐藏这些详情。两种级别都显示任务分析成功后的实际执行模式（`[task_analyzer] mode=react` 或 `mode=plan-execute`）、工具调用名称、调用 ID 和完整参数，以及 `LLM response text`，包括工具调用轮次中的非空响应文本。显式 `--mode` 跳过任务分析器时不输出分析器模式日志。
-- `agents` 只接受 `react`、`task_analyzer`、`observe`、`plan`。每种类型分别从自身设置和 `base` 解析，不会继承其他类型的独立设置；未设置某项时逐项回退到 base。
+- `log_level` 可设为 `info`（默认）或 `error`，对所有代理生效。`info` 显示 LLM 上下文、JSON schema 和工具调用结果；`error` 隐藏这些详情。两种级别都显示工具调用名称、调用 ID 和完整参数，以及 `LLM response text`，包括工具调用轮次中的非空响应文本。编排器不输出分析器模式日志。
+- `agents` 只接受 `react`、`observe`、`plan`。每种类型分别从自身设置和 `base` 解析，不会继承其他类型的独立设置；未设置某项时逐项回退到 base。
 - 工具调用失败时，两种日志级别都打印 `[react] tool calling error`，包括执行错误、参数校验错误及调用被拒绝的错误；成功结果详情仍仅在 `info` 级别显示。
 - `llm` 是整块替换。提供独立 `llm` 后，base 中未列出的 LLM 字段不会回退；`model` 必填，`base_url` 默认 `https://api.openai.com/v1`，`output_schema` 默认 `json_llm_output`，也支持 `line_protocol_llm_output`。
 - `allow_tools` 列表整体替换，不与 base 合并。省略时回退到 base，显式 `[]` 禁用工具。合法工具为 `read_file`、`list_dir`、`glob`、`grep`、`apply_patch` 和 `exec`。
 - `sys_prompt` 省略时回退到 base；显式 `""` 清除自定义提示词。最终非空自定义提示词会追加在对应代理的内置提示词后。
-- `task_analyzer`、`observe` 和 `plan` 始终没有工具能力，不会暴露或执行工具。base 的工具列表不会授予它们权限；为其显式设置非空 `allow_tools` 会导致启动报错，省略或 `[]` 均可。
+- `observe` 和 `plan` 始终没有工具能力，不会暴露或执行工具。base 的工具列表不会授予它们权限；为其显式设置非空 `allow_tools` 会导致启动报错，省略或 `[]` 均可。
 - 密钥可用 `api_key` 明文提供，或用 `api_key_env` 指定环境变量；两者互斥。两者都省略时读取 `OPENAI_API_KEY`。最终密钥不能为空，错误信息不会包含密钥值。示例只使用环境变量名，不含真实密钥。
 - 所有配置字段拒绝显式 YAML `null`。启动时会校验 base 和所有独立配置，包括本次流程尚未调用的代理；文件不存在、格式错误、未知字段、类型、工具、输出格式或缺少必填项都会报错。
 
-配置文件只允许一个 YAML 文档。旧格式不兼容，也不会自动转换。手动迁移时，将旧 YAML 的顶层 `llm`、`allow_tools` 和 `sys_prompt` 原样移入 `base`，新增 `name: react`；随后可按类型在 `agents.react`、`agents.task_analyzer`、`agents.observe` 和 `agents.plan` 下填写覆盖项。例如：
+配置文件只允许一个 YAML 文档。旧格式不兼容，也不会自动转换。手动迁移时，将旧 YAML 的顶层 `llm`、`allow_tools` 和 `sys_prompt` 原样移入 `base`，新增 `name: react`；随后可按类型在 `agents.react`、`agents.observe` 和 `agents.plan` 下填写覆盖项。例如：
 
 ```yaml
 name: react
@@ -196,8 +198,8 @@ base:
   allow_tools: [read_file, list_dir]
   sys_prompt: "通用约束"
 agents:
-  task_analyzer:
-    allow_tools: []
+  observe:
+    sys_prompt: "观察约束"
 ```
 
 ## MCP 工具与权限
@@ -249,7 +251,7 @@ Agent 使用时需在 `allow_tools` 中加入 `exec`，示例配置默认未启�
 | `--timeout` | 正数，默认 `30s`，仅限制单次工具调用，不是整个任务或模型请求的超时 |
 | `--runtime-dir` | 可重复，额外只读命令运行时目录 |
 | `--mcp-command` | 仅 `agent-server`，MCP 可执行文件路径，默认 `codex-mcp` |
-| `--mode` | 仅 `agent-server`，可选 `react` 或 `plan-execute`，指定时跳过任务分析器并覆盖 YAML 模式 |
+| `--mode` | 仅 `agent-server`，可选 `react` 或 `plan-execute`，默认 `react`，YAML `name` 不参与模式选择 |
 
 每次 ReAct 运行最多 100 轮，计划执行时每一步各自拥有此上限，当前不提供 YAML 或 CLI 配置项。ReAct 和观察器遇到输出解析错误时，每次运行累计最多纠正 3 次，第 4 次格式错误终止；ReAct 的格式纠错留在当前轮内。模型请求失败和业务校验失败直接返回错误。
 
@@ -275,7 +277,7 @@ stdout 只输出保存成功后的最终答案；stderr 输出运行 ID、错误
 
 迁移创建 `conversation`、`agent_run` 与 `step_execution`。主键分别为 `conv_id`、`run_id` 和 `(run_id, step_id)`；运行及步骤外键分别引用其归属记录。时间列严格使用 `create_at`、`update_at`，不包含软删除字段。
 
-新任务先保存 pending run，再向 stderr 输出 `run_id=<id> conv_id=<id>`，随后进入 running。成功保存 completed 和完整 JSON 结果（包含 Answer、Observation、CompletionEvidence）；失败保存 failed 和错误。运行目标、绝对工作目录、已确定模式和分析器产生的运行级验收标准也会保存。checkpoint 写入失败立即停止后续调度，不输出未保存的最终答案。
+新任务先保存 pending run，再向 stderr 输出 `run_id=<id> conv_id=<id>`，随后进入 running。成功保存 completed 和完整 JSON 结果（包含 Answer、Observation、CompletionEvidence）；失败保存 failed 和错误。运行目标、绝对工作目录、已确定模式和运行级验收标准也会保存。checkpoint 写入失败立即停止后续调度，不输出未保存的最终答案。
 
 `agent-server` 可以用 `--conv-id <已有 conv_id>` 关联会话。会话仅表示归属，不共享消息历史。普通 ReAct 不创建执行步骤记录。使用 `--run-id` 可显式恢复 pending、running 或 failed 运行；进程启动不会自动恢复遗留运行。运行锁由 MySQL 专用连接持有，崩溃后连接断开即可重新接管。
 
@@ -340,7 +342,7 @@ cmd/migrate/          显式创建/升级持久化表
 internal/config/      YAML 校验、基础配置与独立配置解析
 internal/database/    MySQL 连接、显式迁移与运行存取
 internal/application/ 两个 Agent 入口共享的持久化运行生命周期
-internal/agent/       编排器、ReAct、任务分析器、planner、观察器与 worker
+internal/agent/       编排器、ReAct、planner、观察器与 worker
 internal/context/     运行状态、步骤记录、上下文格式与提示词
 internal/provider/    Responses API、输出 schema、协议解析与请求日志
 internal/mcp/         文件工具、路径校验、补丁处理与命令隔离

@@ -111,6 +111,12 @@ func (w *Worker[T]) Run(modelContext fileContext.Contexter) (T, string, []*mcpSd
 			})
 		}
 	}
+	// 切换是控制流操作，不能与有副作用的工具在同一批执行。
+	for _, call := range toolParams {
+		if call.Name == string(config.SwitchToPlanExecuteMCPToolName) && len(toolParams) != 1 {
+			return result, "", nil, &toolCallError{err: fmt.Errorf("switch_to_plan_execute must be called alone")}
+		}
+	}
 	return result, assistantOutput, toolParams, nil
 }
 

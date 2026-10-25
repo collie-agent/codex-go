@@ -105,7 +105,7 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 	}
 	resolved := map[string]*AgentConfig{"base": base}
 	for name, partial := range raw.Agents {
-		if name != "react" && name != "task_analyzer" && name != "observe" && name != "plan" {
+		if name != "react" && name != "observe" && name != "plan" {
 			return nil, fmt.Errorf("unknown agent type %q", name)
 		}
 		if partial == nil {
@@ -120,7 +120,7 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 		}
 		resolved[name] = cfg
 	}
-	for _, name := range []string{"react", "task_analyzer", "observe", "plan"} {
+	for _, name := range []string{"react", "observe", "plan"} {
 		if _, ok := resolved[name]; !ok {
 			resolved[name] = cloneAgentConfig(base)
 			resolved[name].Name = name

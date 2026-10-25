@@ -1,0 +1,35 @@
+# 同一份配置可通过 agent-server 的 --mode 选择 ReAct 或 plan-execute。
+# name 必填，但实际运行模式由 --mode 决定。
+name: react
+log_level: info
+base:
+  llm:
+    # 未在 agents.<type>.llm 中覆盖的字段来自这里。
+    api_key_env: OPENAI_API_KEY
+    model: your-default-model
+    output_schema: json_llm_output
+  allow_tools:
+    - read_file
+    - list_dir
+    - glob
+    - grep
+    - apply_patch
+  sys_prompt: |
+    只处理用户要求的任务，并在完成时简要说明结果。
+
+agents:
+  react:
+    # ReAct 模式使用的模型和提示词；工具列表沿用 base。
+    llm:
+      api_key_env: OPENAI_API_KEY
+      model: your-react-model
+    sys_prompt: |
+      直接根据当前上下文执行任务；必要时使用工具收集信息或修改文件。
+
+  plan:
+    # plan-execute 模式中的规划器。规划器不调用工具。
+    llm:
+      api_key_env: OPENAI_API_KEY
+      model: your-planner-model
+    sys_prompt: |
+      将目标拆分成清晰、可顺序执行的步骤。

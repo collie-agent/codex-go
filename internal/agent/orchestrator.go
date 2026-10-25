@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os/exec"
 	"slices"
 	"strings"
@@ -18,11 +17,10 @@ import (
 type AgentProcessorType string
 
 const (
-	DirectAgentType       AgentProcessorType = "direct"
-	ReactAgentType        AgentProcessorType = "react"
-	PlanAgentType         AgentProcessorType = "plan"
-	EndAgentType          AgentProcessorType = "end"
-	TaskAnalyzerAgentType AgentProcessorType = "task_analyzer"
+	DirectAgentType AgentProcessorType = "direct"
+	ReactAgentType  AgentProcessorType = "react"
+	PlanAgentType   AgentProcessorType = "plan"
+	EndAgentType    AgentProcessorType = "end"
 )
 
 type ProcessorOrchestrator struct {
@@ -34,16 +32,16 @@ type ProcessorOrchestrator struct {
 	checkpoint    func(*fileContext.DurableState, string) error
 }
 
-// NewProcessorOrchestrator 从任务分析器开始，后续节点由各处理器的返回值决定。
+// NewProcessorOrchestrator 默认从 ReAct 开始，后续节点由各处理器的返回值决定。
 func NewProcessorOrchestrator(ctx context.Context, toolConfig filemcp.Config) *ProcessorOrchestrator {
 	return &ProcessorOrchestrator{
 		ctx:           ctx,
 		toolConfig:    toolConfig,
-		rootAgentType: TaskAnalyzerAgentType,
+		rootAgentType: ReactAgentType,
 	}
 }
 
-// NewProcessorOrchestratorWithCommand 从任务分析器开始，ReAct 通过子进程连接 MCP。
+// NewProcessorOrchestratorWithCommand 默认从 ReAct 开始，通过子进程连接 MCP。
 func NewProcessorOrchestratorWithCommand(ctx context.Context, command string, args ...string) *ProcessorOrchestrator {
 	o := NewProcessorOrchestrator(ctx, filemcp.Config{})
 	commandArgs := slices.Clone(args)
@@ -54,12 +52,10 @@ func NewProcessorOrchestratorWithCommand(ctx context.Context, command string, ar
 	return o
 }
 
-// SetMode 显式指定模式时跳过任务分析器；空值恢复默认的分析流程。
+// SetMode 指定执行入口；空值与 react 均直接进入 ReAct。
 func (o *ProcessorOrchestrator) SetMode(mode string) error {
 	switch mode {
-	case "":
-		o.rootAgentType = TaskAnalyzerAgentType
-	case "react":
+	case "", "react":
 		o.rootAgentType = ReactAgentType
 	case "plan-execute":
 		o.rootAgentType = PlanAgentType
@@ -79,7 +75,7 @@ func (o *ProcessorOrchestrator) saveCheckpoint(state *fileContext.DurableState) 
 		return nil
 	}
 	mode := "react"
-	if o.executionMode == PlanAgentType {
+	if o.executionMode == PlanAgentType || state.PlanningContext != "" {
 		mode = "plan-execute"
 	}
 	return o.checkpoint(state.Clone(), mode)
@@ -104,8 +100,8 @@ func (o *ProcessorOrchestrator) Run(agentConfig *config.AgentConfig, durableStat
 	// 每次运行使用独立的模式设置，避免复用 orchestrator 时串扰。
 	runner := *o
 	runner.executionMode = ReactAgentType
-	// 显式 ReAct 模式优先于 YAML 的 name，不能误入计划执行流程。
-	if o.rootAgentType == PlanAgentType || (o.rootAgentType == TaskAnalyzerAgentType && agentConfig.Name == "plan-execute") {
+	// 入口仅由 mode 决定，YAML name 不参与调度。
+	if o.rootAgentType == PlanAgentType {
 		runner.executionMode = PlanAgentType
 	}
 	return runner.runBatches(agentConfig, durableState, runner.runProcessor)
@@ -113,11 +109,10 @@ func (o *ProcessorOrchestrator) Run(agentConfig *config.AgentConfig, durableStat
 
 // processorResult 统一不同泛型处理器的结果，供批次结束后串行合并。
 type processorResult struct {
-	react    *ReactResult
-	analysis *TaskAnalyzerResult
-	plan     *PlannerResult
-	state    *fileContext.DurableState
-	next     []AgentProcessorType
+	react *ReactResult
+	plan  *PlannerResult
+	state *fileContext.DurableState
+	next  []AgentProcessorType
 }
 
 type processorRunner func(AgentProcessorType, *config.AgentConfig, *fileContext.DurableState) (processorResult, error)
@@ -142,7 +137,7 @@ func (o *ProcessorOrchestrator) runBatches(agentConfig *config.AgentConfig, dura
 		for _, branch := range batch {
 			agentType := branch.agentType
 			switch agentType {
-			case TaskAnalyzerAgentType, ReactAgentType, PlanAgentType, EndAgentType:
+			case ReactAgentType, PlanAgentType, EndAgentType:
 			default:
 				return nil, fmt.Errorf("orchestrator: unsupported processor type %q", agentType)
 			}
@@ -198,9 +193,6 @@ func (o *ProcessorOrchestrator) runBatches(agentConfig *config.AgentConfig, dura
 			if output.state != nil {
 				branch.state = output.state.Clone()
 			}
-			if output.analysis != nil {
-				branch.state.CompletionCriteria = slices.Clone(output.analysis.CompletionCriteria)
-			}
 			if output.plan != nil {
 				branch.state.StepExecutions = output.plan.StepExecutions
 				branch.state = branch.state.Clone()
@@ -241,22 +233,6 @@ func (o *ProcessorOrchestrator) runBatches(agentConfig *config.AgentConfig, dura
 
 func (o *ProcessorOrchestrator) runProcessor(agentType AgentProcessorType, agentConfig *config.AgentConfig, state *fileContext.DurableState) (processorResult, error) {
 	switch agentType {
-	case TaskAnalyzerAgentType:
-		process := NewTaskAnalyzerProcess[TaskAnalyzerResult](o.ctx)
-		process.Workspace = o.toolConfig.Workspace
-		analysis, next, err := process.Run(agentConfig, state)
-		if err == nil && o.executionMode == PlanAgentType {
-			next = []AgentProcessorType{PlanAgentType}
-		}
-		if err == nil {
-			mode := "react"
-			if o.executionMode == PlanAgentType {
-				mode = "plan-execute"
-			}
-			// 在模式覆盖完成后记录实际执行模式；error 级别也保留此调度信息。
-			log.Printf("task %s: [task_analyzer] mode=%s", state.RunId, mode)
-		}
-		return processorResult{analysis: &analysis, next: next}, err
 	case PlanAgentType:
 		process := NewPlannerProcess(o.ctx)
 		plan, next, err := process.Run(agentConfig, state)
@@ -265,7 +241,7 @@ func (o *ProcessorOrchestrator) runProcessor(agentType AgentProcessorType, agent
 		}
 		return processorResult{plan: &plan, state: state, next: next}, nil
 	case ReactAgentType:
-		planExecute := o.executionMode == PlanAgentType || o.rootAgentType == PlanAgentType
+		planExecute := o.executionMode == PlanAgentType || o.rootAgentType == PlanAgentType || state.PlanningContext != ""
 		var step *fileContext.StepExecution
 		if planExecute {
 			step = state.CurrentStep()
@@ -299,8 +275,16 @@ func (o *ProcessorOrchestrator) runProcessor(agentType AgentProcessorType, agent
 			return processorResult{}, fmt.Errorf("create processor %q: %w", agentType, err)
 		}
 		process.SetCheckpoint(func() error { return o.saveCheckpoint(state) })
-		result, _, err := process.Run(agentConfig, state)
-		// ReAct 不负责选择运行模式；orchestrator 决定结束或回到 planner。
+		process.allowPlanSwitch = !planExecute
+		result, requestedNext, err := process.Run(agentConfig, state)
+		if err == nil && !planExecute && slices.Contains(requestedNext, PlanAgentType) {
+			// 先持久化切换，再启动 planner；失败时保留交接状态供恢复。
+			if err := o.saveCheckpoint(state); err != nil {
+				return processorResult{state: state}, err
+			}
+			return processorResult{state: state, next: []AgentProcessorType{PlanAgentType}}, nil
+		}
+		// 未请求升级时，编排器决定结束普通运行或继续调度计划步骤。
 		next := []AgentProcessorType{EndAgentType}
 		if planExecute {
 			if err != nil {

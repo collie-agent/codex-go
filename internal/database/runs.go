@@ -34,6 +34,7 @@ type AgentRun struct {
 	Error              string          `gorm:"column:error;type:longtext"`
 	Mode               string          `gorm:"column:mode;type:varchar(32)"`
 	CompletionCriteria []string        `gorm:"column:completion_criteria;serializer:json;type:json"`
+	PlanningContext    string          `gorm:"column:planning_context;type:longtext"`
 	Workspace          string          `gorm:"column:workspace;type:longtext;not null"`
 	CreateAt           time.Time       `gorm:"column:create_at;autoCreateTime"`
 	UpdateAt           time.Time       `gorm:"column:update_at;autoUpdateTime"`
@@ -276,7 +277,7 @@ func (s *RunStore) Save(ctx context.Context, run *AgentRun) error {
 
 func saveRun(db *gorm.DB, run *AgentRun) error {
 	result := db.Model(&AgentRun{}).Where("run_id = ?", run.RunID).Updates(map[string]any{
-		"status": run.Status, "result": run.Result, "error": run.Error,
+		"status": run.Status, "result": run.Result, "error": run.Error, "planning_context": run.PlanningContext,
 		"mode": run.Mode, "completion_criteria": mustCriteriaJSON(run.CompletionCriteria), "update_at": time.Now(),
 	})
 	if result.Error != nil {
@@ -358,13 +359,18 @@ func (s *RunStore) SaveDurableCheckpoint(ctx context.Context, run *AgentRun, sta
 	if run == nil || state == nil {
 		return fmt.Errorf("save durable checkpoint: run and state are required")
 	}
-	// 模式一旦确定就不能被恢复调用的配置或后续处理器覆盖。
-	if run.Mode != "" && run.Mode != mode {
+	// 只允许带有交接状态的 ReAct 升级；恢复配置不能降级或改写执行模式。
+	if run.Mode != "" && run.Mode != mode && !(run.Mode == "react" && mode == "plan-execute" && state.PlanningContext != "") {
 		return fmt.Errorf("save durable checkpoint: cannot change original mode %q to %q", run.Mode, mode)
 	}
+	// 事务成功后才发布新模式，避免写入失败后收尾逻辑保存半完成的切换。
+	original := run
+	snapshot := *run
+	run = &snapshot
 	run.Mode = mode
 	run.Error = state.Error
 	run.CompletionCriteria = state.CompletionCriteria
+	run.PlanningContext = state.PlanningContext
 	if state.Result != nil {
 		encoded, err := json.Marshal(state.Result)
 		if err != nil {
@@ -380,7 +386,11 @@ func (s *RunStore) SaveDurableCheckpoint(ctx context.Context, run *AgentRun, sta
 			Observation: step.Observation, Position: i, Revision: step.Revision,
 		}
 	}
-	return s.SaveCheckpoint(ctx, run, steps)
+	if err := s.SaveCheckpoint(ctx, run, steps); err != nil {
+		return err
+	}
+	*original = *run
+	return nil
 }
 
 func mustCriteriaJSON(criteria []string) string {

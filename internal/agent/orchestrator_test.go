@@ -24,8 +24,8 @@ func TestOrchestratorWithCommand(t *testing.T) {
 	command := filepath.Join(t.TempDir(), "missing-mcp")
 	args := []string{"--workspace", t.TempDir(), "--timeout", "30s"}
 	o := NewProcessorOrchestratorWithCommand(context.Background(), command, args...)
-	if o.rootAgentType != TaskAnalyzerAgentType {
-		t.Fatalf("rootAgentType = %q; want task analyzer", o.rootAgentType)
+	if o.rootAgentType != ReactAgentType {
+		t.Fatalf("rootAgentType = %q; want ReAct", o.rootAgentType)
 	}
 	wantArgs := append([]string{command}, args...)
 	args[0] = "changed"
@@ -44,17 +44,13 @@ func TestOrchestratorWithCommand(t *testing.T) {
 func TestOrchestratorRun(t *testing.T) {
 	for _, tt := range []struct {
 		name     string
-		analysis string
 		answer   string
 		wantErr  string
 		criteria []string
 		root     AgentProcessorType
 	}{
-		{"success", `{"NeedsTools":true,"ExpectedSteps":2,"ReasoningSummary":"inspect and verify","CompletionCriteria":["file verified"]}`, `{"status":"completed","answer":"done"}`, "", []string{"file verified"}, TaskAnalyzerAgentType},
-		{"clear stale criteria", `{"NeedsTools":false,"ExpectedSteps":1,"ReasoningSummary":"direct answer","CompletionCriteria":[]}`, `{"status":"completed","answer":"done"}`, "", []string{}, TaskAnalyzerAgentType},
-		{"analyzer failure", `{"NeedsTools":true,"ExpectedSteps":0,"ReasoningSummary":"invalid","CompletionCriteria":[]}`, "", `processor "task_analyzer"`, []string{"old criterion"}, TaskAnalyzerAgentType},
-		{"react failure", `{"NeedsTools":true,"ExpectedSteps":2,"ReasoningSummary":"inspect and verify","CompletionCriteria":["file verified"]}`, `{"status":"failed","answer":"blocked"}`, `processor "react"`, []string{"old criterion"}, ReactAgentType},
-		{"react ends branch", "", `{"status":"completed","answer":"done"}`, "", []string{"old criterion"}, ReactAgentType},
+		{"react failure", `{"status":"failed","answer":"blocked"}`, `processor "react"`, []string{"old criterion"}, ReactAgentType},
+		{"react ends branch", `{"status":"completed","answer":"done"}`, "", []string{"old criterion"}, ReactAgentType},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -72,10 +68,7 @@ func TestOrchestratorRun(t *testing.T) {
 					return
 				}
 				requests <- req
-				text := tt.analysis
-				if req.Model == "react-model" {
-					text = tt.answer
-				}
+				text := tt.answer
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"id": "resp_test", "status": "completed",
@@ -86,9 +79,9 @@ func TestOrchestratorRun(t *testing.T) {
 			}))
 			defer server.Close()
 
-			// 为两个处理器设置不同模型及提示词，验证编排器按代理类型解析配置。
+			// ReAct 使用 base 配置，验证编排器直接运行 ReAct。
 			path := filepath.Join(t.TempDir(), "agents.yaml")
-			yaml := "name: react\nbase:\n  llm:\n    base_url: " + server.URL + "\n    api_key: test\n    model: react-model\n  sys_prompt: react-prompt\nagents:\n  task_analyzer:\n    llm:\n      base_url: " + server.URL + "\n      api_key: test\n      model: analyzer-model\n    sys_prompt: analyzer-prompt\n"
+			yaml := "name: react\nbase:\n  llm:\n    base_url: " + server.URL + "\n    api_key: test\n    model: react-model\n  sys_prompt: react-prompt\n"
 			if err := os.WriteFile(path, []byte(yaml), 0600); err != nil {
 				t.Fatal(err)
 			}
@@ -111,25 +104,11 @@ func TestOrchestratorRun(t *testing.T) {
 			if !slices.Equal(state.CompletionCriteria, tt.criteria) || state.Goal != "verify file" || state.RunId != "orchestrator-task" {
 				t.Fatalf("unexpected durable state: %+v", state)
 			}
-			wantRequests := 1
-			if tt.root == TaskAnalyzerAgentType && tt.wantErr == "" {
-				wantRequests = 2
-			}
-			if len(requests) != wantRequests {
-				t.Fatalf("got %d requests, want %d", len(requests), wantRequests)
-			}
-			if wantRequests == 2 {
-				first := <-requests
-				if first.Model != "analyzer-model" || !strings.Contains(first.Input, "analyzer-prompt") || strings.Contains(first.Input, "react-prompt") {
-					t.Fatalf("unexpected analyzer request: %+v", first)
-				}
+			if len(requests) != 1 {
+				t.Fatalf("got %d requests, want only ReAct", len(requests))
 			}
 			first := <-requests
-			if tt.root == TaskAnalyzerAgentType && wantRequests == 1 {
-				if first.Model != "analyzer-model" || !strings.Contains(first.Input, "analyzer-prompt") || strings.Contains(first.Input, "react-prompt") {
-					t.Fatalf("unexpected analyzer request: %+v", first)
-				}
-			} else if first.Model != "react-model" || !strings.Contains(first.Input, "react-prompt") || strings.Contains(first.Input, "analyzer-prompt") {
+			if first.Model != "react-model" || !strings.Contains(first.Input, "react-prompt") {
 				t.Fatalf("unexpected react request: %+v", first)
 			}
 		})
@@ -179,17 +158,18 @@ func TestOrchestratorConcurrentBatches(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	o := NewProcessorOrchestrator(ctx, filemcp.Config{})
+	o.rootAgentType = PlanAgentType
 	state := &fileContext.DurableState{Goal: "test"}
-	var analyzerCalls int
+	var plannerCalls int
 	var started, finished atomic.Int32
 	bothStarted := make(chan struct{})
 	run := func(kind AgentProcessorType, cfg *config.AgentConfig, snapshot *fileContext.DurableState) (processorResult, error) {
-		if kind == TaskAnalyzerAgentType {
-			analyzerCalls++
-			if analyzerCalls == 1 {
+		if kind == PlanAgentType {
+			plannerCalls++
+			if plannerCalls == 1 {
 				return processorResult{
-					analysis: &TaskAnalyzerResult{CompletionCriteria: []string{"criterion"}},
-					next:     []AgentProcessorType{ReactAgentType, EndAgentType, ReactAgentType},
+					state: &fileContext.DurableState{Goal: snapshot.Goal, CompletionCriteria: []string{"criterion"}},
+					next:  []AgentProcessorType{ReactAgentType, EndAgentType, ReactAgentType},
 				}, nil
 			}
 			if finished.Load() != 2 {
@@ -213,13 +193,13 @@ func TestOrchestratorConcurrentBatches(t *testing.T) {
 		}
 		output := processorResult{react: &ReactResult{Status: CompletedReactStatus, Answer: "done"}}
 		if finished.Add(1) == 1 {
-			output.next = []AgentProcessorType{TaskAnalyzerAgentType}
+			output.next = []AgentProcessorType{PlanAgentType}
 		}
 		return output, nil
 	}
 	got, err := o.runBatches(&config.AgentConfig{}, state, run)
-	if err != nil || !reflect.DeepEqual(got, []ReactResult{{Status: CompletedReactStatus, Answer: "done"}, {Status: CompletedReactStatus, Answer: "done"}}) || started.Load() != 2 || analyzerCalls != 2 {
-		t.Fatalf("got %+v, %v; started=%d analyzerCalls=%d", got, err, started.Load(), analyzerCalls)
+	if err != nil || !reflect.DeepEqual(got, []ReactResult{{Status: CompletedReactStatus, Answer: "done"}, {Status: CompletedReactStatus, Answer: "done"}}) || started.Load() != 2 || plannerCalls != 2 {
+		t.Fatalf("got %+v, %v; started=%d plannerCalls=%d", got, err, started.Load(), plannerCalls)
 	}
 	if !slices.Equal(state.CompletionCriteria, []string{"criterion"}) {
 		t.Fatalf("processor mutated shared state: %+v", state)
@@ -230,11 +210,12 @@ func TestOrchestratorBatchFailureWaits(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	o := NewProcessorOrchestrator(ctx, filemcp.Config{})
+	o.rootAgentType = PlanAgentType
 	failure := errors.New("processor failed")
 	failed := make(chan struct{})
 	var finished atomic.Bool
 	run := func(kind AgentProcessorType, _ *config.AgentConfig, _ *fileContext.DurableState) (processorResult, error) {
-		if kind == TaskAnalyzerAgentType {
+		if kind == PlanAgentType {
 			return processorResult{next: []AgentProcessorType{ReactAgentType, ReactAgentType}}, nil
 		}
 		if finished.CompareAndSwap(false, true) {
@@ -281,7 +262,7 @@ func TestOrchestratorFinalBranchResults(t *testing.T) {
 			name: "nested branches preserve declaration order despite different depths",
 			nodes: []processorResult{
 				{react: &ReactResult{Answer: "root"}, next: []AgentProcessorType{ReactAgentType, EndAgentType}},
-				{react: &ReactResult{Answer: "middle"}, next: []AgentProcessorType{EndAgentType, TaskAnalyzerAgentType}},
+				{react: &ReactResult{Answer: "middle"}, next: []AgentProcessorType{EndAgentType, PlanAgentType}},
 				{next: []AgentProcessorType{ReactAgentType}},
 				{react: &ReactResult{Answer: "deep"}},
 			},
@@ -290,7 +271,7 @@ func TestOrchestratorFinalBranchResults(t *testing.T) {
 		{
 			name: "non-react continuation inherits result",
 			nodes: []processorResult{
-				{react: &ReactResult{Answer: "final"}, next: []AgentProcessorType{TaskAnalyzerAgentType}},
+				{react: &ReactResult{Answer: "final"}, next: []AgentProcessorType{PlanAgentType}},
 				{},
 			},
 			want: []ReactResult{{Answer: "final"}},
@@ -298,7 +279,7 @@ func TestOrchestratorFinalBranchResults(t *testing.T) {
 		{
 			name: "branches without react have no result",
 			nodes: []processorResult{
-				{next: []AgentProcessorType{EndAgentType, TaskAnalyzerAgentType}},
+				{next: []AgentProcessorType{EndAgentType, PlanAgentType}},
 				{},
 			},
 		},
@@ -351,12 +332,13 @@ func TestOrchestratorBranchOrderIgnoresCompletionOrder(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	o := NewProcessorOrchestrator(ctx, filemcp.Config{})
+	o.rootAgentType = PlanAgentType
 	secondFinished := make(chan struct{})
-	var analyzerCalls atomic.Int32
+	var plannerCalls atomic.Int32
 	run := func(kind AgentProcessorType, _ *config.AgentConfig, _ *fileContext.DurableState) (processorResult, error) {
-		if kind == TaskAnalyzerAgentType {
-			if analyzerCalls.Add(1) == 1 {
-				return processorResult{next: []AgentProcessorType{ReactAgentType, TaskAnalyzerAgentType}}, nil
+		if kind == PlanAgentType {
+			if plannerCalls.Add(1) == 1 {
+				return processorResult{next: []AgentProcessorType{ReactAgentType, PlanAgentType}}, nil
 			}
 			close(secondFinished)
 			return processorResult{react: &ReactResult{Answer: "second"}}, nil

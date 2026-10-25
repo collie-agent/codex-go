@@ -36,7 +36,7 @@ func TestLoadAgentConfigLogLevel(t *testing.T) {
 			if cfg.LogLevel != want {
 				t.Fatalf("log level = %q, want %q", cfg.LogLevel, want)
 			}
-			for _, name := range []string{"base", "react", "observe", "task_analyzer", "plan"} {
+			for _, name := range []string{"base", "react", "observe", "plan"} {
 				if got := cfg.ForAgent(name).LogLevel; got != want {
 					t.Errorf("%s log level = %q, want %q", name, got, want)
 				}
@@ -113,7 +113,6 @@ base:
 
 func TestLoadAgentConfigAppliesIndependentOverrides(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "base-secret")
-	t.Setenv("ANALYZER_SECRET", "analyzer-secret")
 	path := filepath.Join(t.TempDir(), "agents.yaml")
 	if err := os.WriteFile(path, []byte(`name: react
 base:
@@ -125,10 +124,6 @@ agents:
   react:
     allow_tools: []
     sys_prompt: ""
-  task_analyzer:
-    llm:
-      model: analyzer-model
-      api_key_env: ANALYZER_SECRET
 `), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -141,19 +136,12 @@ agents:
 	if len(react.AllowTools) != 0 || react.SysPrompt != "" {
 		t.Fatalf("explicit empty overrides were lost: %+v", react)
 	}
-	analyzer := loaded.ForAgent("task_analyzer")
-	if analyzer.LLMConfig.Model != "analyzer-model" || analyzer.LLMConfig.ApiKey != "analyzer-secret" {
-		t.Fatalf("LLM block was not replaced: %+v", analyzer.LLMConfig)
-	}
-	if _, ok := analyzer.AllowTools[ReadFileMCPToolName]; ok || analyzer.SysPrompt != "shared prompt" {
-		t.Fatalf("base settings did not independently fall back: %+v", analyzer)
-	}
 }
 
 func TestLoadAgentConfigValidatesUnusedAgentSettingsAndToolBoundary(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "base-secret")
 	for _, tc := range []struct{ name, agent, want string }{
-		{"invalid unused model", "task_analyzer:\n    llm:\n      api_key: analyzer-secret\n", "llm.model is required"},
+		{"removed analyzer", "task_analyzer:\n    llm:\n      model: analyzer\n", "unknown agent type"},
 		{"internal tools", "observe:\n    allow_tools: [read_file]\n", "cannot enable tools"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

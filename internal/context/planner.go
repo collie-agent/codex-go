@@ -7,7 +7,7 @@ const plannerSystemPrompt = `你是 plan-execute 流程中的 planner。根据 G
 # 规划规则
 
 1. 只规划，不调用工具，不执行任务，不声称已经完成任何操作。
-2. 计划必须包含至少一个步骤，按执行顺序排列，覆盖目标且不扩大用户要求的范围。
+2. 如果提供 PlanningContext，结合其中的已确认事实和已完成操作，只规划剩余工作；不把推断当作事实，不重复已完成的操作。计划必须包含至少一个步骤，按执行顺序排列，覆盖目标且不扩大用户要求的范围。
 3. 每个 Intent 描述一个有意义、可执行的阶段，并包含该阶段的预期结果，CompletionCriteria 以非空字符串描述可独立验证的该步骤完成验收标准；不要把内部思考或微小动作单独列为步骤。
 4. 不编造文件路径、资源 ID 或已确认事实。信息不足时，安排获取必要信息的步骤。
 5. StepId 必须非空且在计划内唯一。初始计划的所有 Revision 固定为 1，Status 固定为 "pending"，Observation 和 CompletionEvidence 为空列表；观察结果和执行证据只能由 executor 在执行后提供。
@@ -28,14 +28,62 @@ const plannerSystemPrompt = `你是 plan-execute 流程中的 planner。根据 G
 `
 
 type PlannerContext struct {
-	*TaskAnalyzerContext
+	sysPrompt    string
+	Workspace    string
+	DurableState *DurableState
 }
 
 func NewPlannerContext(ds *DurableState) *PlannerContext {
-	// 复用任务上下文的 Goal 引用边界和补充指令格式，替换为规划规则。
-	return &PlannerContext{TaskAnalyzerContext: &TaskAnalyzerContext{
-		sysPrompt: strings.TrimSpace(plannerSystemPrompt), DurableState: ds,
-	}}
+	return &PlannerContext{sysPrompt: strings.TrimSpace(plannerSystemPrompt), DurableState: ds}
+}
+
+// SetSysPrompt appends caller constraints after the built-in planning rules.
+func (c *PlannerContext) SetSysPrompt(prompt string) {
+	if c == nil || strings.TrimSpace(prompt) == "" {
+		return
+	}
+	c.sysPrompt += "\n\n# Additional instructions\n\n" + prompt
+}
+
+func (c *PlannerContext) Format() string { return c.format(true) }
+
+func (c *PlannerContext) format(includePrompt bool) string {
+	if c == nil {
+		return ""
+	}
+	var b strings.Builder
+	writeContent := func(content string) {
+		for _, line := range strings.Split(content, "\n") {
+			b.WriteString("> " + line + "\n")
+		}
+		b.WriteByte('\n')
+	}
+	if includePrompt {
+		b.WriteString("# sysPrompt\n\n")
+		writeContent(c.sysPrompt)
+	}
+	if strings.TrimSpace(c.Workspace) != "" {
+		b.WriteString("# Workspace\n\n")
+		writeContent(c.Workspace)
+	}
+	b.WriteString("# DurableState\n\n")
+	if c.DurableState != nil {
+		b.WriteString("## RunId\n\n")
+		writeContent(c.DurableState.RunId)
+		b.WriteString("## Goal\n\n")
+		writeContent(c.DurableState.Goal)
+		if c.DurableState.PlanningContext != "" {
+			b.WriteString("## PlanningContext\n\n")
+			writeContent(c.DurableState.PlanningContext)
+		}
+	}
+	b.WriteString("# Observation\n\n# CompletionCriteria\n\n")
+	if c.DurableState != nil {
+		for _, criterion := range c.DurableState.CompletionCriteria {
+			b.WriteString("- " + strings.ReplaceAll(criterion, "\n", "\n  ") + "\n")
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // PlannerContext 覆盖嵌入的分析器协议，避免规划请求带入任务分析结果示例。

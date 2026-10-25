@@ -29,8 +29,8 @@ func TestOrchestratorModeRouting(t *testing.T) {
 		{"react", "plan-execute", []string{"react"}},
 		{"plan-execute", "react", []string{"plan", "react", "react"}},
 		{"plan-execute", "plan-execute", []string{"plan", "react", "react"}},
-		{"", "react", []string{"task_analyzer", "react"}},
-		{"", "plan-execute", []string{"task_analyzer", "plan", "react", "react"}},
+		{"", "react", []string{"react"}},
+		{"", "plan-execute", []string{"react"}},
 	} {
 		t.Run(tt.mode+"/"+tt.configName, func(t *testing.T) {
 			var logs bytes.Buffer
@@ -49,8 +49,6 @@ func TestOrchestratorModeRouting(t *testing.T) {
 				models <- req.Model
 				text := `{"status":"completed","answer":"done"}`
 				switch req.Model {
-				case "task_analyzer":
-					text = `{"NeedsTools":false,"ExpectedSteps":1,"ReasoningSummary":"simple task","CompletionCriteria":[]}`
 				case "plan":
 					text = `{"StepExecutions":[{"Revision":1,"StepId":"inspect","Status":"pending","Intent":"inspect the question","CompletionCriteria":"question inspected","CompletionEvidence":[]},{"Revision":1,"StepId":"answer","Status":"pending","Intent":"answer the question","CompletionCriteria":"question answered","CompletionEvidence":[]}]}`
 				case "react":
@@ -81,7 +79,7 @@ func TestOrchestratorModeRouting(t *testing.T) {
 			defer server.Close()
 			path := filepath.Join(t.TempDir(), "agent.yaml")
 			yaml := "name: " + tt.configName + "\nlog_level: error\nbase:\n  llm:\n    base_url: " + server.URL + "\n    api_key: test\n    model: react\nagents:\n"
-			for _, model := range []string{"task_analyzer", "plan"} {
+			for _, model := range []string{"plan"} {
 				yaml += "  " + model + ":\n    llm:\n      base_url: " + server.URL + "\n      api_key: test\n      model: " + model + "\n"
 			}
 			if err := os.WriteFile(path, []byte(yaml), 0600); err != nil {
@@ -102,20 +100,12 @@ func TestOrchestratorModeRouting(t *testing.T) {
 			if err != nil || len(results) != 1 || results[0].Answer != "done" {
 				t.Fatalf("Run() = %+v, %v", results, err)
 			}
-			if tt.mode == "" {
-				want := "task mode-test: [task_analyzer] mode=" + tt.configName + "\n"
-				if strings.Count(logs.String(), "[task_analyzer] mode=") != 1 || !strings.Contains(logs.String(), want) {
-					t.Errorf("expected selected mode log %q, got %q", want, logs.String())
-				}
-			} else if strings.Contains(logs.String(), "[task_analyzer] mode=") {
-				t.Errorf("skipped analyzer emitted mode log: %s", logs.String())
-			}
 			close(models)
 			var got []string
 			for model := range models {
 				got = append(got, model)
 			}
-			// 检查实际模型调用顺序，确保显式模式没有调用分析器或错误的代理配置。
+			// 检查实际模型调用顺序，确保模式选择使用正确的代理配置。
 			if !slices.Equal(got, tt.wantModels) {
 				t.Fatalf("models = %v; want %v", got, tt.wantModels)
 			}
@@ -141,7 +131,7 @@ func TestOrchestratorRejectsInvalidMode(t *testing.T) {
 	if err := o.SetMode("unknown"); err == nil {
 		t.Fatal("expected invalid mode error")
 	}
-	if o.rootAgentType != TaskAnalyzerAgentType {
+	if o.rootAgentType != ReactAgentType {
 		t.Fatal("invalid mode changed the entry processor")
 	}
 }

@@ -16,14 +16,6 @@ base:
   sys_prompt: |
     保持任务范围清晰：只修改工作目录中的目标文件，并在完成时简要说明验证结果。
 agents:
-  task_analyzer:
-    # 独立 llm 整块替换 base.llm；未提供 api_key 时仍需提供密钥字段或 OPENAI_API_KEY。
-    llm:
-      api_key_env: ANALYZER_API_KEY
-      model: analyzer-model
-    sys_prompt: "分析器专用约束"
-    # 内部代理始终无工具能力；显式空列表是有效配置。
-    allow_tools: []
   observe:
     # 空提示词覆盖 base 的提示词，只保留观察器内置提示词。
     sys_prompt: ""

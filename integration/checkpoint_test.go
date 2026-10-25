@@ -147,7 +147,7 @@ func TestMigrationCommandIsExplicitAndRepeatable(t *testing.T) {
 	}
 }
 
-func TestServerPersistsAnalysisBeforeExecutingReact(t *testing.T) {
+func TestServerDefaultsToReactWithoutAnalyzer(t *testing.T) {
 	_, store := persistenceStore(t)
 	var observed atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -156,7 +156,10 @@ func TestServerPersistsAnalysisBeforeExecutingReact(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		text := `{"NeedsTools":true,"ExpectedSteps":2,"ReasoningSummary":"inspect then report","CompletionCriteria":["README inspected","report written"]}`
+		text := `{"status":"completed","answer":"done"}`
+		if request.Model == "analyzer" {
+			t.Error("default entry must not call analyzer")
+		}
 		if request.Model != "analyzer" {
 			ids := regexp.MustCompile(`## RunId\n\n> ([a-f0-9]+)`).FindStringSubmatch(request.Input)
 			if len(ids) != 2 {
@@ -164,8 +167,8 @@ func TestServerPersistsAnalysisBeforeExecutingReact(t *testing.T) {
 				return
 			}
 			run, err := store.Get(context.Background(), ids[1])
-			if err != nil || run.Status != "running" || run.Mode != "react" || len(run.CompletionCriteria) != 2 || run.CompletionCriteria[0] != "README inspected" || run.CompletionCriteria[1] != "report written" {
-				t.Errorf("analysis was not checkpointed before execution: %+v, %v", run, err)
+			if err != nil || run.Status != "running" || run.Mode != "react" || len(run.CompletionCriteria) != 0 {
+				t.Errorf("run was not checkpointed before execution: %+v, %v", run, err)
 			}
 			observed.Store(true)
 			text = `{"status":"completed","answer":"done"}`
@@ -174,15 +177,6 @@ func TestServerPersistsAnalysisBeforeExecutingReact(t *testing.T) {
 	}))
 	defer server.Close()
 	config := configFile(t, server.URL)
-	f, err := os.OpenFile(config, os.O_APPEND|os.O_WRONLY, 0600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = fmt.Fprintf(f, "agents:\n  task_analyzer:\n    llm:\n      base_url: %s\n      api_key: test\n      model: analyzer\n", server.URL)
-	_ = f.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
 	binaries := buildCommands(t)
 	mcp := buildMCP(t)
 	cmd := exec.Command(binaries[1], "--config", config, "--task", "inspect and report", "--workspace", t.TempDir(), "--mcp-command", mcp)

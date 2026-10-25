@@ -6,7 +6,7 @@ import (
 )
 
 type LLMSchema interface {
-	ReactResult | ObserveResult | TaskAnalyzerResult | PlannerResult
+	ReactResult | ObserveResult | PlannerResult
 }
 
 type AgentProcessor[T LLMSchema] interface {
@@ -16,9 +16,8 @@ type AgentProcessor[T LLMSchema] interface {
 
 // 编译期检查确保各处理器始终满足统一的运行接口。
 var (
-	_ AgentProcessor[PlannerResult]      = (*PlannerProcess)(nil)
-	_ AgentProcessor[ReactResult]        = (*ReactProcess[ReactResult])(nil)
-	_ AgentProcessor[ObserveResult]      = (*ReactProcess[ObserveResult])(nil)
-	_ AgentProcessor[ObserveResult]      = (*ObserveProcess[ObserveResult])(nil)
-	_ AgentProcessor[TaskAnalyzerResult] = (*TaskAnalyzerProcess[TaskAnalyzerResult])(nil)
+	_ AgentProcessor[PlannerResult] = (*PlannerProcess)(nil)
+	_ AgentProcessor[ReactResult]   = (*ReactProcess[ReactResult])(nil)
+	_ AgentProcessor[ObserveResult] = (*ReactProcess[ObserveResult])(nil)
+	_ AgentProcessor[ObserveResult] = (*ObserveProcess[ObserveResult])(nil)
 )
