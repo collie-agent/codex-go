@@ -1,13 +1,19 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net"
+	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/collie-agent/codex-go/internal/config"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -189,7 +195,47 @@ func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId,
 			log.Printf("task %s: LLM context=\n%s", taskId, encodedContext)
 		}
 	}
-	response, err := c.client.Responses.New(ctx, params)
+	// Middleware 位于 SDK 重试循环内；正文只随 SDK 的 Read 被动收集，不能抢先读取并阻塞重试。
+	var attemptBodies []*usageBody
+	response, err := c.client.Responses.New(ctx, params, option.WithMiddleware(func(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+		resp, requestErr := next(req)
+		status := "unknown"
+		if requestErr != nil {
+			status = attemptErrorStatus(requestErr)
+		} else if resp != nil && resp.StatusCode >= 400 {
+			status = fmt.Sprintf("http_error_%d", resp.StatusCode)
+		}
+		record := func(body []byte, readErr error) {
+			usageResponse := &responses.Response{}
+			// 只有完整读到 EOF 才解析统计；SDK 直接关闭的重试正文保持 unknown，不额外读取。
+			if readErr == io.EOF {
+				if json.Unmarshal(body, usageResponse) != nil {
+					usageResponse = &responses.Response{}
+				}
+			} else if readErr != nil {
+				status = attemptErrorStatus(readErr)
+			} else if req.Context().Err() != nil {
+				status = attemptErrorStatus(req.Context().Err())
+			}
+			if usageResponse.Status == "" {
+				usageResponse.Status = responses.ResponseStatus(status)
+			}
+			c.logResponseUsage(taskId, params.Model, usageResponse)
+		}
+		if resp != nil && resp.Body != nil {
+			body := &usageBody{ReadCloser: resp.Body, record: record}
+			attemptBodies = append(attemptBodies, body)
+			resp.Body = body
+		} else {
+			record(nil, nil)
+		}
+		return resp, requestErr
+	}))
+	// SDK 在响应头返回后发现 context 已取消时会提前退出；兜底关闭，并通过 Once 避免重复关闭和统计。
+	for _, body := range attemptBodies {
+		_ = body.Close()
+	}
+
 	if err != nil {
 		// SDK 的 Error() 只含 HTTP 状态；补充服务端诊断，保留原始错误链。
 		var apiErr *openai.Error
@@ -207,6 +253,7 @@ func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId,
 		}
 		return result, nil, "", fmt.Errorf("task %s: create response: %w", taskId, err)
 	}
+	// 统计已由 HTTP 尝试层记录；此处状态检查和输出解析不得重复计数。
 	if response.Status != responses.ResponseStatusCompleted {
 		return result, nil, "", fmt.Errorf("task %s: response status %q (error: %s, incomplete reason: %s)",
 			taskId, response.Status, response.Error.Message, response.IncompleteDetails.Reason)
@@ -241,4 +288,71 @@ func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId,
 		return zero, nil, "", fmt.Errorf("task %s: %w", taskId, &OutputParseError{Output: response.OutputText(), Err: err})
 	}
 	return result, toolCalls, "", nil
+}
+
+func (c *responsesApiClient[T]) logResponseUsage(taskID, model string, response *responses.Response) {
+	input, output, cached, uncached := "unknown", "unknown", "unknown", "unknown"
+	u := response.Usage
+	// SDK 数值零值不能区分缺失/null 与显式 0，必须检查字段元数据。
+	if u.JSON.InputTokens.Valid() {
+		input = strconv.FormatInt(u.InputTokens, 10)
+	}
+	if u.JSON.OutputTokens.Valid() {
+		output = strconv.FormatInt(u.OutputTokens, 10)
+	}
+	if u.InputTokensDetails.JSON.CachedTokens.Valid() {
+		cached = strconv.FormatInt(u.InputTokensDetails.CachedTokens, 10)
+		if u.JSON.InputTokens.Valid() {
+			// 未命中包含缓存写入消耗，只减去服务端报告的缓存命中。
+			uncached = strconv.FormatInt(u.InputTokens-u.InputTokensDetails.CachedTokens, 10)
+		}
+	}
+	label, responseID := "", ""
+	if c.contextLogLabel != "" {
+		label = fmt.Sprintf("[%s] ", c.contextLogLabel)
+	}
+	if response.ID != "" {
+		responseID = " response_id=" + response.ID
+	}
+	// 不受日志级别过滤；标准 logger 单次写入，沿用上下文日志输出位置。
+	log.Printf("task %s: %sLLM usage model=%s%s status=%s input_tokens=%s output_tokens=%s cached_input_tokens=%s uncached_input_tokens=%s",
+		taskID, label, model, responseID, response.Status, input, output, cached, uncached)
+}
+
+// usageBody 不改变 SDK 的读取结果；Close 在重试、正常读取及取消兜底路径均只执行一次。
+type usageBody struct {
+	io.ReadCloser
+	body      bytes.Buffer
+	readErr   error
+	record    func([]byte, error)
+	closeOnce sync.Once
+	closeErr  error
+}
+
+func (b *usageBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	_, _ = b.body.Write(p[:n])
+	if err != nil {
+		b.readErr = err
+	}
+	return n, err
+}
+
+func (b *usageBody) Close() error {
+	b.closeOnce.Do(func() {
+		b.closeErr = b.ReadCloser.Close()
+		b.record(b.body.Bytes(), b.readErr)
+	})
+	return b.closeErr
+}
+
+func attemptErrorStatus(err error) string {
+	var netErr net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+		return "timeout"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "canceled"
+	}
+	return "network_error"
 }
