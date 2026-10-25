@@ -64,16 +64,16 @@ func (c *ReactContext) SnapshotObservationContext(toolResult *ToolResult) *Obser
 }
 
 func (c *ObservationContext) Format() string {
-	return c.format("")
+	return c.format("", true)
 }
 
 // FormatWithSysPrompt appends the observer-specific instructions to its built-in
 // prompt before writing task data, matching the prompt boundary of other agents.
 func (c *ObservationContext) FormatWithSysPrompt(prompt string) string {
-	return c.format(prompt)
+	return c.format(prompt, true)
 }
 
-func (c *ObservationContext) format(customPrompt string) string {
+func (c *ObservationContext) format(customPrompt string, includePrompt bool) string {
 	if c == nil {
 		return ""
 	}
@@ -102,21 +102,12 @@ func (c *ObservationContext) format(customPrompt string) string {
 		}
 	}
 
-	b.WriteString("# sysPrompt\n\n")
-	writeContent(observeToolResultPrompt)
-	if strings.TrimSpace(customPrompt) != "" {
-		writeContent("# Additional instructions\n\n" + customPrompt)
-	}
-	b.WriteString("# DurableState\n\n")
-	if c.DurableState != nil {
-		writeField("Goal", c.DurableState.Goal)
-	}
-	b.WriteString("# Observation\n\n")
-	if c.Observation != nil {
-		b.WriteString("## ConfirmedFacts\n\n")
-		writeList(c.Observation.ConfirmedFacts)
-		b.WriteString("## ReportedErrors\n\n")
-		writeList(c.Observation.ReportedErrors)
+	if includePrompt {
+		b.WriteString("# sysPrompt\n\n")
+		writeContent(observeToolResultPrompt)
+		if strings.TrimSpace(customPrompt) != "" {
+			writeContent("# Additional instructions\n\n" + customPrompt)
+		}
 	}
 	b.WriteString("# ToolResult\n\n")
 	if tr := c.ToolResult; tr != nil {
@@ -134,6 +125,18 @@ func (c *ObservationContext) format(customPrompt string) string {
 		writeContent(tr.Result)
 		b.WriteString("### Error\n\n")
 		writeContent(tr.Error)
+	}
+	b.WriteString("# DurableState\n\n")
+	if c.DurableState != nil {
+		writeField("Goal", c.DurableState.Goal)
+	}
+	// 传入已有的observation,避免重复记录、发现新旧结果冲突
+	b.WriteString("# Observation\n\n")
+	if c.Observation != nil {
+		b.WriteString("## ConfirmedFacts\n\n")
+		writeList(c.Observation.ConfirmedFacts)
+		b.WriteString("## ReportedErrors\n\n")
+		writeList(c.Observation.ReportedErrors)
 	}
 	b.WriteString("# CompletionCriteria\n\n")
 	if c.DurableState != nil {
@@ -153,7 +156,16 @@ var _ Contexter = (*ObservationContext)(nil)
 
 // ModelRequest 仅分析已提供的数据，不向模型开放工具。
 func (c *ObservationContext) ModelRequest() ModelRequest {
-	return ModelRequest{RunID: c.DurableState.RunId, Input: c.Format(), LogLabel: "observe"}
+	return c.ModelRequestWithSysPrompt("")
+}
+
+// ModelRequestWithSysPrompt 将观察器规则与调用方指令放入 system，工具数据先于状态区块。
+func (c *ObservationContext) ModelRequestWithSysPrompt(prompt string) ModelRequest {
+	system := observeToolResultPrompt
+	if strings.TrimSpace(prompt) != "" {
+		system += "\n\n# Additional instructions\n\n" + prompt
+	}
+	return ModelRequest{RunID: c.DurableState.RunId, Input: c.format("", false), SystemPrompt: system, LogLabel: "observe"}
 }
 
 // 示例与本上下文的结果字段一致，空列表遵循对应协议。

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 
@@ -240,7 +241,12 @@ func (r *ReactProcess[T]) batchToolCallings(toolParams []*mcpSdk.CallToolParams,
 			if err == nil {
 				schema, ok := schemas[toolParam.Name]
 				if !ok {
-					err = fmt.Errorf("unknown tool %q; choose an available tool", toolParam.Name)
+					names := make([]string, 0, len(schemas))
+					for name := range schemas {
+						names = append(names, name)
+					}
+					sort.Strings(names)
+					err = fmt.Errorf("unknown tool %q; available tools: %s; the tool was not executed", toolParam.Name, strings.Join(names, ", "))
 				} else {
 					err = validateToolArguments(schema, toolParam.Arguments)
 				}
@@ -276,6 +282,9 @@ func (r *ReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, toolP
 			result.Arguments = string(arguments)
 		}
 	}
+	if callResult == nil && err == nil {
+		errors = append(errors, fmt.Sprintf("%s: MCP returned no result and no error; execution outcome is unknown; verify side effects before retrying", callDescription))
+	}
 	if callResult != nil {
 		// 只保存 content，避免 structuredContent 的重复数据占用模型上下文。
 		encoded, marshalErr := json.Marshal(callResult.Content)
@@ -289,6 +298,15 @@ func (r *ReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, toolP
 			for _, content := range callResult.Content {
 				if content, ok := content.(*mcpSdk.TextContent); ok && content != nil && content.Text != "" {
 					messages = append(messages, content.Text)
+				}
+			}
+			// 部分 MCP 服务仅返回结构化错误；无文本时保留它，避免丢失修正依据。
+			if len(messages) == 0 && callResult.StructuredContent != nil {
+				structured, encodeErr := json.Marshal(callResult.StructuredContent)
+				if encodeErr != nil {
+					messages = append(messages, fmt.Sprintf("failed to encode structured MCP error: %v", encodeErr))
+				} else {
+					messages = append(messages, "MCP structured error: "+string(structured))
 				}
 			}
 			if len(messages) == 0 {

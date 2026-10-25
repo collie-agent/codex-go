@@ -22,7 +22,7 @@ func TestTaskAnalyzerFewShotMatchesOutputSchema(t *testing.T) {
 				var request struct {
 					Input string `json:"input"`
 				}
-				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				if err := decodeModelRequest(r.Body, &request); err != nil {
 					t.Error(err)
 					return
 				}
@@ -66,7 +66,7 @@ func TestTaskAnalyzerRunUsesItsResolvedConfiguration(t *testing.T) {
 			Input string `json:"input"`
 			Tools []any  `json:"tools"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		if err := decodeModelRequest(r.Body, &request); err != nil {
 			t.Error(err)
 			return
 		}

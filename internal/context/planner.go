@@ -48,7 +48,7 @@ var _ Contexter = (*PlannerContext)(nil)
 
 // ModelRequest 仅分析已提供的数据，不向模型开放工具。
 func (c *PlannerContext) ModelRequest() ModelRequest {
-	return ModelRequest{RunID: c.DurableState.RunId, Input: c.Format(), LogLabel: "planner"}
+	return ModelRequest{RunID: c.DurableState.RunId, Input: c.format(false), SystemPrompt: c.sysPrompt, LogLabel: "planner"}
 }
 
 // 示例与本上下文的结果字段一致，空列表遵循对应协议。

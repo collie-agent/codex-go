@@ -265,7 +265,9 @@ func TestRunAgentUsesObserveAgentConfiguration(t *testing.T) {
 						t.Errorf("invalid model input: %s", request.Input)
 						return
 					}
-					input = items[0].Content
+					for _, item := range items {
+						input += item.Content + "\n"
+					}
 				}
 				switch request.Model {
 				case "react-model":

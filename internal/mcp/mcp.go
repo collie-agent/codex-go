@@ -108,7 +108,7 @@ func ReadFile(ctx context.Context, workspace, path string, offset, limit int) (R
 	cmd := exec.CommandContext(ctx, "sed", "-n", fmt.Sprintf("%d,%dp", offset, offset+limit), "--", resolved)
 	output, err := cmd.Output()
 	if err != nil {
-		return ReadFileResult{}, fmt.Errorf("sed read failed: %w", err)
+		return ReadFileResult{}, commandError("sed read failed", err, "")
 	}
 	text := strings.TrimSuffix(string(output), "\n")
 	lines := make([]ReadFileLine, 0)
@@ -126,7 +126,7 @@ func ReadFile(ctx context.Context, workspace, path string, offset, limit int) (R
 		lookahead := exec.CommandContext(ctx, "sed", "-n", fmt.Sprintf("%dp", offset+limit), "--", resolved)
 		following, lookErr := lookahead.Output()
 		if lookErr != nil {
-			return ReadFileResult{}, fmt.Errorf("sed read failed: %w", lookErr)
+			return ReadFileResult{}, commandError("sed read failed", lookErr, "")
 		}
 		if len(following) > 0 {
 			next := offset + len(lines)

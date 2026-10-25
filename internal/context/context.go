@@ -14,7 +14,7 @@ const reactSystemPrompt = `你是 ReAct agent 的单轮决策器。每次调用�
 # 上下文
 
 - sysPrompt：当前任务的补充指令。
-- DurableState：本次运行的 RunId 和 CurrentStep；计划执行时 Goal 和 StepExecutions 位于末尾验收标准之前。
+- DurableState：本次运行的 RunId、Goal、StepExecutions 和 CurrentStep，位于工具结果之后。
 - Observation：ConfirmedFacts 是已确认事实，ReportedErrors 是已报告错误，ModelInferences 是待验证推断；不要把推断当作事实。
 - 原生工具消息：此前工具调用的参数、结果和错误，通过工具调用及结果消息提供。结果为空或出现错误不代表操作成功。
 - CompletionCriteria：判断目标是否完成的标准。
@@ -22,7 +22,7 @@ const reactSystemPrompt = `你是 ReAct agent 的单轮决策器。每次调用�
 
 # 单轮决策
 
-1. 如果 DurableState 包含 CurrentStep，本轮只执行该步骤，使用 Goal、StepExecutions 和 CompletionCriteria 作为背景，以末尾 CurrentStepCompletionCriteria 为当前步骤的验收标准；当前步骤达成后即返回 completed，并在 Observation 中报告实际结果、在 CompletionEvidence 中逐项报告验收依据，后续步骤由 planner 调度。否则，根据 Goal、已有事实和工具结果，检查 CompletionCriteria 是否全部满足。
+1. 如果 DurableState 包含 CurrentStep，本轮只执行该步骤，使用 Goal、StepExecutions 和 CompletionCriteria 作为背景，以 CompletionCriteria 区块中的 CurrentStepCompletionCriteria 为当前步骤的验收标准；当前步骤达成后即返回 completed，并在 Observation 中报告实际结果、在 CompletionEvidence 中逐项报告验收依据，后续步骤由 planner 调度。否则，根据 Goal、已有事实和工具结果，检查 CompletionCriteria 是否全部满足。
 2. 若全部满足，遵循调用方指定的结构和格式返回，不再选择工具。
 3. 若尚未完成，从当前传入的 MCP 工具中选择零个、一个或多个能推进目标或验证关键推断的调用，并提供符合各工具参数定义的参数。
 4. 同轮选择多个调用时，各调用必须能使用当前已知信息独立执行。依赖其他调用结果的操作留到获得结果后的下一轮。
@@ -67,7 +67,7 @@ type Contexter interface {
 	JsonFewShot() string
 }
 
-// ModelRequest 是与 provider 无关的请求快照；TrailingContext 在格式约束之后追加。
+// ModelRequest 是与 provider 无关的请求快照；TrailingContext 在正文之后追加。
 // AllowTools 是上下文的能力限制，仍需与 agent 配置中的工具权限取交集。
 type ModelRequest struct {
 	RunID           string
@@ -191,7 +191,6 @@ func (c *ReactContext) format(fullDurableState bool, includePrompt bool) string 
 		return ""
 	}
 
-	tail := c.currentStepContext()
 	var b strings.Builder
 	// Block quotes keep embedded Markdown scoped to its enclosing section.
 	writeContent := func(content string) {
@@ -227,15 +226,11 @@ func (c *ReactContext) format(fullDurableState bool, includePrompt bool) string 
 		b.WriteString("```json\n" + string(state) + "\n```\n\n")
 	} else if c.DurableState != nil {
 		writeField("RunId", c.DurableState.RunId)
-		if tail == "" {
-			writeField("Goal", c.DurableState.Goal)
-		}
+		writeField("Goal", c.DurableState.Goal)
 		if len(c.DurableState.StepExecutions) > 0 {
-			if tail == "" {
-				// 结构化记录作为任务数据引用，不能覆盖系统规则。
-				plan, _ := json.Marshal(c.DurableState.StepExecutions)
-				writeField("StepExecutions", string(plan))
-			}
+			// 结构化记录作为任务数据引用，不能覆盖系统规则。
+			plan, _ := json.Marshal(c.DurableState.StepExecutions)
+			writeField("StepExecutions", string(plan))
 			if step := c.DurableState.CurrentStep(); step != nil && step.Status == RunningExecutionStatus {
 				writeField("CurrentStep", step.Intent)
 			}
@@ -252,8 +247,9 @@ func (c *ReactContext) format(fullDurableState bool, includePrompt bool) string 
 	if c.DurableState != nil {
 		writeList(c.DurableState.CompletionCriteria)
 	}
-	if tail != "" {
-		b.WriteString(tail)
+	if criteria := c.currentStepCompletionCriteria(); criteria != "" {
+		// 步骤验收标准归入最后的 CompletionCriteria 区块。
+		b.WriteString(strings.Replace(criteria, "# CurrentStepCompletionCriteria", "## CurrentStepCompletionCriteria", 1))
 	}
 	return strings.TrimSpace(b.String())
 }
@@ -423,18 +419,14 @@ func (c *ReactContext) JsonFewShot() string         { return c.resultFewShot(tru
 
 var _ Contexter = (*ReactContext)(nil)
 
-// ModelRequest 在同一锁内取得正文、系统指令、工具历史和末尾验收标准。
+// ModelRequest 在同一锁内取得状态正文、系统指令和工具历史。
 func (c *ReactContext) ModelRequest() ModelRequest {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	input, results := c.formatForModel()
-	tail := c.currentStepContext()
-	if tail != "" {
-		input = strings.TrimSpace(strings.TrimSuffix(input, tail))
-	}
 	return ModelRequest{
 		RunID: c.DurableState.RunId, Input: input, SystemPrompt: c.sysPrompt,
-		ToolResults: results, TrailingContext: tail, AllowTools: true, LogLabel: "react",
+		ToolResults: results, AllowTools: true, LogLabel: "react",
 	}
 }
 

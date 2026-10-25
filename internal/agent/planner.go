@@ -74,8 +74,9 @@ func (p *PlannerProcess) Run(agentConfig *config.AgentConfig, durableState *file
 		return PlannerResult{}, nil, fmt.Errorf("task %s: planner: %w", taskID, err)
 	}
 	client.SetLogLevel(agentConfig.LogLevel)
-	input := appendContextFewShot(plannerContext.Format(), plannerContext, agentConfig.LLMConfig.OutputSchema)
-	result, toolCalls, _, err := client.Run(p.ctx, taskID, input, nil)
+	request := plannerContext.ModelRequest()
+	client.SetSystemPrompt(appendContextFewShot(request.SystemPrompt, plannerContext, agentConfig.LLMConfig.OutputSchema))
+	result, toolCalls, _, err := client.Run(p.ctx, taskID, request.Input, nil)
 	if err != nil {
 		return PlannerResult{}, nil, fmt.Errorf("task %s: planner: %w", taskID, err)
 	}

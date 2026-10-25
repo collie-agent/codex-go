@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 
 	"github.com/collie-agent/codex-go/internal/config"
 	fileContext "github.com/collie-agent/codex-go/internal/context"
@@ -50,9 +52,10 @@ func (w *Worker[T]) Run(modelContext fileContext.Contexter) (T, string, []*mcpSd
 	}
 	client.SetContextLogLabel(request.LogLabel)
 	client.SetLogLevel(w.agentConfig.LogLevel)
-	client.SetSystemPrompt(request.SystemPrompt)
-	input := appendContextFewShot(request.Input, modelContext, w.agentConfig.LLMConfig.OutputSchema)
-	// 当前步骤验收标准必须位于格式约束之后。
+	// 输出协议和示例属于系统指令，状态正文始终位于工具结果之后。
+	client.SetSystemPrompt(appendContextFewShot(request.SystemPrompt, modelContext, w.agentConfig.LLMConfig.OutputSchema))
+	input := request.Input
+	// 调用方提供的末尾上下文紧随正文。
 	if request.TrailingContext != "" {
 		input += "\n\n" + request.TrailingContext
 	}
@@ -84,16 +87,23 @@ func (w *Worker[T]) Run(modelContext fileContext.Contexter) (T, string, []*mcpSd
 	if len(toolCalls) > 0 {
 		for _, call := range toolCalls {
 			if _, ok := allowTools[config.McpToolName(call.Name)]; !ok {
-				return result, "", nil, &toolCallError{err: fmt.Errorf("task %s: tool %s is not allowed",
-					request.RunID, call.Name)}
+				names := make([]string, 0, len(allowTools))
+				for name := range allowTools {
+					names = append(names, string(name))
+				}
+				sort.Strings(names)
+				return result, "", nil, &toolCallError{err: fmt.Errorf("task %s: tool %s is not allowed (call_id=%q); allowed tools: [%s]; raw arguments: %s", request.RunID, call.Name, call.CallID, strings.Join(names, ", "), call.Arguments)}
 			}
 
 			var args map[string]any
 			if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
-				return result, "", nil, &toolCallError{err: fmt.Errorf("task %s: decode tool %s arguments: %w",
-					request.RunID, call.Name, err)}
+				return result, "", nil, &toolCallError{err: fmt.Errorf("task %s: decode tool %s arguments (call_id=%q): %w; raw arguments: %s; supply a JSON object matching the tool schema",
+					request.RunID, call.Name, call.CallID, err, call.Arguments)}
 			}
 
+			if args == nil {
+				return result, "", nil, &toolCallError{err: fmt.Errorf("task %s: tool %s arguments (call_id=%q) must be a JSON object, not null; raw arguments: %s", request.RunID, call.Name, call.CallID, call.Arguments)}
+			}
 			toolParams = append(toolParams, &mcpSdk.CallToolParams{
 				Meta:      mcpSdk.Meta{toolCallIDMetaKey: call.CallID},
 				Name:      call.Name,

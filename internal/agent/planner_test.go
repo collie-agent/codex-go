@@ -121,7 +121,7 @@ END PLAN`},
 						} `json:"format"`
 					} `json:"text"`
 				}
-				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				if err := decodeModelRequest(r.Body, &request); err != nil {
 					t.Error(err)
 					w.WriteHeader(http.StatusBadRequest)
 					return

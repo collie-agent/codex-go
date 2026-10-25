@@ -36,7 +36,7 @@ func TestWorkerSendsNativeToolResults(t *testing.T) {
 					return
 				}
 				if len(request.Input) != 6 {
-					t.Errorf("expected system, user, and two call/output pairs: %+v", request.Input)
+					t.Errorf("expected system, two call/output pairs, and trailing user context: %+v", request.Input)
 					w.WriteHeader(http.StatusBadRequest)
 					return
 				}
@@ -44,7 +44,7 @@ func TestWorkerSendsNativeToolResults(t *testing.T) {
 					{"call_read", "read_file", `{"path":"notes.txt"}`, "file content"},
 					{"call_error", "grep", `{}`, "worker-tool-error: access refused"},
 				} {
-					call, output := request.Input[2*i+2], request.Input[2*i+3]
+					call, output := request.Input[2*i+1], request.Input[2*i+2]
 					if call.Type != "function_call" || call.CallID != want.id || call.Name != want.name || call.Arguments != want.args {
 						t.Errorf("unexpected function call: %+v", call)
 					}
@@ -55,12 +55,12 @@ func TestWorkerSendsNativeToolResults(t *testing.T) {
 				if request.Input[0].Role != "system" || !strings.Contains(request.Input[0].Content, "你是 ReAct agent 的单轮决策器。") {
 					t.Errorf("missing ReAct system message: %+v", request.Input[0])
 				}
-				input := request.Input[1]
+				input := request.Input[len(request.Input)-1]
 				formatMarker := "Output format: JSON."
 				if schema == config.LineProtocolLLMOutputSchema {
 					formatMarker = "Final text output format: Line Protocol."
 				}
-				if strings.Count(input.Content, formatMarker) != 1 || !strings.Contains(input.Content, "# Required result schema") {
+				if strings.Count(request.Input[0].Content, formatMarker) != 1 || !strings.Contains(request.Input[0].Content, "# Required result schema") {
 					t.Error("expected one format contract and the context's result schema")
 				}
 				if strings.Contains(input.Content, "# sysPrompt") {
@@ -69,21 +69,22 @@ func TestWorkerSendsNativeToolResults(t *testing.T) {
 				if input.Role != "user" || !strings.Contains(input.Content, "inspect notes") || !strings.HasSuffix(input.Content, "> notes verified") {
 					t.Errorf("expected ReAct context with trailing completion criteria: %+v", input)
 				}
-				// 验证实际请求末尾的顺序，防止输出协议插入目标、计划和验收标准之间。
-				goalIndex := strings.Index(input.Content, "# Goal\n\n")
-				if goalIndex < 0 {
-					t.Error("missing trailing goal")
-				} else {
-					tail := input.Content[goalIndex:]
-					wantPrefix := "# Goal\n\n> inspect notes\n\n# StepExecutions\n\n> "
-					if !strings.HasPrefix(tail, wantPrefix) || !strings.Contains(tail, "\n\n# CurrentStepCompletionCriteria\n\n> notes verified") || strings.Contains(tail, "# Required result schema") {
-						t.Errorf("unexpected trailing step context: %s", tail)
+				// 工具结果必须先于本轮状态，格式约束只出现在 system 消息中。
+				previous := -1
+				for _, heading := range []string{"# DurableState\n\n", "# Observation\n\n", "# CompletionCriteria\n\n", "## CurrentStepCompletionCriteria\n\n"} {
+					index := strings.Index(input.Content, heading)
+					if index <= previous || strings.Count(input.Content, heading) != 1 {
+						t.Errorf("missing, repeated or unordered section %q: %s", heading, input.Content)
+					}
+					previous = index
+				}
+				for _, marker := range []string{formatMarker, "# Required result schema", "# ReAct", "你是 ReAct agent"} {
+					if strings.Contains(input.Content, marker) {
+						t.Errorf("system instruction in user context: %q", marker)
 					}
 				}
-				for _, heading := range []string{"# Goal\n\n", "# StepExecutions\n\n", "# CurrentStepCompletionCriteria\n\n"} {
-					if strings.Count(input.Content, heading) != 1 {
-						t.Errorf("expected one %q section", heading)
-					}
+				if strings.Contains(request.Input[0].Content, "# DurableState\n") {
+					t.Error("runtime state included in system message")
 				}
 				if len(request.Tools) != 2 {
 					t.Errorf("expected only allowed MCP tools, got %+v", request.Tools)
@@ -156,7 +157,7 @@ func TestWorkerAcceptsContextInterfaceAndHonorsToolRestriction(t *testing.T) {
 					Input string `json:"input"`
 					Tools []any  `json:"tools"`
 				}
-				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				if err := decodeModelRequest(r.Body, &request); err != nil {
 					t.Error(err)
 					w.WriteHeader(http.StatusBadRequest)
 					return
@@ -164,7 +165,7 @@ func TestWorkerAcceptsContextInterfaceAndHonorsToolRestriction(t *testing.T) {
 				if len(request.Tools) != 0 {
 					t.Error("context forbids tools but worker exposed MCP tools")
 				}
-				if request.Input != "custom task\n\ncustom JSON contract\n\ncustom criteria" {
+				if strings.TrimSpace(request.Input) != "custom JSON contract\ncustom task\n\ncustom criteria" {
 					t.Errorf("unexpected assembled input: %q", request.Input)
 				}
 				output := []any{observationMessage(`{"status":"completed","answer":"done","Observation":[],"CompletionEvidence":[]}`)}

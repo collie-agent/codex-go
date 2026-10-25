@@ -3,7 +3,6 @@ package mcp
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -16,7 +15,7 @@ func rgFiles(ctx context.Context, directory string, args []string) ([]string, er
 	if err != nil {
 		var exitErr *exec.ExitError
 		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
-			return nil, fmt.Errorf("rg file listing failed: %w", err)
+			return nil, commandError("rg file listing failed", err, "")
 		}
 	}
 	if len(output) == 0 {

@@ -155,8 +155,6 @@ func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId,
 		if c.systemPrompt != "" {
 			items = append(items, responses.ResponseInputItemParamOfMessage(c.systemPrompt, responses.EasyInputMessageRoleSystem))
 		}
-		// 先提供 ReAct 上下文，再附上独立的工具调用及结果。
-		items = append(items, responses.ResponseInputItemParamOfMessage(input, responses.EasyInputMessageRoleUser))
 		for _, message := range messages {
 			if strings.TrimSpace(message.ToolCallID) == "" || strings.TrimSpace(message.Name) == "" {
 				return result, nil, "", fmt.Errorf("task %s: tool message requires call ID and tool name", taskId)
@@ -175,6 +173,8 @@ func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId,
 			output.OfFunctionCallOutput.CallID = openai.String(message.ToolCallID)
 			items = append(items, output)
 		}
+		// 先重放原生工具调用及结果，再提供本轮最新状态，保持状态区块位于 context 末尾。
+		items = append(items, responses.ResponseInputItemParamOfMessage(input, responses.EasyInputMessageRoleUser))
 		params.Input = responses.ResponseNewParamsInputUnion{OfInputItemList: items}
 	}
 	// 从最终请求生成可读日志；单次日志调用避免并发请求交错。

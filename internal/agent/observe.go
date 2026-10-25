@@ -50,8 +50,10 @@ func (o *ObserveProcess[T]) Run(agentConfig *config.AgentConfig, durableState *f
 	// Observation only analyzes supplied data, so no MCP tools are exposed.
 	client.SetContextLogLabel("observe")
 	client.SetLogLevel(agentConfig.LogLevel)
-	input := observationContext.FormatWithSysPrompt(agentConfig.SysPrompt)
-	input = appendContextFewShot(input, &observationContext, agentConfig.LLMConfig.OutputSchema)
+	request := observationContext.ModelRequestWithSysPrompt(agentConfig.SysPrompt)
+	systemPrompt := appendContextFewShot(request.SystemPrompt, &observationContext, agentConfig.LLMConfig.OutputSchema)
+	client.SetSystemPrompt(systemPrompt)
+	input := request.Input
 	for formatErrors := 0; ; {
 		if err := o.ctx.Err(); err != nil {
 			return zero, nil, fmt.Errorf("task %s: observation: %w", taskID, err)
@@ -67,7 +69,8 @@ func (o *ObserveProcess[T]) Run(agentConfig *config.AgentConfig, durableState *f
 				return zero, nil, fmt.Errorf("task %s: observation: output format errors exceeded limit (%d): %w", taskID, maxOutputFormatErrors, err)
 			}
 			// 纠错信息仅追加到本次 observe 请求，不修改输入快照或混入工具事实。
-			input += "\n\n# Output format correction\n\n" + outputFormatCorrection(formatErrors, err, parseErr)
+			systemPrompt += "\n\n# Output format correction\n\n" + outputFormatCorrection(formatErrors, err, parseErr)
+			client.SetSystemPrompt(systemPrompt)
 			continue
 		}
 		if len(toolCalls) > 0 {

@@ -32,7 +32,9 @@ func TestObserveRun(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var request struct {
-					Input string            `json:"input"`
+					Input []struct {
+						Role, Content string
+					} `json:"input"`
 					Tools []json.RawMessage `json:"tools"`
 				}
 				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -40,22 +42,38 @@ func TestObserveRun(t *testing.T) {
 					w.WriteHeader(http.StatusBadRequest)
 					return
 				}
+				if len(request.Input) != 2 || request.Input[0].Role != "system" || request.Input[1].Role != "user" {
+					t.Fatalf("unexpected observation roles: %+v", request.Input)
+				}
+				system, state := request.Input[0].Content, request.Input[1].Content
+				if !strings.Contains(system, "工具结果观察器") || strings.Contains(state, "工具结果观察器") {
+					t.Error("observer instructions must only appear in system message")
+				}
+				previous := -1
+				for _, heading := range []string{"# ToolResult\n\n", "# DurableState\n\n", "# Observation\n\n", "# CompletionCriteria\n\n"} {
+					index := strings.Index(state, heading)
+					if index <= previous {
+						t.Errorf("missing or unordered observation section %q: %s", heading, state)
+					}
+					previous = index
+				}
+				input := system + "\n" + state
 				if len(request.Tools) != 0 {
 					t.Errorf("observation exposed tools: %s", request.Tools)
 				}
 				for _, want := range []string{"工具结果观察器", "inspect notes", "notes inspected", "previous fact", "previous error", "call_read", "read_file", `{"path":"notes.txt"}`, "hello", "permission denied"} {
-					if !strings.Contains(request.Input, want) {
-						t.Errorf("observation input missing %q: %s", want, request.Input)
+					if !strings.Contains(input, want) {
+						t.Errorf("observation input missing %q: %s", want, input)
 					}
 				}
 				formatMarker := "Output format: JSON."
 				if tc.schema == config.LineProtocolLLMOutputSchema {
 					formatMarker = "Final text output format: Line Protocol."
 				}
-				if strings.Count(request.Input, formatMarker) != 1 {
+				if strings.Count(system, formatMarker) != 1 || strings.Contains(state, formatMarker) {
 					t.Error("expected exactly one observation format contract")
 				}
-				if strings.Contains(request.Input, "单轮决策器") {
+				if strings.Contains(input, "单轮决策器") {
 					t.Error("observation contains worker instructions")
 				}
 				writeObservationResponse(w, []any{observationMessage(tc.output)})
@@ -111,7 +129,7 @@ func TestObserveExecDecisionRelevance(t *testing.T) {
 				var request struct {
 					Input string `json:"input"`
 				}
-				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				if err := decodeModelRequest(r.Body, &request); err != nil {
 					t.Error(err)
 					w.WriteHeader(http.StatusBadRequest)
 					return
@@ -195,7 +213,7 @@ func TestObserveRetriesOutputParseErrors(t *testing.T) {
 					var request struct {
 						Input string `json:"input"`
 					}
-					if err := json.NewDecoder(req.Body).Decode(&request); err != nil {
+					if err := decodeModelRequest(req.Body, &request); err != nil {
 						t.Error(err)
 					}
 					for _, want := range []string{"inspect notes", "previous fact", "previous error", "call_read", "hello", "custom observer prompt"} {

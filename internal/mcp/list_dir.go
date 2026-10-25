@@ -84,7 +84,7 @@ func ListDir(ctx context.Context, workspace, path string, depth, offset, limit i
 	args := []string{base, "-name", ".git", "-prune", "-o", "-mindepth", "1", "-maxdepth", strconv.Itoa(depth), "-print0"}
 	output, err := exec.CommandContext(ctx, "find", args...).Output()
 	if err != nil {
-		return ListDirResult{}, fmt.Errorf("find list failed: %w", err)
+		return ListDirResult{}, commandError("find list failed", err, "")
 	}
 	paths := strings.Split(strings.TrimSuffix(string(output), "\x00"), "\x00")
 	if len(paths) == 1 && paths[0] == "" {

@@ -42,6 +42,10 @@ func (c *TaskAnalyzerContext) SetSysPrompt(prompt string) {
 }
 
 func (c *TaskAnalyzerContext) Format() string {
+	return c.format(true)
+}
+
+func (c *TaskAnalyzerContext) format(includePrompt bool) string {
 	if c == nil {
 		return ""
 	}
@@ -53,8 +57,10 @@ func (c *TaskAnalyzerContext) Format() string {
 		}
 		b.WriteByte('\n')
 	}
-	b.WriteString("# sysPrompt\n\n")
-	writeContent(c.sysPrompt)
+	if includePrompt {
+		b.WriteString("# sysPrompt\n\n")
+		writeContent(c.sysPrompt)
+	}
 	if strings.TrimSpace(c.Workspace) != "" {
 		// 工作区只提供项目定位，不代表已经读取其中的源码。
 		b.WriteString("# Workspace\n\n")
@@ -66,6 +72,13 @@ func (c *TaskAnalyzerContext) Format() string {
 		writeContent(c.DurableState.RunId)
 		b.WriteString("## Goal\n\n")
 		writeContent(c.DurableState.Goal)
+	}
+	// 所有决策请求都以同样的状态区块收尾；分析和规划阶段尚无工具观察。
+	b.WriteString("# Observation\n\n# CompletionCriteria\n\n")
+	if c.DurableState != nil {
+		for _, criterion := range c.DurableState.CompletionCriteria {
+			b.WriteString("- " + strings.ReplaceAll(criterion, "\n", "\n  ") + "\n")
+		}
 	}
 	return strings.TrimSpace(b.String())
 }
@@ -106,7 +119,7 @@ var _ Contexter = (*TaskAnalyzerContext)(nil)
 
 // ModelRequest 仅分析已提供的数据，不向模型开放工具。
 func (c *TaskAnalyzerContext) ModelRequest() ModelRequest {
-	return ModelRequest{RunID: c.DurableState.RunId, Input: c.Format(), LogLabel: "task analyzer"}
+	return ModelRequest{RunID: c.DurableState.RunId, Input: c.format(false), SystemPrompt: c.sysPrompt, LogLabel: "task analyzer"}
 }
 
 // 示例与本上下文的结果字段一致，空列表遵循对应协议。

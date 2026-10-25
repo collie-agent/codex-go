@@ -53,7 +53,7 @@ func validateToolArguments(inputSchema, arguments any) error {
 		}
 		if len(hints) > 0 {
 			sort.Strings(hints)
-			return fmt.Errorf("invalid arguments: %s. Correct these fields and resubmit the tool call; the tool was not executed", strings.Join(hints, "; "))
+			return fmt.Errorf("invalid arguments: %v. %s. Correct these fields and resubmit the tool call; the tool was not executed", err, strings.Join(hints, "; "))
 		}
 		return fmt.Errorf("invalid arguments: %v. Correct the arguments to match the tool schema and resubmit; the tool was not executed", err)
 	}

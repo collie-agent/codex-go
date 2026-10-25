@@ -101,12 +101,14 @@ func Grep(ctx context.Context, workspace string, args grepArgs) (grepResult, err
 
 	cmd := exec.CommandContext(ctx, "rg", commandArgs...)
 	cmd.Dir = workspace
+	var diagnostic diagnosticBuffer
+	cmd.Stderr = &diagnostic
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return grepResult{}, fmt.Errorf("rg search failed: %w", err)
+		return grepResult{}, commandError("rg search failed", err, diagnostic.String())
 	}
 	if err := cmd.Start(); err != nil {
-		return grepResult{}, fmt.Errorf("rg search failed: %w", err)
+		return grepResult{}, commandError("rg search failed", err, diagnostic.String())
 	}
 
 	items := make([]grepItem, 0)
@@ -145,7 +147,7 @@ func Grep(ctx context.Context, workspace string, args grepArgs) (grepResult, err
 	}
 	if err := cmd.Wait(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 {
-			return grepResult{}, fmt.Errorf("rg search failed: %w", err)
+			return grepResult{}, commandError("rg search failed", err, diagnostic.String())
 		}
 	}
 
