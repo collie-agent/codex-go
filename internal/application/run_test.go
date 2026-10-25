@@ -246,3 +246,99 @@ waiting:
 		t.Fatal("tool kept writing after lock loss returned")
 	}
 }
+
+func TestAgentRunsShareOnlyEarlierConversationOutcomes(t *testing.T) {
+	for _, resume := range []bool{false, true} {
+		t.Run(fmt.Sprintf("resume=%v", resume), func(t *testing.T) {
+			db, store := runStore(t)
+			ctx := context.Background()
+			workspace := t.TempDir()
+			create := func(conv, goal string, at time.Time) database.AgentRun {
+				t.Helper()
+				run, err := store.Create(ctx, conv, goal, workspace, "react")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := db.Model(&run).Update("create_at", at).Error; err != nil {
+					t.Fatal(err)
+				}
+				return run
+			}
+			now := time.Now().UTC().Truncate(time.Second)
+			first := create("", "first", now.Add(-3*time.Hour))
+			first.Status, first.Result = "completed", json.RawMessage(`{"status":"completed","answer":"previous-success","Observation":["full-evidence"]}`)
+			if err := store.Save(ctx, &first); err != nil {
+				t.Fatal(err)
+			}
+			failed := create(first.ConvID, "failed", now.Add(-2*time.Hour))
+			failed.Status, failed.Error = "failed", "previous-error"
+			if err := store.Save(ctx, &failed); err != nil {
+				t.Fatal(err)
+			}
+			current := create(first.ConvID, "continue", now.Add(-time.Hour))
+			current.Error = "current-error-excluded"
+			if err := store.Save(ctx, &current); err != nil {
+				t.Fatal(err)
+			}
+			later := create(first.ConvID, "later", now.Add(time.Hour))
+			later.Error = "future-error-excluded"
+			if err := store.Save(ctx, &later); err != nil {
+				t.Fatal(err)
+			}
+			other := create("", "other", now.Add(-4*time.Hour))
+			other.Error = "other-conversation-excluded"
+			if err := store.Save(ctx, &other); err != nil {
+				t.Fatal(err)
+			}
+			requests := make(chan string, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				var decoded any
+				if err := json.Unmarshal(body, &decoded); err != nil {
+					t.Error(err)
+				}
+				// 解码外层请求后，检查完整模型输入中的 Markdown 与结构化结果。
+				requests <- fmt.Sprintf("%v", decoded)
+				writeResult(w, `{"status":"completed","answer":"done"}`)
+			}))
+			defer server.Close()
+			path := agentConfig(t, server.URL)
+			f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = f.WriteString("  react:\n    sys_prompt: history-instructions\n")
+			f.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			opts := application.Options{ConfigPath: path, ConvID: first.ConvID, Task: "continue", Workspace: workspace, Timeout: time.Second, Stderr: io.Discard}
+			if resume {
+				opts.RunID = current.RunID
+				_, err = application.Resume(ctx, opts)
+			} else {
+				_, err = application.Run(ctx, opts)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := <-requests
+			for _, want := range []string{"# Conversation history", "previous-success", "full-evidence", "previous-error"} {
+				if !strings.Contains(input, want) {
+					t.Errorf("model input missing %q: %s", want, input)
+				}
+			}
+			for _, excluded := range []string{"future-error-excluded", "other-conversation-excluded"} {
+				if strings.Contains(input, excluded) {
+					t.Errorf("model input leaked %q", excluded)
+				}
+			}
+			if resume && strings.Contains(input, "current-error-excluded") {
+				t.Error("current run leaked into history")
+			}
+			if strings.Index(input, "previous-success") > strings.Index(input, "previous-error") {
+				t.Error("history is not chronological")
+			}
+		})
+	}
+}

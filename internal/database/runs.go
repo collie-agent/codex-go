@@ -262,6 +262,17 @@ func (s *RunStore) Get(ctx context.Context, runID string) (AgentRun, error) {
 	err := s.db.WithContext(ctx).First(&run, "run_id = ?", runID).Error
 	return run, err
 }
+
+// PreviousRuns 按创建顺序读取同会话较早的运行；恢复时仍以原运行的创建时间为边界。
+func (s *RunStore) PreviousRuns(ctx context.Context, run *AgentRun) ([]AgentRun, error) {
+	defer s.lockConnection()()
+	var runs []AgentRun
+	// 时间戳相同时以 run_id 固定顺序，确保不包含当前运行且恢复时顺序稳定。
+	err := s.db.WithContext(ctx).Where("conv_id = ? AND run_id <> ? AND (create_at < ? OR (create_at = ? AND run_id < ?))", run.ConvID, run.RunID, run.CreateAt, run.CreateAt, run.RunID).
+		Order("create_at ASC").Order("run_id ASC").Find(&runs).Error
+	return runs, err
+}
+
 func (s *RunStore) Conversation(ctx context.Context, convID string) (Conversation, error) {
 	defer s.lockConnection()()
 	var conv Conversation

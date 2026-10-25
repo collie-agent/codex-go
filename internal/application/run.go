@@ -89,6 +89,15 @@ func Run(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 // executeRun serializes snapshots from concurrent processor branches before
 // committing them through the shared run record and lock-holding connection.
 func executeRun(ctx context.Context, store *database.RunStore, run *database.AgentRun, durable *state.DurableState, orchestrator *agent.ProcessorOrchestrator, loaded *config.AgentConfig) ([]agent.ReactResult, error) {
+	// 新建与恢复共用同一加载入口；仅传递最终结果/错误，不共享模型消息。
+	previous, err := store.PreviousRuns(ctx, run)
+	if err != nil {
+		return nil, fmt.Errorf("load previous agent runs: %w", err)
+	}
+	durable.PreviousRunOutcomes = nil
+	for _, prior := range previous {
+		durable.PreviousRunOutcomes = append(durable.PreviousRunOutcomes, state.RunOutcome{RunID: prior.RunID, Result: string(prior.Result), Error: prior.Error})
+	}
 	var checkpointMu sync.Mutex
 	orchestrator.SetCheckpoint(func(current *state.DurableState, mode string) error {
 		checkpointMu.Lock()

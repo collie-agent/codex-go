@@ -65,3 +65,16 @@ func TestCloneIsolatesStepResults(t *testing.T) {
 		t.Fatalf("Clone shared step result slices: %+v", state)
 	}
 }
+
+func TestPreviousAgentRunOutcomesFollowAdditionalInstructions(t *testing.T) {
+	rc := NewReactContext(&DurableState{RunId: "current", Goal: "continue", PreviousRunOutcomes: []RunOutcome{
+		{RunID: "earlier", Result: `{"answer":"saved report","Observation":["checked"]}`, Error: "first attempt failed\nretry succeeded"},
+	}})
+	rc.SetSysPrompt("Use Chinese.")
+	// 系统提示词独立发送；历史结果必须紧随补充指令进入同一模型请求。
+	rc.FormatForModel()
+	want := "# Additional instructions\n\nUse Chinese.\n\n# Conversation history\n\n- Result:\n\n  > {\"answer\":\"saved report\",\"Observation\":[\"checked\"]}\n\n- Error:\n\n  > first attempt failed\n  > retry succeeded\n"
+	if !strings.HasSuffix(rc.SystemPrompt(), want) || !strings.HasSuffix(rc.ModelRequest().SystemPrompt, want) {
+		t.Fatalf("system prompt missing ordered Markdown outcomes: %s", rc.SystemPrompt())
+	}
+}
