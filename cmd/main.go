@@ -71,7 +71,7 @@ func runAgentInConversation(configPath, task, workspace, convID string, timeout 
 	// 工具超时不限制整个模型运行；返回后取消异步观察器。
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	results, err := application.Run(ctx, application.Options{ConfigPath: configPath, Task: task, Workspace: workspace, ConvID: convID, Mode: "react", Timeout: timeout, RuntimeDirs: runtimeDirs, Stderr: os.Stderr})
+	results, err := application.Run(ctx, application.Options{ConfigPath: configPath, Task: task, Workspace: workspace, ConvID: convID, Timeout: timeout, RuntimeDirs: runtimeDirs, Stderr: os.Stderr})
 	if err != nil {
 		return err
 	}

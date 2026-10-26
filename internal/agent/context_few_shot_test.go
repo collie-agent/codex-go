@@ -15,8 +15,12 @@ func checkContextFewShots[T any](t *testing.T, ctx fileContext.Contexter, count 
 	t.Helper()
 	jsonSections := strings.Split(ctx.JsonFewShot(), " output:\n")[1:]
 	lineSections := strings.Split(ctx.LineProtocolFewShot(), " output:\n")[1:]
-	// 前五个 Line Protocol 示例仅说明语法，业务示例在其后。
-	if len(jsonSections) != count || len(lineSections) != 5+count {
+	// 普通上下文先展示五个通用语法示例；多代理直接展示完整业务文档。
+	formatExamples := 5
+	if _, ok := ctx.(multiAgentModelContext); ok {
+		formatExamples = 0
+	}
+	if len(jsonSections) != count || len(lineSections) != formatExamples+count {
 		t.Fatalf("unexpected example counts: JSON=%d, Line Protocol=%d", len(jsonSections), len(lineSections))
 	}
 	for i := range jsonSections {
@@ -26,7 +30,7 @@ func checkContextFewShots[T any](t *testing.T, ctx fileContext.Contexter, count 
 		if err := decoder.Decode(&want); err != nil {
 			t.Fatalf("JSON example %d: %v", i+1, err)
 		}
-		document := strings.SplitN(lineSections[5+i], "\n\n", 2)[0]
+		document := strings.SplitN(lineSections[formatExamples+i], "\n\n", 2)[0]
 		if err := (&provider.LineProtocolOutput[*T]{}).Parse(document, &got); err != nil {
 			t.Fatalf("Line Protocol example %d: %v", i+1, err)
 		}
@@ -59,6 +63,32 @@ func normalizeFewShotSlices(value reflect.Value) {
 }
 
 func TestContextFewShotsMatchResultSchemas(t *testing.T) {
+	t.Run("multi-agent", func(t *testing.T) {
+		ctx := multiAgentModelContext{ReactContext: fileContext.NewReactContext(&fileContext.DurableState{})}
+		checkContextFewShots[MultiAgentResult](t, ctx, 4)
+		sections := strings.Split(ctx.LineProtocolFewShot(), " output:\n")[1:]
+		for i, section := range sections {
+			var got MultiAgentResult
+			if err := (&provider.LineProtocolOutput[*MultiAgentResult]{}).Parse(strings.SplitN(section, "\n\n", 2)[0], &got); err != nil {
+				t.Fatal(err)
+			}
+			wantStatus := CompletedReactStatus
+			if i == 3 {
+				wantStatus = FailedReactStatus
+			}
+			if got.Result.Status != wantStatus || got.Result.Answer == "" || len(got.Next) != []int{2, 1, 0, 1}[i] {
+				t.Fatalf("invalid multi-agent scenario %d: %+v", i+1, got)
+			}
+			for _, handoff := range got.Next {
+				if handoff.Task == "" || len(handoff.CompletionCriteria) == 0 || handoff.Context == "" {
+					t.Fatalf("incomplete handoff: %+v", handoff)
+				}
+				if (i == 1 || i == 3) && handoff.Agent != "supervisor" {
+					t.Fatalf("report must return to caller: %+v", handoff)
+				}
+			}
+		}
+	})
 	t.Run("planner", func(t *testing.T) {
 		checkContextFewShots[PlannerResult](t, fileContext.NewPlannerContext(&fileContext.DurableState{}), 1)
 	})

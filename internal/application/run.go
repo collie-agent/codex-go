@@ -45,13 +45,20 @@ func Run(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	if opts.Mode != "" && opts.Mode != "react" && opts.Mode != "plan-execute" {
-		return nil, fmt.Errorf("unsupported mode %q: expected react or plan-execute", opts.Mode)
+	if opts.Mode != "" && opts.Mode != "react" && opts.Mode != "plan-execute" && opts.Mode != "multi-agent" {
+		return nil, fmt.Errorf("unsupported mode %q: expected react, plan-execute or multi-agent", opts.Mode)
 	}
 	mode := opts.Mode
 	if mode == "" {
 		mode = "react"
+		if loaded.Name == "multi-agent" {
+			mode = "multi-agent"
+		}
 	}
+	if (mode == "multi-agent") != (loaded.Name == "multi-agent") {
+		return nil, fmt.Errorf("multi-agent mode requires a multi-agent configuration and vice versa")
+	}
+	opts.Mode = mode
 	db, err := database.OpenFromEnv(ctx)
 	if err != nil {
 		return nil, err
@@ -89,7 +96,7 @@ func Run(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 
 // executeRun serializes snapshots from concurrent processor branches before
 // committing them through the shared run record and lock-holding connection.
-func executeRun(ctx context.Context, store *database.RunStore, run *database.AgentRun, durable *state.DurableState, orchestrator *agent.ProcessorOrchestrator, loaded *config.AgentConfig) ([]agent.ReactResult, error) {
+func executeRun(ctx context.Context, store *database.RunStore, run *database.AgentRun, durable *state.DurableState, orchestrator runOrchestrator, loaded *config.AgentConfig) ([]agent.ReactResult, error) {
 	// 新建与恢复共用同一加载入口；仅传递最终结果/错误，不共享模型消息。
 	previous, err := store.PreviousRuns(ctx, run)
 	if err != nil {

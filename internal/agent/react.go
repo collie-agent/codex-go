@@ -47,14 +47,15 @@ type ReactResult struct {
 }
 
 type ReactProcess[T LLMSchema] struct {
-	ctx             context.Context
-	maxTurn         int
-	toolConfig      filemcp.Config
-	mcpClientSess   *mcpSdk.ClientSession
-	serverSess      *mcpSdk.ServerSession
-	checkpoint      func() error
-	allowPlanSwitch bool
-	skills          []Skill
+	ctx               context.Context
+	maxTurn           int
+	toolConfig        filemcp.Config
+	mcpClientSess     *mcpSdk.ClientSession
+	serverSess        *mcpSdk.ServerSession
+	checkpoint        func() error
+	allowPlanSwitch   bool
+	multiAgentContext string
+	skills            []Skill
 }
 
 // 最大轮数固定在代码中，避免任务通过配置无限延长。
@@ -127,7 +128,11 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 	if r.serverSess != nil {
 		defer r.serverSess.Close()
 	}
-	agentConfig = agentConfig.ForAgent("react")
+	if _, multi := any(zero).(MultiAgentResult); !multi {
+		agentConfig = agentConfig.ForAgent("react")
+	} else {
+		agentConfig = agentConfig.Copy()
+	}
 	// 技能加载是 ReAct 的内置能力，不依赖 YAML 的 allow_tools。
 	agentConfig.AllowTools[config.LoadSkillMCPToolName] = struct{}{}
 	// 控制流工具仅由支持交接的编排器开放，不依赖 YAML 工具权限。
@@ -139,6 +144,10 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 	// 先保留内置 ReAct 执行约束，再把 YAML 的长期约束追加到其后。
 	rc.SetSysPrompt(agentConfig.SysPrompt)
 	addSkillsToReactContext(rc, r.skills)
+	var modelContext fileContext.Contexter = rc
+	if _, multi := any(zero).(MultiAgentResult); multi {
+		modelContext = multiAgentModelContext{ReactContext: rc, delegation: r.multiAgentContext}
+	}
 	worker := NewWorker[T](r.ctx, agentConfig, r.mcpClientSess)
 	formatErrors := 0
 	toolCallErrors := 0
@@ -151,7 +160,7 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 				return zero, nil, err
 			}
 			var err error
-			result, _, toolParams, err = worker.Run(rc)
+			result, _, toolParams, err = worker.Run(modelContext)
 			if err == nil {
 				break
 			}
@@ -177,6 +186,16 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 			rc.AppendReportedErrors(outputFormatCorrection(formatErrors, err, parseErr))
 		}
 		if len(toolParams) == 0 {
+			if multi, ok := any(result).(MultiAgentResult); ok {
+				// multi-agent 的 failed 是业务结果，必须保留原因交给 supervisor；
+				// 普通 ReAct 的失败契约仍由下方分支处理。
+				if multi.Result.Status != CompletedReactStatus && multi.Result.Status != FailedReactStatus {
+					return zero, nil, fmt.Errorf("ReAct returned invalid status %q", multi.Result.Status)
+				}
+				if strings.TrimSpace(multi.Result.Answer) == "" {
+					return zero, nil, fmt.Errorf("ReAct result requires a non-empty answer")
+				}
+			}
 			if reactResult, ok := any(result).(ReactResult); ok {
 				// 格式解析不校验业务约束：仅明确完成且有答案时才允许成功退出。
 				switch reactResult.Status {

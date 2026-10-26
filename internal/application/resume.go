@@ -48,7 +48,7 @@ func Resume(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 		return nil, fmt.Errorf("load run %q: %w", opts.RunID, err)
 	}
 	if run.Mode != "" && run.Mode != "react" {
-		if run.Mode != "plan-execute" {
+		if run.Mode != "plan-execute" && run.Mode != "multi-agent" {
 			return nil, fmt.Errorf("run %s has unsupported mode %q", run.RunID, run.Mode)
 		}
 	}
@@ -59,6 +59,10 @@ func Resume(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 	if mode == "" {
 		mode = "react"
 	}
+	if (mode == "multi-agent") != (loaded.Name == "multi-agent") {
+		return nil, fmt.Errorf("resume configuration must match the original multi-agent mode")
+	}
+	opts.Mode = mode
 	if opts.Task != "" && opts.Task != run.Goal {
 		return nil, fmt.Errorf("resume cannot change the original goal")
 	}
@@ -133,7 +137,21 @@ func Resume(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 	return executeRun(ctx, lockedStore, &run, durable, orchestrator, loaded)
 }
 
-func newOrchestrator(ctx context.Context, workspace string, opts Options) *agent.ProcessorOrchestrator {
+func newOrchestrator(ctx context.Context, workspace string, opts Options) runOrchestrator {
+	if opts.Mode == "multi-agent" {
+		var multi *agent.MultiAgentProcessorOrchestrator
+		if opts.MCPCommand == "" {
+			multi = agent.NewMultiAgentProcessorOrchestrator(ctx, filemcp.Config{Workspace: workspace, Timeout: opts.Timeout, RuntimeDirs: opts.RuntimeDirs})
+		} else {
+			args := []string{"--workspace", workspace, "--timeout", opts.Timeout.String()}
+			for _, dir := range opts.RuntimeDirs {
+				args = append(args, "--runtime-dir", dir)
+			}
+			multi = agent.NewMultiAgentProcessorOrchestratorWithCommand(ctx, opts.MCPCommand, args...)
+		}
+		multi.SetSkills(opts.Skills)
+		return multiAgentAdapter{multi}
+	}
 	var orchestrator *agent.ProcessorOrchestrator
 	if opts.MCPCommand == "" {
 		orchestrator = agent.NewProcessorOrchestrator(ctx, filemcp.Config{Workspace: workspace, Timeout: opts.Timeout, RuntimeDirs: opts.RuntimeDirs})
@@ -157,6 +175,10 @@ func decodeSavedResults(raw json.RawMessage) ([]agent.ReactResult, error) {
 		return []agent.ReactResult{one}, nil
 	}
 	var many []agent.ReactResult
+	var multi []agent.MultiAgentResult
+	if err := json.Unmarshal(raw, &multi); err == nil && len(multi) > 0 && multi[0].Result.Status != "" {
+		return multiAgentAnswers(multi), nil
+	}
 	if err := json.Unmarshal(raw, &many); err != nil {
 		return nil, fmt.Errorf("decode completed run result: %w", err)
 	}

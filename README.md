@@ -1,11 +1,12 @@
 # codex-go
 
-Go 实现的代码代理，通过 OpenAI Responses API 进行模型决策，通过 MCP 读取、搜索和修改工作目录中的文件，并执行受隔离的项目命令。默认从 ReAct 开始，支持显式规划执行以及运行中升级为计划执行。
+Go 实现的coding agent，通过 OpenAI Responses API 进行模型决策，通过 MCP 读取、搜索和修改工作目录中的文件，并执行受隔离的项目命令。默认从 ReAct 开始，支持显式规划执行以及运行中升级为计划执行。
 
 ## 项目特性
 
 - **ReAct 循环**：模型在每轮选择调用工具或返回结果，执行器回填工具结果，直到任务完成、失败或达到轮数上限。
 - **计划执行**：planner 生成有序步骤，ReAct 逐步执行，并记录步骤状态、观察结果和完成证据。
+- **多代理协作**：根据 YAML 配置图调度 supervisor 与 ReAct worker，每次委派独立上下文，业务失败回交 supervisor 决策。
 - **异步观察**：对 `apply_patch` 和 `exec` 的结果提取新增事实与错误，供后续决策使用。
 - **内置 MCP 工具**：提供文件读取、目录浏览、文件匹配、内容搜索、补丁写入和命令执行，可独立作为 stdio 服务使用。
 - **按代理类型配置**：共享基础代理配置，可为 ReAct、观察器和 planner 设置独立模型与提示词；工具权限仅授予 ReAct。
@@ -53,7 +54,7 @@ export CODEX_MYSQL_URL='mysql://user:password@127.0.0.1:3306/codex-go'
   --mcp-command ./bin/codex-mcp
 ```
 
-默认直接进入 ReAct，YAML `name` 不参与入口选择。需要规划后逐步执行时，指定 `--mode plan-execute`：
+普通配置默认直接进入 ReAct；`name: multi-agent` 自动选择多代理编排器。需要规划后逐步执行时，指定 `--mode plan-execute`：
 
 ```sh
 ./bin/agent-server --config agent.yaml \
@@ -86,11 +87,35 @@ export CODEX_MYSQL_URL='mysql://user:password@127.0.0.1:3306/codex-go'
 
 完整的配置覆盖示例见 [`examples/react-agent.yaml`](examples/react-agent.yaml)，其中 `your-model` 需要替换，并设置 `OPENAI_API_KEY`。
 
+### Supervisor-worker 多代理
+
+使用 [`examples/multi-agent.yaml`](examples/multi-agent.yaml)，替换模型名并设置上述数据库及 API key 环境变量后执行：
+
+```sh
+./bin/agent-server --config examples/multi-agent.yaml \
+  --task '检查项目，分别完成实现与复核后汇总结论' \
+  --workspace /path/to/workspace --mcp-command ./bin/codex-mcp
+```
+
+`multi-agent.entry` 指定入口，`agents.<name>.next_agents` 限定允许的委派目标。
+节点继承 `base` 的模型和工具配置，`instruction`（或 `sys_prompt`）覆盖提示词。
+每次调用的执行上下文包含 `agents` 列表，按名称排序提供所有显式配置节点的 `name` 和完整生效 `instruction`（未指定时采用继承的提示词），供模型理解角色分工；可委派范围仍由 `next_agents` 限定。
+`max_rounds` 限制整个运行的 agent 调用总数，`max_parallel` 限制同时执行的 ReAct 节点数；等待子任务不占并发名额。
+
+所有节点输出 `MultiAgentResult`：`result` 为 ReAct 结果，`next` 为委派列表，每项包含 `agent`、`task`、`completion_criteria` 和 `context`。
+每次委派生成独立任务 ID，保存 worker 名称、目标、验收条件、相关信息、结果及失败信息。
+worker 完成后以空 `next` 返回，或仅指定调用者作为返回目标；supervisor 收到按委派顺序排列的 `reports` 后再次决策。
+worker 的 `failed` 作为结果返回，失败输出中的 `next` 不执行；取消、模型请求错误或检查点错误会终止运行。
+
+各委派隔离模型历史，但仍使用相同工作目录，supervisor 应避免并发修改同一文件。
+使用 `--run-id` 恢复时保持原运行身份和目标，从入口重新执行；不恢复中途委派或工具历史。
+已完成运行直接返回保存的完整结果。命令行打印最终 `answer`，数据库保留完整 `MultiAgentResult`。
+
 ### 入口对照
 
 | 入口 | 用途与执行方式 |
 | --- | --- |
-| `./bin/agent-server --config agent.yaml --task '目标' --workspace /path/to/workspace --mcp-command ./bin/codex-mcp` | 通过编排器执行，ReAct 通过 MCP stdio 连接独立子进程；支持 ReAct 和计划执行 |
+| `./bin/agent-server --config agent.yaml --task '目标' --workspace /path/to/workspace --mcp-command ./bin/codex-mcp` | 通过编排器执行，ReAct 通过 MCP stdio 连接独立子进程；支持 ReAct、计划执行和多代理 |
 | `./bin/codex-mcp --workspace /path/to/workspace --timeout 30s` | 单独提供 MCP stdio 工具服务，供 MCP 客户端连接 |
 
 `agent-server` 是命令行任务执行入口，通过 stdio 连接 MCP 子进程，当前不提供 HTTP 服务。`--mcp-command` 默认是 `codex-mcp`，需能从 PATH 找到；使用构建目录时建议像示例一样显式传入路径。
@@ -105,6 +130,7 @@ export CODEX_MYSQL_URL='mysql://user:password@127.0.0.1:3306/codex-go'
 | --- | --- |
 | `name: react`，不传 `--mode` | ReAct → end |
 | `name: plan-execute`，不传 `--mode` | ReAct → end |
+| `name: multi-agent`，不传 `--mode` 或指定 `--mode multi-agent` | 按配置图委派，结果返回调用者，入口输出最终结果 |
 | `--mode react` | 直接 ReAct → end，由显式模式指定 |
 | `--mode plan-execute` | 直接 planner → ReAct 执行各步骤 → end，由显式模式指定 |
 
@@ -176,14 +202,14 @@ planner 首次调用模型生成至少一个有序步骤，每步包含：
 
 ## 配置规则
 
-- 顶层仅支持 `name`、`log_level`、`base`、`agents`。`name` 必填，支持 `react` 和 `plan-execute`；`base` 必须提供完整有效的 `llm`。`agents` 可省略或为空。
+- 顶层支持 `name`、`log_level`、`base`、`agents` 和 `multi-agent`。`name` 必填，支持 `react`、`plan-execute` 和 `multi-agent`；`base` 必须提供完整有效的 `llm`。多代理模式必须提供 `multi-agent` 执行限制及入口节点，其他模式的 `agents` 可省略或为空。
 - `log_level` 可设为 `info`（默认）或 `error`，对所有代理生效。`info` 显示 LLM 上下文、JSON schema 和工具调用结果；`error` 隐藏这些详情。两种级别都显示工具调用名称、调用 ID 和完整参数，以及 `LLM response text`，包括工具调用轮次中的非空响应文本。编排器不输出分析器模式日志。
-- `agents` 只接受 `react`、`observe`、`plan`。每种类型分别从自身设置和 `base` 解析，不会继承其他类型的独立设置；未设置某项时逐项回退到 base。
+- 普通模式的 `agents` 只接受 `react`、`observe`、`plan`；多代理模式接受自定义节点名称（保留 `base`），`next_agents` 必须引用已配置节点。每个节点分别从自身设置和 `base` 解析，不会继承其他节点的独立设置；未设置某项时逐项回退到 base。
 - 工具调用失败时，两种日志级别都打印 `[react] tool calling error`，包括执行错误、参数校验错误及调用被拒绝的错误；成功结果详情仍仅在 `info` 级别显示。
 - `llm` 是整块替换。提供独立 `llm` 后，base 中未列出的 LLM 字段不会回退；`model` 必填，`base_url` 默认 `https://api.openai.com/v1`，`output_schema` 默认 `json_llm_output`，也支持 `line_protocol_llm_output`。
 - `allow_tools` 列表整体替换，不与 base 合并。省略时回退到 base，显式 `[]` 禁用工具。合法工具为 `read_file`、`list_dir`、`glob`、`grep`、`apply_patch` 和 `exec`。
-- `sys_prompt` 省略时回退到 base；显式 `""` 清除自定义提示词。最终非空自定义提示词会追加在对应代理的内置提示词后。
-- `observe` 和 `plan` 始终没有工具能力，不会暴露或执行工具。base 的工具列表不会授予它们权限；为其显式设置非空 `allow_tools` 会导致启动报错，省略或 `[]` 均可。
+- `sys_prompt` 省略时回退到 base；显式 `""` 清除自定义提示词。`instruction` 是其别名，二者不可同时提供。最终非空自定义提示词会追加在对应代理的内置提示词后。
+- 普通模式的 `observe` 和 `plan` 没有工具能力，base 的工具列表不会授予它们权限；为其显式设置非空 `allow_tools` 会导致启动报错，省略或 `[]` 均可。多代理配置中的显式节点均由 ReAct 执行，按各自的工具列表授权。
 - 密钥可用 `api_key` 明文提供，或用 `api_key_env` 指定环境变量；两者互斥。两者都省略时读取 `OPENAI_API_KEY`。最终密钥不能为空，错误信息不会包含密钥值。示例只使用环境变量名，不含真实密钥。
 - 所有配置字段拒绝显式 YAML `null`。启动时会校验 base 和所有独立配置，包括本次流程尚未调用的代理；文件不存在、格式错误、未知字段、类型、工具、输出格式或缺少必填项都会报错。
 
@@ -251,7 +277,7 @@ Agent 使用时需在 `allow_tools` 中加入 `exec`，示例配置默认未启�
 | `--timeout` | 正数，默认 `30s`，仅限制单次工具调用，不是整个任务或模型请求的超时 |
 | `--runtime-dir` | 可重复，额外只读命令运行时目录 |
 | `--mcp-command` | 仅 `agent-server`，MCP 可执行文件路径，默认 `codex-mcp` |
-| `--mode` | 仅 `agent-server`，可选 `react` 或 `plan-execute`，默认 `react`，YAML `name` 不参与模式选择 |
+| `--mode` | 仅 `agent-server`，可选 `react`、`plan-execute` 或 `multi-agent`；多代理 YAML 默认使用 `multi-agent`，其他配置默认 `react` |
 
 每次 ReAct 运行最多 100 轮，计划执行时每一步各自拥有此上限，当前不提供 YAML 或 CLI 配置项。ReAct 和观察器遇到输出解析错误时，每次运行累计最多纠正 3 次，第 4 次格式错误终止；ReAct 的格式纠错留在当前轮内。模型请求失败和业务校验失败直接返回错误。
 

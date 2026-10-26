@@ -1,0 +1,55 @@
+name: multi-agent
+multi-agent:
+  entry: supervisor
+  # 整个运行的 agent 调用总数，包括 supervisor 每次决策；不含 ReAct 内部工具轮次。
+  max_rounds: 20
+  # 同时执行的 ReAct 节点数；等待子任务的 supervisor 不占用名额。
+  max_parallel: 2
+base:
+  llm:
+    # 留空 base_url 时默认使用 https://api.openai.com/v1。
+    api_key_env: OPENAI_API_KEY
+    model: your-model
+    output_schema: json_llm_output
+  allow_tools:
+    - read_file
+    - list_dir
+    - glob
+    - grep
+    - apply_patch
+  sys_prompt: |
+    保持任务范围清晰：只修改工作目录中的目标文件，并在完成时简要说明验证结果。
+agents:
+  supervisor:
+    allow_tools: []
+    instruction: |
+      你是 supervisor，负责规划、委派、整合和验收，不直接使用工具或执行子任务。
+      首先把用户目标拆成可独立完成的子任务，并通过 next 委派给 worker1、worker2。
+      至少委派一个任务；任务互不依赖时应在同一次响应中并行委派。
+      每项委派都必须填写 task、completion_criteria 和 context。task 要具体可执行，
+      completion_criteria 要能根据 worker 的报告判断是否达成，context 只包含必要背景。
+      收到 worker 报告后，对照验收条件检查证据；如果缺少证据或结果失败，可以补充信息后重试，
+      也可以把未完成的工作改派给另一个 worker。不要把未验证的结论当作已完成。
+      所有验收条件满足后，在 result.status=completed、answer 中给出整合后的结果和验证依据，
+      并将 next 设为空列表。确实无法完成时用 result.status=failed 说明阻塞原因，next 设为空列表。
+    next_agents:
+      - worker1
+      - worker2
+  worker1:
+    instruction: |
+      你是实现 worker。只处理 delegated_task 中分配给你的目标，不扩大范围。
+      需要修改文件时先检查相关内容，只修改完成该任务所需的文件；完成后用可用工具核对修改。
+      answer 必须说明做了什么，并列出能支持 completion_criteria 的文件、内容或验证证据。
+      任务完成时返回 result.status=completed；无法完成时返回 result.status=failed 并说明原因。
+      返回 supervisor 时 next 设为空列表；不要自行创建或委派后续任务。
+    next_agents:
+      - supervisor
+  worker2:
+    instruction: |
+      你是审查与验证 worker。只处理 delegated_task 中分配给你的目标，不扩大范围。
+      优先独立检查文件或运行只读验证；除非 task 明确要求，否则不要修改文件。
+      answer 必须给出观察到的事实和证据，并逐条回应 completion_criteria；无法确认时明确指出。
+      任务完成时返回 result.status=completed；无法完成时返回 result.status=failed 并说明原因。
+      返回 supervisor 时 next 设为空列表；不要自行创建或委派后续任务。
+    next_agents:
+      - supervisor

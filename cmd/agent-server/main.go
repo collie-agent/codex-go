@@ -25,7 +25,7 @@ func main() {
 	task := flag.String("task", "", "agent task (required)")
 	runID := flag.String("run-id", "", "resume an existing agent run")
 	mcpCommand := flag.String("mcp-command", "codex-mcp", "path to MCP server executable")
-	mode := flag.String("mode", "", "execution mode: react (default) or plan-execute")
+	mode := flag.String("mode", "", "execution mode: react, plan-execute or multi-agent (inferred for multi-agent YAML)")
 	var runtimeDirs []string
 	flag.Func("runtime-dir", "host-authorized read-only exec runtime directory (repeatable)", func(dir string) error {
 		runtimeDirs = append(runtimeDirs, dir)
@@ -36,8 +36,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "--config and either --task with --workspace or --run-id are required (--task and --run-id are mutually exclusive); --timeout must be positive")
 		os.Exit(2)
 	}
-	if *mode != "" && *mode != "react" && *mode != "plan-execute" {
-		fmt.Fprintf(os.Stderr, "unsupported mode %q: expected react or plan-execute\n", *mode)
+	if *mode != "" && *mode != "react" && *mode != "plan-execute" && *mode != "multi-agent" {
+		fmt.Fprintf(os.Stderr, "unsupported mode %q: expected react, plan-execute or multi-agent\n", *mode)
 		os.Exit(2)
 	}
 	ctx, cancel := context.WithCancel(context.Background())

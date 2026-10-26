@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -16,9 +17,22 @@ type AgentConfig struct {
 	LLMConfig  *LLMConfig
 	AllowTools map[McpToolName]struct{}
 	SysPrompt  string
+	MultiAgent *MultiAgentConfig
+	NextAgents []string
 
 	// configs stores independent resolved values so one processor cannot mutate another's settings.
-	configs map[string]*AgentConfig
+	configs           map[string]*AgentConfig
+	agentInstructions []AgentInstruction
+}
+
+type AgentInstruction struct {
+	Name        string `json:"name"`
+	Instruction string `json:"instruction"`
+}
+
+// AgentInstructions 仅公开显式配置的 agent 职责，不包含模型凭据或内部补齐的代理。
+func (c *AgentConfig) AgentInstructions() []AgentInstruction {
+	return slices.Clone(c.agentInstructions)
 }
 
 // ForAgent returns an independent copy of the resolved configuration for an agent type.
@@ -39,6 +53,7 @@ func (c *AgentConfig) ForAgent(name string) *AgentConfig {
 	// 保留只读配置集合，供 ReAct 副本解析内部观察器配置；每次返回的
 	// 模型和工具设置仍独立复制，调用方修改不会影响集合中的原始配置。
 	clone.configs = c.configs
+	clone.agentInstructions = slices.Clone(c.agentInstructions)
 	return clone
 }
 
@@ -46,7 +61,12 @@ func cloneAgentConfig(c *AgentConfig) *AgentConfig {
 	if c == nil {
 		return nil
 	}
-	clone := &AgentConfig{Name: c.Name, LogLevel: c.LogLevel, SysPrompt: c.SysPrompt, LLMConfig: nil, AllowTools: make(map[McpToolName]struct{}, len(c.AllowTools))}
+	clone := &AgentConfig{NextAgents: append([]string(nil), c.NextAgents...), MultiAgent: c.MultiAgent, Name: c.Name, LogLevel: c.LogLevel, SysPrompt: c.SysPrompt, LLMConfig: nil, AllowTools: make(map[McpToolName]struct{}, len(c.AllowTools))}
+	clone.agentInstructions = slices.Clone(c.agentInstructions)
+	if c.MultiAgent != nil {
+		graph := *c.MultiAgent
+		clone.MultiAgent = &graph
+	}
 	if c.LLMConfig != nil {
 		llm := *c.LLMConfig
 		clone.LLMConfig = &llm
@@ -93,7 +113,7 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 	if raw.LogLevel != InfoLogLevel && raw.LogLevel != ErrorLogLevel {
 		return nil, fmt.Errorf("unknown log_level %q: must be info or error", raw.LogLevel)
 	}
-	if raw.Name != "react" && raw.Name != "plan-execute" {
+	if raw.Name != "react" && raw.Name != "plan-execute" && raw.Name != "multi-agent" {
 		return nil, fmt.Errorf("unknown agent type %q", raw.Name)
 	}
 	if raw.Base == nil {
@@ -105,7 +125,7 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 	}
 	resolved := map[string]*AgentConfig{"base": base}
 	for name, partial := range raw.Agents {
-		if name != "react" && name != "observe" && name != "plan" {
+		if raw.Name != "multi-agent" && name != "react" && name != "observe" && name != "plan" {
 			return nil, fmt.Errorf("unknown agent type %q", name)
 		}
 		if partial == nil {
@@ -115,7 +135,7 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 		if err != nil {
 			return nil, err
 		}
-		if name != "react" && partial.AllowTools != nil && len(*partial.AllowTools) != 0 {
+		if raw.Name != "multi-agent" && name != "react" && partial.AllowTools != nil && len(*partial.AllowTools) != 0 {
 			return nil, fmt.Errorf("agents.%s cannot enable tools", name)
 		}
 		resolved[name] = cfg
@@ -125,8 +145,9 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 			resolved[name] = cloneAgentConfig(base)
 			resolved[name].Name = name
 		}
-		// 内部代理不继承 base 的工具权限，确保其最终能力始终为空。
-		if name != "react" {
+		// multi-agent 的显式节点名称不代表处理器类型；只有内部代理禁用工具。
+		_, graphNode := raw.Agents[name]
+		if name != "react" && !(raw.Name == "multi-agent" && graphNode) {
 			resolved[name].AllowTools = map[McpToolName]struct{}{}
 		}
 	}
@@ -134,13 +155,29 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 	for _, cfg := range resolved {
 		cfg.LogLevel = raw.LogLevel
 	}
+	if raw.Name == "multi-agent" {
+		if err := validateMultiAgent(raw.MultiAgent, raw.Agents); err != nil {
+			return nil, err
+		}
+	} else if raw.MultiAgent != nil {
+		return nil, fmt.Errorf("multi-agent settings require name: multi-agent")
+	}
 	entry := raw.Name
+	if entry == "multi-agent" {
+		entry = raw.MultiAgent.Entry
+	}
 	if entry == "plan-execute" {
 		entry = "plan"
 	}
 	out := cloneAgentConfig(resolved[entry])
 	out.Name = raw.Name
 	out.configs = resolved
+	out.MultiAgent = raw.MultiAgent
+	for name := range raw.Agents {
+		out.agentInstructions = append(out.agentInstructions, AgentInstruction{Name: name, Instruction: resolved[name].SysPrompt})
+	}
+	// 固定顺序避免 map 遍历顺序导致上下文和提示词缓存不稳定。
+	slices.SortFunc(out.agentInstructions, func(a, b AgentInstruction) int { return strings.Compare(a.Name, b.Name) })
 	return out, nil
 }
 
@@ -174,6 +211,12 @@ func resolveConfig(name string, raw yamlAgentSettings, base *AgentConfig) (*Agen
 			tools[tool] = struct{}{}
 		}
 	}
+	if raw.Instruction != nil && raw.SysPrompt != nil {
+		return nil, fmt.Errorf("agents.%s: instruction and sys_prompt are mutually exclusive", name)
+	}
+	if raw.Instruction != nil {
+		raw.SysPrompt = raw.Instruction
+	}
 	prompt := ""
 	if base != nil {
 		prompt = base.SysPrompt
@@ -181,7 +224,7 @@ func resolveConfig(name string, raw yamlAgentSettings, base *AgentConfig) (*Agen
 	if raw.SysPrompt != nil {
 		prompt = *raw.SysPrompt
 	}
-	return &AgentConfig{Name: name, LLMConfig: llm, AllowTools: tools, SysPrompt: prompt}, nil
+	return &AgentConfig{NextAgents: append([]string(nil), raw.NextAgents...), Name: name, LLMConfig: llm, AllowTools: tools, SysPrompt: prompt}, nil
 }
 
 func resolveLLM(raw yamlLLMConfig) (*LLMConfig, error) {
@@ -227,15 +270,18 @@ func rejectNull(node *yaml.Node) error {
 }
 
 type yamlAgentConfig struct {
-	Name     string                        `yaml:"name"`
-	LogLevel LogLevel                      `yaml:"log_level"`
-	Base     *yamlAgentSettings            `yaml:"base"`
-	Agents   map[string]*yamlAgentSettings `yaml:"agents"`
+	Name       string                        `yaml:"name"`
+	MultiAgent *MultiAgentConfig             `yaml:"multi-agent"`
+	LogLevel   LogLevel                      `yaml:"log_level"`
+	Base       *yamlAgentSettings            `yaml:"base"`
+	Agents     map[string]*yamlAgentSettings `yaml:"agents"`
 }
 type yamlAgentSettings struct {
-	LLM        *yamlLLMConfig `yaml:"llm"`
-	AllowTools *[]string      `yaml:"allow_tools"`
-	SysPrompt  *string        `yaml:"sys_prompt"`
+	Instruction *string        `yaml:"instruction"`
+	NextAgents  []string       `yaml:"next_agents"`
+	LLM         *yamlLLMConfig `yaml:"llm"`
+	AllowTools  *[]string      `yaml:"allow_tools"`
+	SysPrompt   *string        `yaml:"sys_prompt"`
 }
 type yamlLLMConfig struct {
 	BaseURL      string `yaml:"base_url"`
@@ -249,4 +295,43 @@ var knownMCPTools = map[McpToolName]bool{
 	LoadSkillMCPToolName: true,
 	ReadFileMCPToolName:  true, ListDirMCPToolName: true, GlobMCPToolName: true,
 	GrepMCPToolName: true, ApplyPatchMCPToolName: true, ExecMCPToolName: true,
+}
+
+// MultiAgentConfig 描述允许的执行图，模型只能在图内委派任务。
+type MultiAgentConfig struct {
+	Entry       string `yaml:"entry"`
+	MaxRounds   int    `yaml:"max_rounds"`
+	MaxParallel int    `yaml:"max_parallel"`
+}
+
+func validateMultiAgent(graph *MultiAgentConfig, agents map[string]*yamlAgentSettings) error {
+	if graph == nil {
+		return fmt.Errorf("multi-agent settings are required")
+	}
+	if graph.MaxRounds <= 0 || graph.MaxParallel <= 0 {
+		return fmt.Errorf("multi-agent max_rounds and max_parallel must be positive")
+	}
+	if _, ok := agents[graph.Entry]; !ok {
+		return fmt.Errorf("multi-agent entry %q is not configured", graph.Entry)
+	}
+	for name, settings := range agents {
+		if name == "base" {
+			return fmt.Errorf("agent name base is reserved")
+		}
+		for _, next := range settings.NextAgents {
+			if _, ok := agents[next]; !ok {
+				return fmt.Errorf("agent %q references unknown next agent %q", name, next)
+			}
+		}
+	}
+	return nil
+}
+
+// Copy 保留当前 agent 的解析设置，供执行器和观察器分别选取配置。
+func (c *AgentConfig) Copy() *AgentConfig {
+	clone := cloneAgentConfig(c)
+	if clone != nil {
+		clone.configs = c.configs
+	}
+	return clone
 }

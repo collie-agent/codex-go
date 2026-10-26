@@ -6,7 +6,7 @@ import (
 )
 
 type LLMSchema interface {
-	ReactResult | ObserveResult | PlannerResult
+	ReactResult | ObserveResult | PlannerResult | MultiAgentResult
 }
 
 type AgentProcessor[T LLMSchema] interface {
