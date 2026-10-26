@@ -58,7 +58,7 @@ func TestRegisterToolsExposesAllWorkspaceTools(t *testing.T) {
 			}
 		}
 	}
-	for _, name := range []string{"list_dir", "read_file", "glob", "grep", "apply_patch", "exec", "switch_to_plan_execute"} {
+	for _, name := range []string{"list_dir", "read_file", "glob", "grep", "apply_patch", "exec", "switch_to_plan_execute", "load_skill"} {
 		if !got[name] {
 			t.Errorf("registered tools missing %q: %#v", name, got)
 		}

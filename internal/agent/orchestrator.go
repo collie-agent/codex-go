@@ -30,6 +30,7 @@ type ProcessorOrchestrator struct {
 	toolConfig    filemcp.Config
 	mcpCommand    func() *exec.Cmd
 	checkpoint    func(*fileContext.DurableState, string) error
+	skills        []Skill
 }
 
 // NewProcessorOrchestrator 默认从 ReAct 开始，后续节点由各处理器的返回值决定。
@@ -50,6 +51,11 @@ func NewProcessorOrchestratorWithCommand(ctx context.Context, command string, ar
 		return exec.CommandContext(ctx, command, commandArgs...)
 	}
 	return o
+}
+
+// SetSkills 将同一份启动索引提供给所有 ReAct 节点，包括计划执行的后续步骤。
+func (o *ProcessorOrchestrator) SetSkills(skills []Skill) {
+	o.skills = slices.Clone(skills)
 }
 
 // SetMode 指定执行入口；空值与 react 均直接进入 ReAct。
@@ -275,6 +281,7 @@ func (o *ProcessorOrchestrator) runProcessor(agentType AgentProcessorType, agent
 			return processorResult{}, fmt.Errorf("create processor %q: %w", agentType, err)
 		}
 		process.SetCheckpoint(func() error { return o.saveCheckpoint(state) })
+		process.SetSkills(o.skills)
 		process.allowPlanSwitch = !planExecute
 		result, requestedNext, err := process.Run(agentConfig, state)
 		if err == nil && !planExecute && slices.Contains(requestedNext, PlanAgentType) {

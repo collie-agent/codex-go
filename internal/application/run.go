@@ -22,6 +22,7 @@ type Options struct {
 	ConfigPath, Task, Workspace, ConvID, RunID, Mode, MCPCommand string
 	Timeout                                                      time.Duration
 	RuntimeDirs                                                  []string
+	Skills                                                       []agent.Skill
 	Stderr                                                       io.Writer
 }
 

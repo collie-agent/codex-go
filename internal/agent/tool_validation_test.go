@@ -70,6 +70,7 @@ func TestAllToolSchemasRejectWrongArgumentTypes(t *testing.T) {
 		args map[string]any
 		want string
 	}{
+		"load_skill":             {map[string]any{"skill_name": 123}, "invalid arguments"},
 		"switch_to_plan_execute": {map[string]any{"reason": 123, "summary": "remaining work"}, "invalid arguments"},
 		"list_dir":               {map[string]any{"path": ".", "depth": "1"}, "depth must be a JSON integer"},
 		"read_file":              {map[string]any{"path": "README.md", "offset": "1", "limit": "200"}, "limit must be a JSON integer"},

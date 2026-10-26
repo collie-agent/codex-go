@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -53,6 +54,7 @@ type ReactProcess[T LLMSchema] struct {
 	serverSess      *mcpSdk.ServerSession
 	checkpoint      func() error
 	allowPlanSwitch bool
+	skills          []Skill
 }
 
 // 最大轮数固定在代码中，避免任务通过配置无限延长。
@@ -109,6 +111,11 @@ func newReactProcess[T LLMSchema](ctx context.Context, toolConfig filemcp.Config
 // SetCheckpoint 在每批工具执行前确认恢复状态可写；失败立即结束本次运行。
 func (r *ReactProcess[T]) SetCheckpoint(save func() error) { r.checkpoint = save }
 
+// SetSkills 保存启动时的技能快照，调用方后续修改切片不会影响运行。
+func (r *ReactProcess[T]) SetSkills(skills []Skill) {
+	r.skills = slices.Clone(skills)
+}
+
 func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fileContext.DurableState) (T, []AgentProcessorType, error) {
 	var zero T
 	if r == nil || r.ctx == nil || durableState == nil || agentConfig == nil || agentConfig.LLMConfig == nil {
@@ -120,8 +127,10 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 	if r.serverSess != nil {
 		defer r.serverSess.Close()
 	}
-	// 控制流工具仅由支持交接的编排器开放，不依赖 YAML 工具权限。
 	agentConfig = agentConfig.ForAgent("react")
+	// 技能加载是 ReAct 的内置能力，不依赖 YAML 的 allow_tools。
+	agentConfig.AllowTools[config.LoadSkillMCPToolName] = struct{}{}
+	// 控制流工具仅由支持交接的编排器开放，不依赖 YAML 工具权限。
 	delete(agentConfig.AllowTools, config.SwitchToPlanExecuteMCPToolName)
 	if r.allowPlanSwitch && len(durableState.StepExecutions) == 0 {
 		agentConfig.AllowTools[config.SwitchToPlanExecuteMCPToolName] = struct{}{}
@@ -129,6 +138,7 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 	rc := fileContext.NewReactContext(durableState)
 	// 先保留内置 ReAct 执行约束，再把 YAML 的长期约束追加到其后。
 	rc.SetSysPrompt(agentConfig.SysPrompt)
+	addSkillsToReactContext(rc, r.skills)
 	worker := NewWorker[T](r.ctx, agentConfig, r.mcpClientSess)
 	formatErrors := 0
 	toolCallErrors := 0

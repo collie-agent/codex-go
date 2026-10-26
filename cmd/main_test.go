@@ -275,8 +275,8 @@ func TestRunAgentUsesObserveAgentConfiguration(t *testing.T) {
 					if !strings.Contains(input, "react-prompt") || strings.Contains(input, "base-prompt") {
 						t.Errorf("ReAct used wrong prompt: %s", input)
 					}
-					if len(request.Tools) != 1 || request.Tools[0].Name != "apply_patch" {
-						t.Errorf("ReAct saw tools %v, want only apply_patch", request.Tools)
+					if len(request.Tools) != 2 || request.Tools[0].Name != "apply_patch" || request.Tools[1].Name != "load_skill" {
+						t.Errorf("ReAct saw tools %v, want apply_patch and built-in load_skill", request.Tools)
 					}
 					if reactRequests > 1 {
 						// 等待异步观察器收到请求，避免 CLI 完成后取消上下文使断言偶发失败。

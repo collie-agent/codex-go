@@ -3,6 +3,7 @@ package config
 type McpToolName string
 
 const (
+	LoadSkillMCPToolName           McpToolName = "load_skill"
 	SwitchToPlanExecuteMCPToolName McpToolName = "switch_to_plan_execute"
 	ReadFileMCPToolName            McpToolName = "read_file"
 	ListDirMCPToolName             McpToolName = "list_dir"

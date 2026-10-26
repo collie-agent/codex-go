@@ -42,12 +42,17 @@ func main() {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// 启动时扫描一次；新建和恢复运行共用索引，不在每轮模型请求时读取磁盘。
+	skills, err := agent.LoadSkills()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	var results []agent.ReactResult
-	var err error
 	if *runID != "" {
-		results, err = application.Resume(ctx, application.Options{ConfigPath: *configPath, RunID: *runID, Workspace: *workspace, Mode: *mode, MCPCommand: *mcpCommand, Timeout: *timeout, RuntimeDirs: runtimeDirs, Stderr: os.Stderr})
+		results, err = application.Resume(ctx, application.Options{ConfigPath: *configPath, RunID: *runID, Workspace: *workspace, Mode: *mode, MCPCommand: *mcpCommand, Timeout: *timeout, RuntimeDirs: runtimeDirs, Skills: skills, Stderr: os.Stderr})
 	} else {
-		results, err = application.Run(ctx, application.Options{ConfigPath: *configPath, Task: *task, Workspace: *workspace, ConvID: *convID, Mode: *mode, MCPCommand: *mcpCommand, Timeout: *timeout, RuntimeDirs: runtimeDirs, Stderr: os.Stderr})
+		results, err = application.Run(ctx, application.Options{ConfigPath: *configPath, Task: *task, Workspace: *workspace, ConvID: *convID, Mode: *mode, MCPCommand: *mcpCommand, Timeout: *timeout, RuntimeDirs: runtimeDirs, Skills: skills, Stderr: os.Stderr})
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

@@ -79,6 +79,7 @@ func RegisterTools(server *sdk.Server, config Config) error {
 	registerApplyPatchTool(server, workspace, config.Timeout)
 	registerExecTool(server, workspace, config)
 	registerSwitchToPlanExecuteTool(server)
+	registerLoadSkillTool(server)
 	return nil
 }
 

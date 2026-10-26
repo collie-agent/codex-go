@@ -134,14 +134,18 @@ func Resume(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 }
 
 func newOrchestrator(ctx context.Context, workspace string, opts Options) *agent.ProcessorOrchestrator {
+	var orchestrator *agent.ProcessorOrchestrator
 	if opts.MCPCommand == "" {
-		return agent.NewProcessorOrchestrator(ctx, filemcp.Config{Workspace: workspace, Timeout: opts.Timeout, RuntimeDirs: opts.RuntimeDirs})
+		orchestrator = agent.NewProcessorOrchestrator(ctx, filemcp.Config{Workspace: workspace, Timeout: opts.Timeout, RuntimeDirs: opts.RuntimeDirs})
+	} else {
+		args := []string{"--workspace", workspace, "--timeout", opts.Timeout.String()}
+		for _, dir := range opts.RuntimeDirs {
+			args = append(args, "--runtime-dir", dir)
+		}
+		orchestrator = agent.NewProcessorOrchestratorWithCommand(ctx, opts.MCPCommand, args...)
 	}
-	args := []string{"--workspace", workspace, "--timeout", opts.Timeout.String()}
-	for _, dir := range opts.RuntimeDirs {
-		args = append(args, "--runtime-dir", dir)
-	}
-	return agent.NewProcessorOrchestratorWithCommand(ctx, opts.MCPCommand, args...)
+	orchestrator.SetSkills(opts.Skills)
+	return orchestrator
 }
 
 func decodeSavedResults(raw json.RawMessage) ([]agent.ReactResult, error) {
