@@ -75,7 +75,7 @@ func TestMultiAgentSupervisorReceivesDelegatedResult(t *testing.T) {
 	defer server.Close()
 	cfg := multiConfig(t, server.URL)
 	o := NewMultiAgentProcessorOrchestrator(context.Background(), filemcp.Config{Workspace: t.TempDir()})
-	results, err := o.Run(cfg, &state.DurableState{RunId: "run", Goal: "inspect project"})
+	results, err := o.Run(cfg, &state.DurableState{RunId: "run", Goal: "inspect project", CompletionCriteria: []string{"task verified"}})
 	if err != nil || len(results) != 1 || results[0].Result.Answer != "final report" {
 		t.Fatalf("results=%+v error=%v", results, err)
 	}
@@ -109,7 +109,7 @@ func TestMultiAgentWorkerFailureReturnsToSupervisor(t *testing.T) {
 	}))
 	defer server.Close()
 	o := NewMultiAgentProcessorOrchestrator(context.Background(), filemcp.Config{Workspace: t.TempDir()})
-	result, err := o.Run(multiConfig(t, server.URL), &state.DurableState{RunId: "run", Goal: "inspect project"})
+	result, err := o.Run(multiConfig(t, server.URL), &state.DurableState{RunId: "run", Goal: "inspect project", CompletionCriteria: []string{"task verified"}})
 	if err != nil || len(result) != 1 || result[0].Result.Answer != "request source from user" {
 		t.Fatalf("result=%+v error=%v", result, err)
 	}
@@ -158,7 +158,7 @@ func TestMultiAgentDelegationsReceiveUpstreamReports(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	durable := &state.DurableState{RunId: "run", Goal: "inspect project", PreviousRunOutcomes: []state.RunOutcome{{RunID: "prior", Result: "private prior outcome"}}}
+	durable := &state.DurableState{RunId: "run", Goal: "inspect project", CompletionCriteria: []string{"project inspected"}, PreviousRunOutcomes: []state.RunOutcome{{RunID: "prior", Result: "private prior outcome"}}}
 	o := NewMultiAgentProcessorOrchestrator(context.Background(), filemcp.Config{Workspace: t.TempDir()})
 	result, err := o.Run(multiConfig(t, server.URL), durable)
 	if err != nil || len(result) != 1 || result[0].Result.Answer != "combined report" {
@@ -187,7 +187,7 @@ func TestMultiAgentInfrastructureErrorStopsRun(t *testing.T) {
 	}))
 	defer server.Close()
 	o := NewMultiAgentProcessorOrchestrator(context.Background(), filemcp.Config{Workspace: t.TempDir()})
-	results, err := o.Run(multiConfig(t, server.URL), &state.DurableState{RunId: "run", Goal: "inspect"})
+	results, err := o.Run(multiConfig(t, server.URL), &state.DurableState{RunId: "run", Goal: "inspect", CompletionCriteria: []string{"task verified"}})
 	if err == nil || !strings.Contains(err.Error(), "400 Bad Request") || len(results) != 0 {
 		t.Fatalf("results=%+v error=%v", results, err)
 	}
@@ -214,7 +214,10 @@ func TestMultiAgentCancellationStopsWorkers(t *testing.T) {
 	cfg := multiConfig(t, server.URL)
 	o := NewMultiAgentProcessorOrchestrator(ctx, filemcp.Config{Workspace: t.TempDir()})
 	done := make(chan error, 1)
-	go func() { _, err := o.Run(cfg, &state.DurableState{RunId: "run", Goal: "inspect"}); done <- err }()
+	go func() {
+		_, err := o.Run(cfg, &state.DurableState{RunId: "run", Goal: "inspect", CompletionCriteria: []string{"task verified"}})
+		done <- err
+	}()
 	select {
 	case <-started:
 	case <-time.After(5 * time.Second):
@@ -249,7 +252,7 @@ func TestReactMultiAgentBusinessFailureIsAResult(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			result, _, err := process.Run(cfg, &state.DurableState{RunId: "task", Goal: "inspect source"})
+			result, _, err := process.Run(cfg, &state.DurableState{RunId: "task", Goal: "inspect source", CompletionCriteria: []string{"task verified"}})
 			if err != nil || result.Result.Status != FailedReactStatus || result.Result.Answer != "source missing" {
 				t.Fatalf("result=%+v error=%v", result, err)
 			}
@@ -303,7 +306,7 @@ func TestMultiAgentParallelDelegationsRespectLimit(t *testing.T) {
 			done := make(chan error, 1)
 			o := NewMultiAgentProcessorOrchestrator(ctx, filemcp.Config{Workspace: t.TempDir()})
 			go func() {
-				result, err := o.Run(cfg, &state.DurableState{RunId: "run", Goal: "inspect"})
+				result, err := o.Run(cfg, &state.DurableState{RunId: "run", Goal: "inspect", CompletionCriteria: []string{"task verified"}})
 				if err == nil && (len(result) != 1 || result[0].Result.Answer != "all checked") {
 					err = fmt.Errorf("unexpected result: %+v", result)
 				}
@@ -353,7 +356,7 @@ func TestMultiAgentRejectsInvalidDelegationBeforeStartingBatch(t *testing.T) {
 			}))
 			defer server.Close()
 			o := NewMultiAgentProcessorOrchestrator(context.Background(), filemcp.Config{Workspace: t.TempDir()})
-			_, err := o.Run(multiConfig(t, server.URL), &state.DurableState{RunId: "run", Goal: "inspect"})
+			_, err := o.Run(multiConfig(t, server.URL), &state.DurableState{RunId: "run", Goal: "inspect", CompletionCriteria: []string{"task verified"}})
 			if err == nil || workers.Load() != 0 {
 				t.Fatalf("workers=%d error=%v", workers.Load(), err)
 			}
@@ -410,7 +413,7 @@ func TestMultiAgentWorkerExecutesToolsThroughMCPCommand(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	o := NewMultiAgentProcessorOrchestratorWithCommand(ctx, binary, "--workspace", workspace)
-	results, err := o.Run(cfg, &state.DurableState{RunId: "run", Goal: "inspect evidence"})
+	results, err := o.Run(cfg, &state.DurableState{RunId: "run", Goal: "inspect evidence", CompletionCriteria: []string{"task verified"}})
 	if err != nil || len(results) != 1 || results[0].Result.Answer != "inspection verified" {
 		t.Fatalf("results=%+v error=%v", results, err)
 	}
@@ -426,7 +429,7 @@ func TestMultiAgentRoundBudgetStopsFurtherDelegation(t *testing.T) {
 	cfg := multiConfig(t, server.URL)
 	cfg.MultiAgent.MaxRounds = 1
 	o := NewMultiAgentProcessorOrchestrator(context.Background(), filemcp.Config{Workspace: t.TempDir()})
-	_, err := o.Run(cfg, &state.DurableState{RunId: "run", Goal: "inspect"})
+	_, err := o.Run(cfg, &state.DurableState{RunId: "run", Goal: "inspect", CompletionCriteria: []string{"task verified"}})
 	if err == nil || !strings.Contains(err.Error(), "max_rounds") || calls.Load() != 1 {
 		t.Fatalf("calls=%d error=%v", calls.Load(), err)
 	}
@@ -502,10 +505,154 @@ func TestMultiAgentUpstreamReportsSurviveNestedDelegation(t *testing.T) {
 				t.Fatal(err)
 			}
 			o := NewMultiAgentProcessorOrchestrator(context.Background(), filemcp.Config{Workspace: t.TempDir()})
-			result, err := o.Run(cfg, &state.DurableState{RunId: "run", Goal: "review evidence"})
+			result, err := o.Run(cfg, &state.DurableState{RunId: "run", Goal: "review evidence", CompletionCriteria: []string{"task verified"}})
 			if err != nil || len(result) != 1 || result[0].Result.Answer != "final" || calls.Load() != 7 {
 				t.Fatalf("result=%+v calls=%d err=%v", result, calls.Load(), err)
 			}
 		})
+	}
+}
+
+func TestMultiAgentSupervisorPreservesInitialCompletionCriteria(t *testing.T) {
+	for _, initial := range [][]string{{"explain components"}, nil} {
+		t.Run(fmt.Sprint(initial), func(t *testing.T) {
+			var calls atomic.Int32
+			generated := "identify agents with source evidence"
+			want := generated
+			if len(initial) > 0 {
+				want = initial[0]
+			}
+			var saved []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req struct{ Input string }
+				if err := decodeModelRequest(r.Body, &req); err != nil {
+					t.Error(err)
+					return
+				}
+				n := calls.Add(1)
+				if n == 1 && len(initial) == 0 {
+					if !strings.Contains(req.Input, "# Multi-agent execution context") || !strings.Contains(req.Input, "GenerateEntryCompletionCriteria") {
+						t.Error("first entry call must request criteria alongside its normal decision")
+					}
+				} else if n == 1 || n == 3 {
+					if !strings.Contains(req.Input, "# CompletionCriteria\n\n- "+want) {
+						t.Error("entry call lacks saved criteria")
+					}
+					if strings.Contains(req.Input, "GenerateEntryCompletionCriteria") {
+						t.Error("must not request criteria again")
+					}
+				}
+				switch n {
+				case 1:
+					multiResponse(w, `{"entry_completion_criteria":["identify agents with source evidence"],"result":{"status":"completed","answer":"delegate"},"next":[{"agent":"worker","task":"inspect","completion_criteria":["source checked"]}]}`)
+				case 2:
+					if len(saved) != 1 || saved[0] != want {
+						t.Error("criteria must be checkpointed before delegation")
+					}
+					multiResponse(w, `{"result":{"status":"completed","answer":"source report"},"next":[]}`)
+				case 3:
+					multiResponse(w, `{"entry_completion_criteria":["must not overwrite"],"result":{"status":"completed","answer":"final"},"next":[]}`)
+				default:
+					t.Error("extra model request")
+					w.WriteHeader(400)
+				}
+			}))
+			defer server.Close()
+			o := NewMultiAgentProcessorOrchestrator(context.Background(), filemcp.Config{Workspace: t.TempDir()})
+			o.SetCheckpoint(func(snapshot *state.DurableState, mode string) error {
+				saved = append([]string(nil), snapshot.CompletionCriteria...)
+				return nil
+			})
+			durable := &state.DurableState{RunId: "run", Goal: "explain agents", CompletionCriteria: initial}
+			results, err := o.Run(multiConfig(t, server.URL), durable)
+			if err != nil || len(results) != 1 || results[0].Result.Answer != "final" || calls.Load() != 3 {
+				t.Fatalf("results=%+v calls=%d err=%v", results, calls.Load(), err)
+			}
+			if len(durable.CompletionCriteria) != 1 || durable.CompletionCriteria[0] != want {
+				t.Fatalf("criteria=%v", durable.CompletionCriteria)
+			}
+		})
+	}
+}
+
+func TestMultiAgentEntryCriteriaLineProtocol(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct{ Input string }
+		if err := decodeModelRequest(r.Body, &req); err != nil {
+			t.Error(err)
+			return
+		}
+		switch calls.Add(1) {
+		case 1:
+			if !strings.Contains(req.Input, "GenerateEntryCompletionCriteria") {
+				t.Error("missing initial criteria request")
+			}
+			multiResponse(w, "BEGIN RESULT\nENTRY_COMPLETION_CRITERIA=\"cite verified source evidence\"\nBEGIN RESULT\nSTATUS=\"completed\"\nANSWER=\"delegate\"\nEND RESULT\nBEGIN NEXT\nAGENT=\"worker\"\nTASK=\"inspect source\"\nCOMPLETION_CRITERIA=\"source checked\"\nCONTEXT=\"read only\"\nEND NEXT\nEND RESULT")
+		case 2:
+			if strings.Contains(req.Input, "GenerateEntryCompletionCriteria") {
+				t.Error("worker must not generate entry criteria")
+			}
+			multiResponse(w, "BEGIN RESULT\nBEGIN RESULT\nSTATUS=\"completed\"\nANSWER=\"source report\"\nEND RESULT\nEND RESULT")
+		case 3:
+			if !strings.Contains(req.Input, "# CompletionCriteria\n\n- cite verified source evidence") || strings.Contains(req.Input, "GenerateEntryCompletionCriteria") {
+				t.Error("entry must reuse saved criteria")
+			}
+			multiResponse(w, "BEGIN RESULT\nBEGIN RESULT\nSTATUS=\"completed\"\nANSWER=\"verified\"\nEND RESULT\nEND RESULT")
+		default:
+			t.Error("extra model request")
+			w.WriteHeader(400)
+		}
+	}))
+	defer server.Close()
+	cfg := multiConfig(t, server.URL)
+	// 直接配置公开入口模型，验证整个委派链中的 Line Protocol。
+	cfg = &config.AgentConfig{LLMConfig: cfg.LLMConfig, LogLevel: cfg.LogLevel, NextAgents: []string{"worker"}}
+	cfg.LLMConfig.OutputSchema = config.LineProtocolLLMOutputSchema
+	cfg.MultiAgent = &config.MultiAgentConfig{Entry: "supervisor", MaxRounds: 3, MaxParallel: 1}
+	o := NewMultiAgentProcessorOrchestrator(context.Background(), filemcp.Config{Workspace: t.TempDir()})
+	durable := &state.DurableState{RunId: "line", Goal: "inspect source"}
+	result, err := o.Run(cfg, durable)
+	if err != nil || len(result) != 1 || result[0].Result.Answer != "verified" || calls.Load() != 3 {
+		t.Fatalf("result=%+v calls=%d err=%v", result, calls.Load(), err)
+	}
+	if len(durable.CompletionCriteria) != 1 || durable.CompletionCriteria[0] != "cite verified source evidence" {
+		t.Fatalf("criteria=%v", durable.CompletionCriteria)
+	}
+}
+
+func TestMultiAgentRecoversMisplacedEntryCriteria(t *testing.T) {
+	var retried atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct{ Input string }
+		if err := decodeModelRequest(r.Body, &req); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if !strings.Contains(req.Input, "LLM output format error") {
+			multiResponse(w, "BEGIN RESULT\nBEGIN RESULT\nSTATUS=\"completed\"\nANSWER=\"verified\"\nENTRY_COMPLETION_CRITERIA=\"cite verified source evidence\"\nEND RESULT\nEND RESULT")
+			return
+		}
+		retried.Store(true)
+		for _, want := range []string{"result.entry_completion_criteria", "Move ENTRY_COMPLETION_CRITERIA", "outer RESULT", "outside the nested RESULT", "instead of deleting it"} {
+			if !strings.Contains(req.Input, want) {
+				t.Errorf("correction missing %q", want)
+			}
+		}
+		multiResponse(w, "BEGIN RESULT\nENTRY_COMPLETION_CRITERIA=\"cite verified source evidence\"\nBEGIN RESULT\nSTATUS=\"completed\"\nANSWER=\"verified\"\nEND RESULT\nEND RESULT")
+	}))
+	defer server.Close()
+	cfg := multiConfig(t, server.URL)
+	cfg = &config.AgentConfig{LLMConfig: cfg.LLMConfig, LogLevel: cfg.LogLevel, MultiAgent: cfg.MultiAgent, NextAgents: []string{"worker"}}
+	cfg.LLMConfig.OutputSchema = config.LineProtocolLLMOutputSchema
+	o := NewMultiAgentProcessorOrchestrator(t.Context(), filemcp.Config{Workspace: t.TempDir()})
+	durable := &state.DurableState{RunId: "misplaced-criteria", Goal: "inspect source"}
+	results, err := o.Run(cfg, durable)
+	if err != nil || len(results) != 1 || results[0].Result.Answer != "verified" {
+		t.Fatalf("results=%+v err=%v", results, err)
+	}
+	if !retried.Load() || len(durable.CompletionCriteria) != 1 || durable.CompletionCriteria[0] != "cite verified source evidence" {
+		t.Fatalf("retried=%v criteria=%v", retried.Load(), durable.CompletionCriteria)
 	}
 }

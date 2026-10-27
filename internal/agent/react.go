@@ -47,15 +47,16 @@ type ReactResult struct {
 }
 
 type ReactProcess[T LLMSchema] struct {
-	ctx               context.Context
-	maxTurn           int
-	toolConfig        filemcp.Config
-	mcpClientSess     *mcpSdk.ClientSession
-	serverSess        *mcpSdk.ServerSession
-	checkpoint        func() error
-	allowPlanSwitch   bool
-	multiAgentContext string
-	skills            []Skill
+	ctx                             context.Context
+	maxTurn                         int
+	toolConfig                      filemcp.Config
+	mcpClientSess                   *mcpSdk.ClientSession
+	serverSess                      *mcpSdk.ServerSession
+	checkpoint                      func() error
+	allowPlanSwitch                 bool
+	multiAgentContext               string
+	generateEntryCompletionCriteria bool
+	skills                          []Skill
 }
 
 // 最大轮数固定在代码中，避免任务通过配置无限延长。
@@ -146,7 +147,7 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 	addSkillsToReactContext(rc, r.skills)
 	var modelContext fileContext.Contexter = rc
 	if _, multi := any(zero).(MultiAgentResult); multi {
-		modelContext = multiAgentModelContext{ReactContext: rc, delegation: r.multiAgentContext}
+		modelContext = fileContext.MultiAgentModelContext{ReactContext: rc, Delegation: r.multiAgentContext, GenerateEntryCompletionCriteria: r.generateEntryCompletionCriteria}
 	}
 	worker := NewWorker[T](r.ctx, agentConfig, r.mcpClientSess)
 	formatErrors := 0

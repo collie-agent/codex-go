@@ -129,6 +129,22 @@ func indirectType(t reflect.Type) reflect.Type {
 }
 
 func blockJSON(block *ParsedBlock, t reflect.Type) ([]byte, error) {
+	return blockJSONAt(block, t, "", nil)
+}
+
+type protocolFieldLocation struct {
+	path, block string
+	root        bool
+}
+
+func protocolPath(parent, field string) string {
+	if parent == "" {
+		return field
+	}
+	return parent + "." + field
+}
+
+func blockJSONAt(block *ParsedBlock, t reflect.Type, path string, ancestors map[string]protocolFieldLocation) ([]byte, error) {
 	t = indirectType(t)
 	if t.Kind() != reflect.Struct {
 		return nil, fmt.Errorf("block %s requires a struct destination", block.Type)
@@ -186,7 +202,16 @@ func blockJSON(block *ParsedBlock, t reflect.Type) ([]byte, error) {
 	for name, values := range block.Fields {
 		declaration, ok := fields[name]
 		if !ok {
-			return nil, fmt.Errorf("block %s contains undeclared field %s", block.Type, name)
+			message := fmt.Sprintf("block %s contains undeclared field %s (path %s)", block.Type, name, protocolPath(path, strings.ToLower(name)))
+			// 只根据真实祖先的 schema 提供移动建议，不猜测未知字段的含义。
+			if target, exists := ancestors[name]; exists {
+				location := "ancestor"
+				if target.root {
+					location = "outer"
+				}
+				message += fmt.Sprintf(". Move %s to the %s %s block at %s, outside the nested %s block", name, location, target.block, target.path, block.Type)
+			}
+			return nil, fmt.Errorf("%s", message)
 		}
 		if indirectType(declaration.typ).Kind() == reflect.Slice {
 			data, err := json.Marshal(values)
@@ -202,10 +227,18 @@ func blockJSON(block *ParsedBlock, t reflect.Type) ([]byte, error) {
 		}
 	}
 	childValues := make(map[string][]json.RawMessage)
+	// 每一层复制祖先字段表，避免兄弟块互相污染纠错目标。
+	locations := make(map[string]protocolFieldLocation, len(ancestors)+len(fields))
+	for name, location := range ancestors {
+		locations[name] = location
+	}
+	for name, declaration := range fields {
+		locations[name] = protocolFieldLocation{path: protocolPath(path, declaration.key), block: block.Type, root: path == ""}
+	}
 	for _, child := range block.Children {
 		declaration, ok := children[child.Type]
 		if !ok {
-			return nil, fmt.Errorf("block %s contains undeclared child block %s", block.Type, child.Type)
+			return nil, fmt.Errorf("block %s contains undeclared child block %s (path %s)", block.Type, child.Type, protocolPath(path, strings.ToLower(child.Type)))
 		}
 		if _, exists := object[declaration.key]; exists && len(childValues[declaration.key]) == 0 {
 			return nil, fmt.Errorf("block %s uses %s as both a field and child block", block.Type, declaration.key)
@@ -215,7 +248,11 @@ func blockJSON(block *ParsedBlock, t reflect.Type) ([]byte, error) {
 		if isSlice {
 			childType = childType.Elem()
 		}
-		data, err := blockJSON(child, childType)
+		childPath := protocolPath(path, declaration.key)
+		if isSlice {
+			childPath = fmt.Sprintf("%s[%d]", childPath, len(childValues[declaration.key]))
+		}
+		data, err := blockJSONAt(child, childType, childPath, locations)
 		if err != nil {
 			return nil, err
 		}

@@ -23,6 +23,23 @@ var (
 	_ LLMOutputParser[*parserPlan] = (*LineProtocolOutput[*parserPlan])(nil)
 )
 
+func TestLineProtocolMisplacedFieldReportsPathAndDestination(t *testing.T) {
+	type result struct {
+		Answer string `json:"answer"`
+	}
+	type response struct {
+		EntryCompletionCriteria []string `json:"entry_completion_criteria"`
+		Result                  result   `json:"result"`
+	}
+	var got response
+	err := (&LineProtocolOutput[*response]{}).Parse("BEGIN RESULT\nBEGIN RESULT\nANSWER=\"delegate\"\nENTRY_COMPLETION_CRITERIA=\"cite evidence\"\nEND RESULT\nEND RESULT", &got)
+	for _, want := range []string{"result.entry_completion_criteria", "Move ENTRY_COMPLETION_CRITERIA", "outer RESULT", "outside the nested RESULT"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("error must contain %q, got %v", want, err)
+		}
+	}
+}
+
 func TestJsonOutput(t *testing.T) {
 	var model parserPlan
 	parser := &JsonOutput[*parserPlan]{}

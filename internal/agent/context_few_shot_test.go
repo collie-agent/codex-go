@@ -17,7 +17,7 @@ func checkContextFewShots[T any](t *testing.T, ctx fileContext.Contexter, count 
 	lineSections := strings.Split(ctx.LineProtocolFewShot(), " output:\n")[1:]
 	// 普通上下文先展示五个通用语法示例；多代理直接展示完整业务文档。
 	formatExamples := 5
-	if _, ok := ctx.(multiAgentModelContext); ok {
+	if _, ok := ctx.(fileContext.MultiAgentModelContext); ok {
 		formatExamples = 0
 	}
 	if len(jsonSections) != count || len(lineSections) != formatExamples+count {
@@ -64,7 +64,7 @@ func normalizeFewShotSlices(value reflect.Value) {
 
 func TestContextFewShotsMatchResultSchemas(t *testing.T) {
 	t.Run("multi-agent", func(t *testing.T) {
-		ctx := multiAgentModelContext{ReactContext: fileContext.NewReactContext(&fileContext.DurableState{})}
+		ctx := fileContext.MultiAgentModelContext{ReactContext: fileContext.NewReactContext(&fileContext.DurableState{})}
 		checkContextFewShots[MultiAgentResult](t, ctx, 4)
 		sections := strings.Split(ctx.LineProtocolFewShot(), " output:\n")[1:]
 		for i, section := range sections {
@@ -78,6 +78,9 @@ func TestContextFewShotsMatchResultSchemas(t *testing.T) {
 			}
 			if got.Result.Status != wantStatus || got.Result.Answer == "" || len(got.Next) != []int{2, 1, 0, 1}[i] {
 				t.Fatalf("invalid multi-agent scenario %d: %+v", i+1, got)
+			}
+			if i == 0 && len(got.EntryCompletionCriteria) == 0 {
+				t.Fatal("entry delegation example must include outer entry completion criteria")
 			}
 			for _, handoff := range got.Next {
 				if handoff.Task == "" || len(handoff.CompletionCriteria) == 0 || handoff.Context == "" {

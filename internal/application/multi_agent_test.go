@@ -20,7 +20,7 @@ func TestMultiAgentYAMLRunAndCompletedResume(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
-		writeResult(w, `{"result":{"status":"completed","answer":"multi-agent final report"},"next":[]}`)
+		writeResult(w, `{"entry_completion_criteria":["project inspected with evidence"],"result":{"status":"completed","answer":"multi-agent final report"},"next":[]}`)
 	}))
 	defer server.Close()
 	path := filepath.Join(t.TempDir(), "multi.yaml")
@@ -55,7 +55,7 @@ func TestMultiAgentResumeAfterProviderFailure(t *testing.T) {
 			http.Error(w, "unavailable", http.StatusBadRequest)
 			return
 		}
-		writeResult(w, `{"result":{"status":"completed","answer":"recovered report"},"next":[]}`)
+		writeResult(w, `{"entry_completion_criteria":["project inspected with evidence"],"result":{"status":"completed","answer":"recovered report"},"next":[]}`)
 	}))
 	defer server.Close()
 	path := filepath.Join(t.TempDir(), "multi.yaml")
