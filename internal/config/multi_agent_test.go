@@ -9,7 +9,7 @@ import (
 
 func TestLoadMultiAgentExample(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test")
-	cfg, err := LoadAgentConfig("../../examples/multi-agent.yaml")
+	cfg, err := LoadAgentConfig("../../examples/supervisor-worker.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -20,7 +20,7 @@ func TestLoadMultiAgentExample(t *testing.T) {
 
 func TestMultiAgentConfigCopyIsIndependent(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test")
-	cfg, err := LoadAgentConfig("../../examples/multi-agent.yaml")
+	cfg, err := LoadAgentConfig("../../examples/supervisor-worker.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}

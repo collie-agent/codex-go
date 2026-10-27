@@ -89,10 +89,10 @@ export CODEX_MYSQL_URL='mysql://user:password@127.0.0.1:3306/codex-go'
 
 ### Supervisor-worker 多代理
 
-使用 [`examples/multi-agent.yaml`](examples/multi-agent.yaml)，替换模型名并设置上述数据库及 API key 环境变量后执行：
+使用 [`examples/supervisor-worker.yaml`](examples/supervisor-worker.yaml)，替换模型名并设置上述数据库及 API key 环境变量后执行：
 
 ```sh
-./bin/agent-server --config examples/multi-agent.yaml \
+./bin/agent-server --config examples/supervisor-worker.yaml \
   --task '检查项目，分别完成实现与复核后汇总结论' \
   --workspace /path/to/workspace --mcp-command ./bin/codex-mcp
 ```

@@ -33,7 +33,7 @@ func TestReactStepResult(t *testing.T) {
 				defer server.Close()
 				cfg := &config.AgentConfig{LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: schema}}
 				state := &fileContext.DurableState{RunId: "step-result", Goal: "verify value", StepExecutions: []fileContext.StepExecution{{Status: fileContext.RunningExecutionStatus, CompletionCriteria: "value verified"}}}
-				process := &ReactProcess[ReactResult]{ctx: t.Context(), maxTurn: 1}
+				process := &ReactProcess[ReactResult]{BaseReactProcess: BaseReactProcess[ReactResult]{ctx: t.Context(), maxTurn: 1}}
 				got, _, err := process.Run(cfg, state)
 				if tc.wantError != "" {
 					if err == nil || !strings.Contains(err.Error(), tc.wantError) {

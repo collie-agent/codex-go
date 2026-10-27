@@ -16,8 +16,9 @@ type AgentProcessor[T LLMSchema] interface {
 
 // 编译期检查确保各处理器始终满足统一的运行接口。
 var (
-	_ AgentProcessor[PlannerResult] = (*PlannerProcess)(nil)
-	_ AgentProcessor[ReactResult]   = (*ReactProcess[ReactResult])(nil)
-	_ AgentProcessor[ObserveResult] = (*ReactProcess[ObserveResult])(nil)
-	_ AgentProcessor[ObserveResult] = (*ObserveProcess[ObserveResult])(nil)
+	_ AgentProcessor[MultiAgentResult] = (*MultiAgentReactProcess)(nil)
+	_ AgentProcessor[PlannerResult]    = (*PlannerProcess)(nil)
+	_ AgentProcessor[ReactResult]      = (*ReactProcess[ReactResult])(nil)
+	_ AgentProcessor[ObserveResult]    = (*ReactProcess[ObserveResult])(nil)
+	_ AgentProcessor[ObserveResult]    = (*ObserveProcess[ObserveResult])(nil)
 )

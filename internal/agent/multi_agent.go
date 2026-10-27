@@ -238,12 +238,12 @@ func (r *multiAgentRun) invoke(task DelegatedTask, reports []DelegatedTask, pare
 	if err := save(); err != nil {
 		return MultiAgentResult{}, err
 	}
-	var process *ReactProcess[MultiAgentResult]
+	var process *MultiAgentReactProcess
 	var err error
 	if r.o.mcpCommand != nil {
-		process, err = NewReactProcessWithCommand[MultiAgentResult](r.ctx, r.o.mcpCommand())
+		process, err = NewMultiAgentReactProcessWithCommand(r.ctx, r.o.mcpCommand())
 	} else {
-		process, err = NewReactProcess[MultiAgentResult](r.ctx, r.o.toolConfig)
+		process, err = NewMultiAgentReactProcess(r.ctx, r.o.toolConfig)
 	}
 	if err != nil {
 		return MultiAgentResult{}, err
@@ -261,8 +261,7 @@ func (r *multiAgentRun) invoke(task DelegatedTask, reports []DelegatedTask, pare
 	if err != nil {
 		return MultiAgentResult{}, err
 	}
-	process.multiAgentContext = string(encoded)
-	process.generateEntryCompletionCriteria = parent == "" && !hasNonEmptyItems(task.CompletionCriteria)
+	process.SetDelegationContext(string(encoded), parent == "" && !hasNonEmptyItems(task.CompletionCriteria))
 	output, _, err := process.Run(r.cfg.ForAgent(string(task.Worker)), local)
 	if err != nil {
 		return MultiAgentResult{}, fmt.Errorf("multi-agent %s (%s): %w", task.Worker, task.TaskID, err)

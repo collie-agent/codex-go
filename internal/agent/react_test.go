@@ -42,7 +42,7 @@ func TestReactObserveAsync(t *testing.T) {
 		writeObservationResponse(w, []any{observationMessage(`{"ConfirmedFacts":["patch call_patch: file updated"],"ReportedErrors":["patch call_patch: partial result"]}`)})
 	}))
 	defer server.Close()
-	r := &ReactProcess[ReactResult]{ctx: ctx}
+	r := &ReactProcess[ReactResult]{BaseReactProcess: BaseReactProcess[ReactResult]{ctx: ctx}}
 	agentConfig := &config.AgentConfig{LLMConfig: &config.LLMConfig{
 		BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema,
 	}}
@@ -104,7 +104,7 @@ func TestReactExecObservation(t *testing.T) {
 		writeObservationResponse(w, []any{observationMessage(`{"ConfirmedFacts":["exec call_exec: TestExample failed"],"ReportedErrors":["exec call_exec: tests exited with code 1"]}`)})
 	}))
 	defer server.Close()
-	r := &ReactProcess[ReactResult]{ctx: ctx}
+	r := &ReactProcess[ReactResult]{BaseReactProcess: BaseReactProcess[ReactResult]{ctx: ctx}}
 	rc := fileContext.NewReactContext(&fileContext.DurableState{RunId: "exec-task", Goal: "verify tests"})
 	r.updateContext(&mcpSdk.CallToolResult{Content: []mcpSdk.Content{&mcpSdk.TextContent{Text: `{"stdout":"FAIL: TestExample","exit_code":1}`}}},
 		&mcpSdk.CallToolParams{Name: "exec", Meta: mcpSdk.Meta{toolCallIDMetaKey: "call_exec"}, Arguments: map[string]any{"command": "npm", "args": []string{"test"}}},
@@ -154,7 +154,7 @@ func TestReactRetriesOutputParseErrors(t *testing.T) {
 				}))
 				defer server.Close()
 				// 最后一轮也应允许纠正格式，不消耗工具执行的轮数预算。
-				process := &ReactProcess[ReactResult]{ctx: t.Context(), maxTurn: 1}
+				process := &ReactProcess[ReactResult]{BaseReactProcess: BaseReactProcess[ReactResult]{ctx: t.Context(), maxTurn: 1}}
 				cfg := &config.AgentConfig{LLMConfig: &config.LLMConfig{
 					BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: schema,
 				}}
@@ -181,7 +181,7 @@ func TestReactDoesNotRetryRequestErrors(t *testing.T) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 	}))
 	defer server.Close()
-	process := &ReactProcess[ReactResult]{ctx: t.Context(), maxTurn: 5}
+	process := &ReactProcess[ReactResult]{BaseReactProcess: BaseReactProcess[ReactResult]{ctx: t.Context(), maxTurn: 5}}
 	cfg := &config.AgentConfig{LLMConfig: &config.LLMConfig{
 		BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema,
 	}}
@@ -198,7 +198,7 @@ func TestReactObserveFailure(t *testing.T) {
 		writeObservationResponse(w, []any{observationMessage("invalid JSON")})
 	}))
 	defer server.Close()
-	r := &ReactProcess[ReactResult]{ctx: ctx}
+	r := &ReactProcess[ReactResult]{BaseReactProcess: BaseReactProcess[ReactResult]{ctx: ctx}}
 	agentConfig := &config.AgentConfig{LLMConfig: &config.LLMConfig{
 		BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema,
 	}}
@@ -393,7 +393,7 @@ func TestBatchToolCallings(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cs.Close()
-	r := &ReactProcess[ReactResult]{ctx: ctx, mcpClientSess: cs}
+	r := &ReactProcess[ReactResult]{BaseReactProcess: BaseReactProcess[ReactResult]{ctx: ctx, mcpClientSess: cs}}
 	rc := fileContext.NewReactContext(nil)
 	done := make(chan struct{})
 	go func() {
@@ -462,7 +462,7 @@ func TestReactRetriesInvalidToolCalls(t *testing.T) {
 				writeObservationResponse(w, []any{map[string]any{"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "BEGIN RESULT", "arguments": `{"status":"completed","answer":"done"}`}})
 			}))
 			defer server.Close()
-			process := &ReactProcess[ReactResult]{ctx: t.Context(), maxTurn: 1}
+			process := &ReactProcess[ReactResult]{BaseReactProcess: BaseReactProcess[ReactResult]{ctx: t.Context(), maxTurn: 1}}
 			cfg := &config.AgentConfig{LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.LineProtocolLLMOutputSchema}}
 			got, _, err := process.Run(cfg, &fileContext.DurableState{RunId: "retry-tool-task", Goal: "answer"})
 			if recover {

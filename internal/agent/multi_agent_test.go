@@ -235,7 +235,7 @@ func TestMultiAgentCancellationStopsWorkers(t *testing.T) {
 	}
 }
 
-func TestReactMultiAgentBusinessFailureIsAResult(t *testing.T) {
+func TestMultiAgentReactBusinessFailureIsAResult(t *testing.T) {
 	for _, schema := range []config.LLMOutputSchema{config.JsonLLMOutputSchema, config.LineProtocolLLMOutputSchema} {
 		t.Run(string(schema), func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -248,7 +248,7 @@ func TestReactMultiAgentBusinessFailureIsAResult(t *testing.T) {
 			defer server.Close()
 			cfg := multiConfig(t, server.URL).ForAgent("worker")
 			cfg.LLMConfig.OutputSchema = schema
-			process, err := NewReactProcess[MultiAgentResult](context.Background(), filemcp.Config{Workspace: t.TempDir()})
+			process, err := NewMultiAgentReactProcess(context.Background(), filemcp.Config{Workspace: t.TempDir()})
 			if err != nil {
 				t.Fatal(err)
 			}
