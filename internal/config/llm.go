@@ -8,6 +8,8 @@ const (
 )
 
 type LLMConfig struct {
+	// Stream enables SSE transport; omitted configurations keep non-streaming behavior.
+	Stream       bool
 	BaseUrl      string
 	ApiKey       string
 	Model        string

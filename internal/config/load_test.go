@@ -9,7 +9,7 @@ import (
 
 func TestLoadAgentConfigLogLevel(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test")
-	for _, level := range []string{"", "info", "error", "debug"} {
+	for _, level := range []string{"", "info", "error", "debug", "trace"} {
 		t.Run("level="+level, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "agent.yaml")
 			data := "name: react\nbase:\n  llm:\n    model: test\nagents:\n  observe:\n    sys_prompt: observer\n"
@@ -20,7 +20,7 @@ func TestLoadAgentConfigLogLevel(t *testing.T) {
 				t.Fatal(err)
 			}
 			cfg, err := LoadAgentConfig(path)
-			if level == "debug" {
+			if level == "trace" {
 				if err == nil || !strings.Contains(err.Error(), "unknown log_level") {
 					t.Fatalf("invalid log level error = %v", err)
 				}
@@ -255,6 +255,35 @@ func TestLoadAgentConfigRejectsInvalidDefinitions(t *testing.T) {
 			}
 			if _, err := LoadAgentConfig(path); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error=%v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadAgentConfigStream(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test")
+	for _, tc := range []struct {
+		name, base, override string
+		want                 bool
+	}{
+		{"default", "", "", false},
+		{"enabled", "    stream: true\n", "", true},
+		{"override", "    stream: true\n", "agents:\n  react:\n    llm:\n      model: other\n      stream: false\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "agent.yaml")
+			if err := os.WriteFile(path, []byte("name: react\nbase:\n  llm:\n    model: test\n"+tc.base+tc.override), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadAgentConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.LLMConfig.Stream != tc.want {
+				t.Fatalf("stream = %v, want %v", cfg.LLMConfig.Stream, tc.want)
+			}
+			if tc.override == "" && cfg.ForAgent("observe").LLMConfig.Stream != tc.want {
+				t.Fatal("stream was not inherited")
 			}
 		})
 	}

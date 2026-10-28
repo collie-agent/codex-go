@@ -21,7 +21,7 @@ import (
 
 const toolCallIDMetaKey = "call_id"
 
-var threeTurnResultTools = map[config.McpToolName]struct{}{
+var oneTurnResultTools = map[config.McpToolName]struct{}{
 	config.ListDirMCPToolName: struct{}{},
 	config.GlobMCPToolName:    struct{}{},
 }
@@ -127,16 +127,16 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 	toolCallErrors := 0
 	resultTurns := make(map[*fileContext.ToolResult]int)
 	for i := 1; i <= r.maxTurn; i++ {
-		// 按决策轮而非工具完成次数计数；同批并发调用及轮内纠错不缩短保留期。
+		// 目录发现结果仅供下一轮决策使用；同批并发调用及轮内纠错不缩短保留期。
 		rc.UpdateToolResults(func(previous []*fileContext.ToolResult) []*fileContext.ToolResult {
 			next := make([]*fileContext.ToolResult, 0, len(previous))
 			for _, result := range previous {
 				if result == nil {
 					continue
 				}
-				if _, limited := threeTurnResultTools[config.McpToolName(result.ToolName)]; limited {
+				if _, limited := oneTurnResultTools[config.McpToolName(result.ToolName)]; limited {
 					resultTurns[result]++
-					if resultTurns[result] > 3 {
+					if resultTurns[result] > 1 {
 						delete(resultTurns, result)
 						continue
 					}

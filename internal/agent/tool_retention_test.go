@@ -14,7 +14,7 @@ import (
 	filemcp "github.com/collie-agent/codex-go/internal/mcp"
 )
 
-func TestReactRetainsDiscoveryResultsForThreeTurns(t *testing.T) {
+func TestReactRetainsDiscoveryResultsForOneTurn(t *testing.T) {
 	workspace := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workspace, "sample.txt"), []byte("sample"), 0600); err != nil {
 		t.Fatal(err)
@@ -48,11 +48,29 @@ func TestReactRetainsDiscoveryResultsForThreeTurns(t *testing.T) {
 				}
 			}
 			want := 0
-			if turn >= 2 && turn <= 4 {
+			if turn == 2 {
 				want = 1
 			}
 			if calls != want || outputs != want {
 				t.Errorf("turn %d: %s call/result counts = %d/%d, want %d/%d", turn, id, calls, outputs, want, want)
+			}
+		}
+		// 目录发现结果过期后，文件读取历史仍须保留。
+		for readTurn := 2; readTurn < turn; readTurn++ {
+			id := fmt.Sprintf("read_%d", readTurn)
+			calls, outputs := 0, 0
+			for _, item := range request.Input {
+				if item.CallID == id {
+					switch item.Type {
+					case "function_call":
+						calls++
+					case "function_call_output":
+						outputs++
+					}
+				}
+			}
+			if calls != 1 || outputs != 1 {
+				t.Errorf("turn %d: %s call/result counts = %d/%d, want 1/1", turn, id, calls, outputs)
 			}
 		}
 		call := func(id, name, args string) any {

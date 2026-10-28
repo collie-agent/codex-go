@@ -24,11 +24,12 @@ func (c MultiAgentModelContext) ModelRequest() ModelRequest {
 	return request
 }
 
-// Examples cover delegation and return handoffs so NEXT stays nested in RESULT.
+// Examples distinguish automatic worker reports from authorized return handoffs.
+// Line Protocol omits NEXT entirely when the next list is empty.
 func (c MultiAgentModelContext) JsonFewShot() string         { return multiAgentJSONFewShot }
 func (c MultiAgentModelContext) LineProtocolFewShot() string { return multiAgentLineProtocolFewShot }
 
-const multiAgentJSONFewShot = `Multi-agent output contract: Return one MultiAgentResult containing result and next. result.status must be "completed" or "failed", including when delegating; result.answer must be non-empty. Express delegation through next, never through a "delegating" status. Only use agent IDs from the current next_agents. Example agent IDs are placeholders, not authorization. Return to caller with exactly one handoff to that caller; use empty next to finish. completion_criteria is a list of strings. Copy only the output document for the matching scenario, adapting its content to the current task.
+const multiAgentJSONFewShot = `Multi-agent output contract: Return one MultiAgentResult containing result and next. result.status must be "completed" or "failed", including when delegating; result.answer must be non-empty. Express delegation through next, never through a "delegating" status. Only use agent IDs from the current next_agents. Example agent IDs are placeholders, not authorization. Use empty next to finish a worker task; the scheduler automatically delivers its report to the caller. An explicit return to caller requires that caller in next_agents and exactly one handoff to that caller. completion_criteria is a list of strings. Copy only the output document for the matching scenario, adapting its content to the current task.
 
 JSON: Return one JSON object without Markdown fences or surrounding prose. Use arrays for next, completion_criteria, Observation and CompletionEvidence.
 
@@ -46,9 +47,13 @@ Example 3 output:
 
 Example 4 input: Report a worker failure to the caller. Assume caller is supervisor and next_agents contains supervisor.
 Example 4 output:
-{"result":{"status":"failed","answer":"Cannot inspect the hierarchy because lib/app.dart is missing.","Observation":[],"CompletionEvidence":[]},"next":[{"agent":"supervisor","task":"Decide whether to use another source or report the missing input.","completion_criteria":["Account for the unavailable source in the final answer."],"context":"Inspection failed: lib/app.dart was not found; no hierarchy was verified."}]}`
+{"result":{"status":"failed","answer":"Cannot inspect the hierarchy because lib/app.dart is missing.","Observation":[],"CompletionEvidence":[]},"next":[{"agent":"supervisor","task":"Decide whether to use another source or report the missing input.","completion_criteria":["Account for the unavailable source in the final answer."],"context":"Inspection failed: lib/app.dart was not found; no hierarchy was verified."}]}
 
-const multiAgentLineProtocolFewShot = `Multi-agent output contract: Return one MultiAgentResult containing result and next. result.status must be "completed" or "failed", including when delegating; result.answer must be non-empty. Express delegation through next, never through a "delegating" status. Only use agent IDs from the current next_agents. Example agent IDs are placeholders, not authorization. Return to caller with exactly one handoff to that caller; use empty next to finish. completion_criteria is a list of strings. Copy only the output document for the matching scenario, adapting its content to the current task.
+Example 5 input: Finish a successful expert task. Assume caller is coordinator and next_agents is empty. The scheduler delivers this report to coordinator automatically; do not emit a handoff to coordinator.
+Example 5 output:
+{"result":{"status":"completed","answer":"The root widget is App; App builds HomePage. Verified in lib/app.dart.","Observation":[],"CompletionEvidence":[]},"next":[]}`
+
+const multiAgentLineProtocolFewShot = `Multi-agent output contract: Return one MultiAgentResult containing result and next. result.status must be "completed" or "failed", including when delegating; result.answer must be non-empty. Express delegation through next, never through a "delegating" status. Only use agent IDs from the current next_agents. Example agent IDs are placeholders, not authorization. Use empty next to finish a worker task; the scheduler automatically delivers its report to the caller. An explicit return to caller requires that caller in next_agents and exactly one handoff to that caller. completion_criteria is a list of strings. Copy only the output document for the matching scenario, adapting its content to the current task.
 
 Line Protocol: Return exactly one outer BEGIN RESULT / END RESULT block. Put the nested RESULT and every NEXT block inside it, closing the outer block last. No blank lines, comments, indentation or Markdown fences are allowed inside the output document. Each field occupies one physical line; JSON-escape newlines inside strings as \n. Repeat COMPLETION_CRITERIA for multiple criteria. When entry completion criteria generation is requested, put ENTRY_COMPLETION_CRITERIA directly in the outer RESULT, alongside the nested RESULT and NEXT blocks; never put it inside the nested RESULT containing STATUS and ANSWER. Omit NEXT for an empty next list; omit OBSERVATION and COMPLETION_EVIDENCE for empty lists. Do not emit array or object literals.
 
@@ -112,4 +117,13 @@ TASK="Decide whether to use another source or report the missing input."
 COMPLETION_CRITERIA="Account for the unavailable source in the final answer."
 CONTEXT="Inspection failed: lib/app.dart was not found; no hierarchy was verified."
 END NEXT
+END RESULT
+
+Example 5 input: Finish a successful parallel task. Assume caller is coordinator and next_agents is empty. The scheduler delivers this report to coordinator automatically; omit every NEXT block.
+Example 5 output:
+BEGIN RESULT
+BEGIN RESULT
+STATUS="completed"
+ANSWER="The root widget is App; App builds HomePage. Verified in lib/app.dart."
+END RESULT
 END RESULT`

@@ -1,5 +1,5 @@
 name: react
-# info 显示上下文和工具结果；error 仍显示工具调用名称、ID、参数和 LLM response text。
+# debug 额外显示流式文本片段；info 显示上下文和工具结果；error 仍显示工具调用和完整响应文本。
 log_level: info
 base:
   llm:
@@ -7,6 +7,8 @@ base:
     api_key_env: OPENAI_API_KEY
     model: your-model
     output_schema: json_llm_output
+    # true 使用流式返回；debug 打印片段，所有级别均在完成后打印完整响应文本。
+    stream: false
   allow_tools:
     - read_file
     - list_dir

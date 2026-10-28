@@ -20,6 +20,7 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/packages/ssestream"
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
 )
@@ -27,7 +28,13 @@ import (
 // ErrEmptyResponse 区分正常空文本与协议解析失败，由调用方决定是否继续。
 var ErrEmptyResponse = errors.New("response output is empty")
 
+// responsesApiClient delegates transport selection while sharing request and output behavior.
 type responsesApiClient[T any] struct {
+	*baseResponsesApiClient[T]
+}
+
+type baseResponsesApiClient[T any] struct {
+	strategy        responseStrategy
 	client          *openai.Client
 	agentConfig     *config.AgentConfig
 	contextLogLabel string
@@ -36,23 +43,23 @@ type responsesApiClient[T any] struct {
 	logLevel        config.LogLevel
 }
 
-func (c *responsesApiClient[T]) SetLogLevel(level config.LogLevel) {
+func (c *baseResponsesApiClient[T]) SetLogLevel(level config.LogLevel) {
 	c.logLevel = level
 }
 
 // SetContextLogLabel 仅标记当前客户端的上下文日志，不修改任务 ID 或模型请求。
-func (c *responsesApiClient[T]) SetContextLogLabel(label string) {
+func (c *baseResponsesApiClient[T]) SetContextLogLabel(label string) {
 	c.contextLogLabel = label
 }
 
 // SetSystemPrompt 将系统指令作为独立的 system 消息发送。
-func (c *responsesApiClient[T]) SetSystemPrompt(prompt string) {
+func (c *baseResponsesApiClient[T]) SetSystemPrompt(prompt string) {
 	c.systemPrompt = prompt
 }
 
 // SetCorrectionMessages 将运行内的纠错提示作为正文之后的独立 user 消息发送。
 // 复制切片，避免调用方后续追加时改变当前请求的消息快照。
-func (c *responsesApiClient[T]) SetCorrectionMessages(corrections []string) {
+func (c *baseResponsesApiClient[T]) SetCorrectionMessages(corrections []string) {
 	c.corrections = slices.Clone(corrections)
 }
 
@@ -77,10 +84,15 @@ func NewResponsesApiClient[T any](llmConfig *config.LLMConfig, allowTools map[co
 		option.WithAPIKey(llmConfig.ApiKey),
 		option.WithBaseURL(llmConfig.BaseUrl),
 	)
-	c := &responsesApiClient[T]{
+	var strategy responseStrategy = nonStreamingResponseStrategy{}
+	if llmConfig.Stream {
+		strategy = streamingResponseStrategy{}
+	}
+	c := &responsesApiClient[T]{baseResponsesApiClient: &baseResponsesApiClient[T]{
+		strategy:    strategy,
 		agentConfig: &config.AgentConfig{LLMConfig: llmConfig, AllowTools: allowTools},
 		client:      &client,
-	}
+	}}
 	return c, nil
 }
 
@@ -88,7 +100,7 @@ func NewResponsesApiClient[T any](llmConfig *config.LLMConfig, allowTools map[co
 // Responses without tool calls are parsed into T.
 // A nil MCP session sends a request without tools.
 // 方法不能独立声明泛型参数，因此在创建客户端时指定结果类型
-func (c *responsesApiClient[T]) Run(ctx context.Context, taskId, input string, mcpClientSess *sdk.ClientSession) (T, []responses.ResponseFunctionToolCall, string, error) {
+func (c *baseResponsesApiClient[T]) Run(ctx context.Context, taskId, input string, mcpClientSess *sdk.ClientSession) (T, []responses.ResponseFunctionToolCall, string, error) {
 	return c.RunWithToolMessages(ctx, taskId, input, mcpClientSess, nil)
 }
 
@@ -100,7 +112,7 @@ type ToolMessage struct {
 }
 
 // RunWithToolMessages 原样发送调用方组装的 input；格式约束和末尾上下文由调用方负责。
-func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId, input string, mcpClientSess *sdk.ClientSession, messages []ToolMessage) (T, []responses.ResponseFunctionToolCall, string, error) {
+func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId, input string, mcpClientSess *sdk.ClientSession, messages []ToolMessage) (T, []responses.ResponseFunctionToolCall, string, error) {
 	var result T
 	var outputParser LLMOutputParser[*T]
 	var textConfig responses.ResponseTextConfigParam
@@ -211,7 +223,13 @@ func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId,
 	}
 	// Middleware 位于 SDK 重试循环内；正文只随 SDK 的 Read 被动收集，不能抢先读取并阻塞重试。
 	var attemptBodies []*usageBody
-	response, err := c.client.Responses.New(ctx, params, option.WithMiddleware(func(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+	var onTextDelta func(string)
+	if c.logLevel == config.DebugLogLevel {
+		onTextDelta = func(delta string) {
+			fmt.Fprintf(os.Stderr, "task %s: LLM response text delta=%s\n", taskId, delta)
+		}
+	}
+	response, err := c.strategy.create(ctx, c.client, params, onTextDelta, option.WithMiddleware(func(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
 		resp, requestErr := next(req)
 		status := "unknown"
 		if requestErr != nil {
@@ -221,14 +239,29 @@ func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId,
 		}
 		record := func(body []byte, readErr error) {
 			usageResponse := &responses.Response{}
-			// 只有完整读到 EOF 才解析统计；SDK 直接关闭的重试正文保持 unknown，不额外读取。
-			if readErr == io.EOF {
+			// SSE 的终态事件本身已完整；[DONE]、取消或断连不保证 HTTP EOF。
+			// 仅解析 SDK 已读取的数据，绝不主动读取被丢弃的重试正文。
+			if resp != nil && strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+				decoder := ssestream.NewDecoder(&http.Response{Header: resp.Header, Body: io.NopCloser(bytes.NewReader(body))})
+				defer decoder.Close()
+				for decoder.Next() {
+					var event responses.ResponseStreamEventUnion
+					if json.Unmarshal(decoder.Event().Data, &event) == nil {
+						switch event.Type {
+						case "response.completed", "response.failed", "response.incomplete":
+							*usageResponse = event.Response
+						}
+					}
+				}
+			} else if readErr == io.EOF {
+				// JSON 正文仍须读到 EOF，避免把不完整响应当作有效统计。
 				if json.Unmarshal(body, usageResponse) != nil {
 					usageResponse = &responses.Response{}
 				}
-			} else if readErr != nil {
+			}
+			if readErr != nil && readErr != io.EOF {
 				status = attemptErrorStatus(readErr)
-			} else if req.Context().Err() != nil {
+			} else if readErr != io.EOF && req.Context().Err() != nil {
 				status = attemptErrorStatus(req.Context().Err())
 			}
 			if usageResponse.Status == "" {
@@ -317,7 +350,7 @@ func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId,
 	return result, toolCalls, "", nil
 }
 
-func (c *responsesApiClient[T]) logResponseUsage(taskID, model string, response *responses.Response) {
+func (c *baseResponsesApiClient[T]) logResponseUsage(taskID, model string, response *responses.Response) {
 	input, output, cached, uncached := "unknown", "unknown", "unknown", "unknown"
 	u := response.Usage
 	// SDK 数值零值不能区分缺失/null 与显式 0，必须检查字段元数据。
@@ -382,4 +415,46 @@ func attemptErrorStatus(err error) string {
 		return "canceled"
 	}
 	return "network_error"
+}
+
+// responseStrategy isolates transport; both strategies return the same complete response.
+type responseStrategy interface {
+	create(context.Context, *openai.Client, responses.ResponseNewParams, func(string), ...option.RequestOption) (*responses.Response, error)
+}
+
+type nonStreamingResponseStrategy struct{}
+
+func (nonStreamingResponseStrategy) create(ctx context.Context, client *openai.Client, params responses.ResponseNewParams, _ func(string), opts ...option.RequestOption) (*responses.Response, error) {
+	return client.Responses.New(ctx, params, opts...)
+}
+
+type streamingResponseStrategy struct{}
+
+func (streamingResponseStrategy) create(ctx context.Context, client *openai.Client, params responses.ResponseNewParams, onTextDelta func(string), opts ...option.RequestOption) (*responses.Response, error) {
+	stream := client.Responses.NewStreaming(ctx, params, opts...)
+	defer stream.Close()
+	var response *responses.Response
+	for stream.Next() {
+		event := stream.Current()
+		switch event.Type {
+		case "response.output_text.delta":
+			// 仅转发正文片段；工具参数、推理片段和最终完整文本由各自路径处理。
+			if onTextDelta != nil && event.Delta != "" {
+				onTextDelta(event.Delta)
+			}
+		case "response.completed", "response.failed", "response.incomplete":
+			// Terminal events carry the authoritative full text, tool calls and usage.
+			final := event.Response
+			response = &final
+		case "error":
+			return nil, fmt.Errorf("stream error: %s", event.RawJSON())
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return nil, err
+	}
+	if response == nil {
+		return nil, errors.New("stream ended without a terminal response")
+	}
+	return response, nil
 }

@@ -65,7 +65,9 @@ func normalizeFewShotSlices(value reflect.Value) {
 func TestContextFewShotsMatchResultSchemas(t *testing.T) {
 	t.Run("multi-agent", func(t *testing.T) {
 		ctx := fileContext.MultiAgentModelContext{ReactContext: fileContext.NewReactContext(&fileContext.DurableState{})}
-		checkContextFewShots[MultiAgentResult](t, ctx, 4)
+		// 最后一个示例由调度器自动回传报告，无需显式 handoff。
+		wantHandoffs := []int{2, 1, 0, 1, 0}
+		checkContextFewShots[MultiAgentResult](t, ctx, len(wantHandoffs))
 		sections := strings.Split(ctx.LineProtocolFewShot(), " output:\n")[1:]
 		for i, section := range sections {
 			var got MultiAgentResult
@@ -76,7 +78,7 @@ func TestContextFewShotsMatchResultSchemas(t *testing.T) {
 			if i == 3 {
 				wantStatus = FailedReactStatus
 			}
-			if got.Result.Status != wantStatus || got.Result.Answer == "" || len(got.Next) != []int{2, 1, 0, 1}[i] {
+			if got.Result.Status != wantStatus || got.Result.Answer == "" || len(got.Next) != wantHandoffs[i] {
 				t.Fatalf("invalid multi-agent scenario %d: %+v", i+1, got)
 			}
 			if i == 0 && len(got.EntryCompletionCriteria) == 0 {

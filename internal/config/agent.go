@@ -110,8 +110,8 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 	if raw.LogLevel == "" {
 		raw.LogLevel = InfoLogLevel
 	}
-	if raw.LogLevel != InfoLogLevel && raw.LogLevel != ErrorLogLevel {
-		return nil, fmt.Errorf("unknown log_level %q: must be info or error", raw.LogLevel)
+	if raw.LogLevel != DebugLogLevel && raw.LogLevel != InfoLogLevel && raw.LogLevel != ErrorLogLevel {
+		return nil, fmt.Errorf("unknown log_level %q: must be debug, info or error", raw.LogLevel)
 	}
 	if raw.Name != "react" && raw.Name != "plan-execute" && raw.Name != "multi-agent" {
 		return nil, fmt.Errorf("unknown agent type %q", raw.Name)
@@ -254,7 +254,7 @@ func resolveLLM(raw yamlLLMConfig) (*LLMConfig, error) {
 	if baseURL == "" {
 		baseURL = "https://api.openai.com/v1"
 	}
-	return &LLMConfig{BaseUrl: baseURL, ApiKey: key, Model: raw.Model, OutputSchema: LLMOutputSchema(output)}, nil
+	return &LLMConfig{Stream: raw.Stream, BaseUrl: baseURL, ApiKey: key, Model: raw.Model, OutputSchema: LLMOutputSchema(output)}, nil
 }
 
 func rejectNull(node *yaml.Node) error {
@@ -284,6 +284,7 @@ type yamlAgentSettings struct {
 	SysPrompt   *string        `yaml:"sys_prompt"`
 }
 type yamlLLMConfig struct {
+	Stream       bool   `yaml:"stream"`
 	BaseURL      string `yaml:"base_url"`
 	ApiKey       string `yaml:"api_key"`
 	ApiKeyEnv    string `yaml:"api_key_env"`

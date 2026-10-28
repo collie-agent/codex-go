@@ -40,6 +40,7 @@ base:
     api_key_env: OPENAI_API_KEY
     model: your-model
     output_schema: json_llm_output
+    stream: false # true 使用流式 Responses API；debug 额外打印文本片段
   allow_tools: [read_file, list_dir, glob, grep, apply_patch]
   sys_prompt: "只处理用户要求的任务，完成时说明修改结果。"
 ```
@@ -207,9 +208,10 @@ planner 首次调用模型生成至少一个有序步骤，每步包含：
 ## 配置规则
 
 - 顶层支持 `name`、`log_level`、`base`、`agents` 和 `multi-agent`。`name` 必填，支持 `react`、`plan-execute` 和 `multi-agent`；`base` 必须提供完整有效的 `llm`。多代理模式必须提供 `multi-agent` 执行限制及入口节点，其他模式的 `agents` 可省略或为空。
-- `log_level` 可设为 `info`（默认）或 `error`，对所有代理生效。`info` 显示 LLM 上下文、JSON schema 和工具调用结果；`error` 隐藏这些详情。两种级别都显示工具调用名称、调用 ID 和完整参数，以及 `LLM response text`，包括工具调用轮次中的非空响应文本。编排器不输出分析器模式日志。
+- `log_level` 可设为 `debug`、`info`（默认）或 `error`，对所有代理生效。`info` 显示 LLM 上下文、JSON schema 和工具调用结果；`error` 隐藏这些详情。所有级别都显示工具调用名称、调用 ID 和完整参数，以及 `LLM response text`，包括工具调用轮次中的非空响应文本。`debug` 包含 `info` 日志，并在流式返回期间实时打印 `LLM response text delta` 片段；完成后仍打印完整文本。编排器不输出分析器模式日志。
 - 普通模式的 `agents` 只接受 `react`、`observe`、`plan`；多代理模式接受自定义节点名称（保留 `base`），`next_agents` 必须引用已配置节点。每个节点分别从自身设置和 `base` 解析，不会继承其他节点的独立设置；未设置某项时逐项回退到 base。
 - 工具调用失败时，两种日志级别都打印 `[react] tool calling error`，包括执行错误、参数校验错误及调用被拒绝的错误；成功结果详情仍仅在 `info` 级别显示。
+- `llm.stream` 默认 `false`；设为 `true` 使用流式返回。流式完成后统一解析结果和工具调用，在 `info/error` 级别仅打印完整响应文本，`debug` 额外打印流式文本片段。
 - `llm` 是整块替换。提供独立 `llm` 后，base 中未列出的 LLM 字段不会回退；`model` 必填，`base_url` 默认 `https://api.openai.com/v1`，`output_schema` 默认 `json_llm_output`，也支持 `line_protocol_llm_output`。
 - `allow_tools` 列表整体替换，不与 base 合并。省略时回退到 base，显式 `[]` 禁用工具。合法工具为 `read_file`、`list_dir`、`glob`、`grep`、`apply_patch` 和 `exec`。
 - `sys_prompt` 省略时回退到 base；显式 `""` 清除自定义提示词。`instruction` 是其别名，二者不可同时提供。最终非空自定义提示词会追加在对应代理的内置提示词后。
