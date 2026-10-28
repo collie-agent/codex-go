@@ -165,7 +165,7 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 				if toolCallErrors > maxToolCallErrors {
 					return zero, nil, fmt.Errorf("ReAct turn %d: tool call errors exceeded limit (%d): %w", i, maxToolCallErrors, err)
 				}
-				rc.AppendReportedErrors(fmt.Sprintf("LLM tool call error (%d/%d): %v. Retry using only the supplied native tools with their exact names and valid JSON arguments. If the task is complete, return the result as final text in the required output format; BEGIN RESULT is a text delimiter, not a tool name. The rejected batch was not executed.", toolCallErrors, maxToolCallErrors, err))
+				worker.corrections = append(worker.corrections, fmt.Sprintf("LLM tool call error (%d/%d): %v. Retry using only the supplied native tools with their exact names and valid JSON arguments. If the task is complete, return the result as final text in the required output format; BEGIN RESULT is a text delimiter, not a tool name. The rejected batch was not executed.", toolCallErrors, maxToolCallErrors, err))
 				continue
 			}
 			var parseErr *provider.OutputParseError
@@ -176,7 +176,8 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 			if formatErrors > maxOutputFormatErrors {
 				return zero, nil, fmt.Errorf("ReAct turn %d: output format errors exceeded limit (%d): %w", i, maxOutputFormatErrors, err)
 			}
-			rc.AppendReportedErrors(outputFormatCorrection(formatErrors, err, parseErr))
+			// 纠错仅属于本次运行的消息历史，不混入工具观察的 ReportedErrors。
+			worker.corrections = append(worker.corrections, outputFormatCorrection(formatErrors, err, parseErr))
 		}
 		if len(toolParams) == 0 {
 			if err := validate(result); err != nil {

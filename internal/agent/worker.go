@@ -20,6 +20,7 @@ type Worker[T LLMSchema] struct {
 	ctx           context.Context
 	agentConfig   *config.AgentConfig
 	mcpClientSess *mcpSdk.ClientSession
+	corrections   []string
 }
 
 // toolCallError 表示模型生成的调用不合法，可反馈纠正；请求和传输错误不属于此类。
@@ -54,6 +55,7 @@ func (w *Worker[T]) Run(modelContext fileContext.Contexter) (T, string, []*mcpSd
 	client.SetLogLevel(w.agentConfig.LogLevel)
 	// 输出协议和示例属于系统指令，状态正文始终位于工具结果之后。
 	client.SetSystemPrompt(appendContextFewShot(request.SystemPrompt, modelContext, w.agentConfig.LLMConfig.OutputSchema))
+	client.SetCorrectionMessages(w.corrections)
 	input := request.Input
 	// 调用方提供的末尾上下文紧随正文。
 	if request.TrailingContext != "" {

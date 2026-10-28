@@ -213,7 +213,7 @@ func TestObserveRetriesOutputParseErrors(t *testing.T) {
 					var request struct {
 						Input string `json:"input"`
 					}
-					if err := decodeModelRequest(req.Body, &request); err != nil {
+					if err := decodeCorrectionRequest(t, req.Body, &request, calls-1, "LLM output format error"); err != nil {
 						t.Error(err)
 					}
 					for _, want := range []string{"inspect notes", "previous fact", "previous error", "call_read", "hello", "custom observer prompt"} {

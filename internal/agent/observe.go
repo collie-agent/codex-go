@@ -54,6 +54,7 @@ func (o *ObserveProcess[T]) Run(agentConfig *config.AgentConfig, durableState *f
 	systemPrompt := appendContextFewShot(request.SystemPrompt, &observationContext, agentConfig.LLMConfig.OutputSchema)
 	client.SetSystemPrompt(systemPrompt)
 	input := request.Input
+	var corrections []string
 	for formatErrors := 0; ; {
 		if err := o.ctx.Err(); err != nil {
 			return zero, nil, fmt.Errorf("task %s: observation: %w", taskID, err)
@@ -68,9 +69,9 @@ func (o *ObserveProcess[T]) Run(agentConfig *config.AgentConfig, durableState *f
 			if formatErrors > maxOutputFormatErrors {
 				return zero, nil, fmt.Errorf("task %s: observation: output format errors exceeded limit (%d): %w", taskID, maxOutputFormatErrors, err)
 			}
-			// 纠错信息仅追加到本次 observe 请求，不修改输入快照或混入工具事实。
-			systemPrompt += "\n\n# Output format correction\n\n" + outputFormatCorrection(formatErrors, err, parseErr)
-			client.SetSystemPrompt(systemPrompt)
+			// 纠错独立于系统指令和观察快照，后续重试保留此前的纠错消息。
+			corrections = append(corrections, outputFormatCorrection(formatErrors, err, parseErr))
+			client.SetCorrectionMessages(corrections)
 			continue
 		}
 		if len(toolCalls) > 0 {

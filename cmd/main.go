@@ -58,7 +58,7 @@ func resumeAgent(configPath, runID, workspace string, timeout time.Duration, run
 		return err
 	}
 	for _, result := range results {
-		fmt.Println(result.Answer)
+		fmt.Printf("final answer: %s\n", result.Answer)
 	}
 	return nil
 }
@@ -76,7 +76,7 @@ func runAgentInConversation(configPath, task, workspace, convID string, timeout 
 		return err
 	}
 	for _, result := range results {
-		fmt.Println(result.Answer)
+		fmt.Printf("final answer: %s\n", result.Answer)
 	}
 	return nil
 }

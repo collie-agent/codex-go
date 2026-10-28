@@ -148,6 +148,37 @@ func TestReactExistingCriteriaHideUpdateTool(t *testing.T) {
 	}
 }
 
+func TestReactCanCompleteWithoutCompletionCriteria(t *testing.T) {
+	for _, schema := range []config.LLMOutputSchema{config.JsonLLMOutputSchema, config.LineProtocolLLMOutputSchema} {
+		t.Run(string(schema), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req struct{ Input json.RawMessage }
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					t.Error(err)
+				}
+				if !strings.Contains(string(req.Input), "验收标准是可选的") || strings.Contains(string(req.Input), "返回最终结果前必须单独调用 update_completion_criteria") {
+					t.Error("model instructions must allow completing without setting criteria")
+				}
+				text := `{"status":"completed","answer":"done"}`
+				if schema == config.LineProtocolLLMOutputSchema {
+					text = "BEGIN RESULT\nSTATUS=\"completed\"\nANSWER=\"done\"\nEND RESULT"
+				}
+				criteriaResponse(w, text)
+			}))
+			defer server.Close()
+			process, err := agent.NewReactProcess[agent.ReactResult](t.Context(), filemcp.Config{Workspace: t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := &config.AgentConfig{LogLevel: config.ErrorLogLevel, LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: schema}}
+			got, next, err := process.Run(cfg, &state.DurableState{RunId: "optional-criteria", Goal: "answer"})
+			if err != nil || got.Status != agent.CompletedReactStatus || got.Answer != "done" || !reflect.DeepEqual(next, []agent.AgentProcessorType{agent.EndAgentType}) {
+				t.Fatalf("result=%+v next=%v err=%v", got, next, err)
+			}
+		})
+	}
+}
+
 func TestReactTextResponseCannotSetCompletionCriteria(t *testing.T) {
 	for _, schema := range []config.LLMOutputSchema{config.JsonLLMOutputSchema, config.LineProtocolLLMOutputSchema} {
 		t.Run(string(schema), func(t *testing.T) {
@@ -169,8 +200,12 @@ func TestReactTextResponseCannotSetCompletionCriteria(t *testing.T) {
 			if len(durable.CompletionCriteria) != 0 {
 				t.Fatalf("text response updated criteria: %v", durable.CompletionCriteria)
 			}
-			if err == nil {
-				t.Fatal("run completed without calling update_completion_criteria")
+			// JSON 忽略未知字段；行协议仍拒绝未声明的字段，均不得写入标准。
+			if schema == config.JsonLLMOutputSchema && err != nil {
+				t.Fatalf("optional criteria must not prevent completion: %v", err)
+			}
+			if schema == config.LineProtocolLLMOutputSchema && err == nil {
+				t.Fatal("line protocol accepted an undeclared field")
 			}
 		})
 	}

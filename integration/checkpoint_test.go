@@ -102,7 +102,7 @@ func TestAgentCommandsPersistSuccessfulRuns(t *testing.T) {
 		if err := json.Unmarshal(saved.Result, &result); err != nil {
 			t.Fatal(err)
 		}
-		if stdout.String() != "done\n" || saved.Status != "completed" || saved.ConvID != ids[2] || saved.Goal != "inspect" || saved.Mode != "react" || saved.Workspace != workspace || result.Answer != "done" || len(result.Observation) != 1 || result.Observation[0] != "found README" || len(result.CompletionEvidence) != 1 || result.CompletionEvidence[0] != "read README" {
+		if stdout.String() != "final answer: done\n" || saved.Status != "completed" || saved.ConvID != ids[2] || saved.Goal != "inspect" || saved.Mode != "react" || saved.Workspace != workspace || result.Answer != "done" || len(result.Observation) != 1 || result.Observation[0] != "found README" || len(result.CompletionEvidence) != 1 || result.CompletionEvidence[0] != "read README" {
 			t.Fatalf("stdout=%q, run=%+v, result=%+v", &stdout, saved, result)
 		}
 	}

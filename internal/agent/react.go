@@ -73,9 +73,6 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 		agentConfig.AllowTools[config.SwitchToPlanExecuteMCPToolName] = struct{}{}
 	}
 	validate := func(result T) error {
-		if modelContext.NeedsCompletionCriteria() {
-			return fmt.Errorf("ReAct requires update_completion_criteria before returning a result")
-		}
 		reactResult, ok := any(result).(ReactResult)
 		if !ok {
 			return nil
@@ -106,7 +103,7 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 			}
 			return nil, true, nil
 		}
-		// 允许先通过工具收集上下文；标准仅在返回最终结果前强制校验。
+		// 普通工具收集上下文；运行级验收标准由模型按需设置。
 		if len(params) != 1 || params[0].Name != string(config.SwitchToPlanExecuteMCPToolName) {
 			return nil, false, nil
 		}

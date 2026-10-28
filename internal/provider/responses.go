@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +32,7 @@ type responsesApiClient[T any] struct {
 	agentConfig     *config.AgentConfig
 	contextLogLabel string
 	systemPrompt    string
+	corrections     []string
 	logLevel        config.LogLevel
 }
 
@@ -46,6 +48,12 @@ func (c *responsesApiClient[T]) SetContextLogLabel(label string) {
 // SetSystemPrompt 将系统指令作为独立的 system 消息发送。
 func (c *responsesApiClient[T]) SetSystemPrompt(prompt string) {
 	c.systemPrompt = prompt
+}
+
+// SetCorrectionMessages 将运行内的纠错提示作为正文之后的独立 user 消息发送。
+// 复制切片，避免调用方后续追加时改变当前请求的消息快照。
+func (c *responsesApiClient[T]) SetCorrectionMessages(corrections []string) {
+	c.corrections = slices.Clone(corrections)
 }
 
 // OutputParseError 区分可由模型纠正的输出格式错误和请求、配置等运行错误。
@@ -158,8 +166,8 @@ func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId,
 		// 当前请求不重放 reasoning 项，显式关闭思考模式以支持后续工具结果回传。
 		Reasoning: shared.ReasoningParam{Effort: shared.ReasoningEffortNone},
 	}
-	if len(messages) > 0 || c.systemPrompt != "" {
-		items := make(responses.ResponseInputParam, 0, 2*len(messages)+1)
+	if len(messages) > 0 || c.systemPrompt != "" || len(c.corrections) > 0 {
+		items := make(responses.ResponseInputParam, 0, 2*len(messages)+2+len(c.corrections))
 		// 系统指令独立于任务数据，工具重放时也保持相同角色。
 		if c.systemPrompt != "" {
 			items = append(items, responses.ResponseInputItemParamOfMessage(c.systemPrompt, responses.EasyInputMessageRoleSystem))
@@ -182,8 +190,11 @@ func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId,
 			output.OfFunctionCallOutput.CallID = openai.String(message.ToolCallID)
 			items = append(items, output)
 		}
-		// 先重放原生工具调用及结果，再提供本轮最新状态，保持状态区块位于 context 末尾。
+		// 工具历史之后提供最新状态；纠错提示单独置于状态之后。
 		items = append(items, responses.ResponseInputItemParamOfMessage(input, responses.EasyInputMessageRoleUser))
+		for _, correction := range c.corrections {
+			items = append(items, responses.ResponseInputItemParamOfMessage(correction, responses.EasyInputMessageRoleUser))
+		}
 		params.Input = responses.ResponseNewParamsInputUnion{OfInputItemList: items}
 	}
 	// 从最终请求生成可读日志；单次日志调用避免并发请求交错。
@@ -278,6 +289,19 @@ func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId,
 		fmt.Fprintf(os.Stderr, "task %s: LLM response text=%s\n", taskId, text)
 	}
 	if len(toolCalls) > 0 {
+		// 普通说明可以伴随工具调用；可解析的最终结果与工具调用互斥。
+		// 在返回任何调用前整批拒绝，避免执行副作用后再发现完成声明冲突。
+		document := text
+		if c.agentConfig.LLMConfig.OutputSchema == config.LineProtocolLLMOutputSchema {
+			document = lineProtocolResponseDocument(text)
+		}
+		var finalResult T
+		if strings.TrimSpace(document) != "" && outputParser.Parse(document, &finalResult) == nil {
+			return result, nil, "", fmt.Errorf("task %s: %w", taskId, &OutputParseError{
+				Output: text,
+				Err:    errors.New("response contains both a final result and tool calls; the rejected tool batch was not executed. Return only the final result if the task is complete, or only tool calls with optional explanatory text if more work is needed"),
+			})
+		}
 		return result, toolCalls, text, nil
 	}
 	if strings.TrimSpace(text) == "" {

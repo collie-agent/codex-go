@@ -59,6 +59,6 @@ func main() {
 		os.Exit(1)
 	}
 	for _, result := range results {
-		fmt.Println(result.Answer)
+		fmt.Printf("final answer: %s\n", result.Answer)
 	}
 }

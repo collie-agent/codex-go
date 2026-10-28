@@ -134,15 +134,30 @@ func TestReactRetriesOutputParseErrors(t *testing.T) {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 					calls++
 					var request struct {
-						Input string `json:"input"`
+						Input []struct {
+							Role    string `json:"role"`
+							Content string `json:"content"`
+						} `json:"input"`
 					}
-					if err := decodeModelRequest(req.Body, &request); err != nil {
+					if err := json.NewDecoder(req.Body).Decode(&request); err != nil {
 						t.Error(err)
 					}
-					if calls > 1 {
+					if len(request.Input) != calls+1 {
+						t.Errorf("messages = %d, want %d (system, state, corrections)", len(request.Input), calls+1)
+					}
+					for index, message := range request.Input {
+						if index < 2 {
+							if strings.Contains(message.Content, "LLM output format error") || strings.Contains(message.Content, "Previous invalid response") {
+								t.Errorf("correction mixed into system/state: %s", message.Content)
+							}
+							continue
+						}
+						if message.Role != "user" {
+							t.Errorf("correction role = %q, want user", message.Role)
+						}
 						for _, want := range []string{wantError, "Retry", "broken"} {
-							if !strings.Contains(request.Input, want) {
-								t.Errorf("retry input missing %q: %s", want, request.Input)
+							if !strings.Contains(message.Content, want) {
+								t.Errorf("correction missing %q: %s", want, message.Content)
 							}
 						}
 					}
@@ -443,7 +458,7 @@ func TestReactRetriesInvalidToolCalls(t *testing.T) {
 				var request struct {
 					Input string `json:"input"`
 				}
-				if err := decodeModelRequest(req.Body, &request); err != nil {
+				if err := decodeCorrectionRequest(t, req.Body, &request, calls-1, "LLM tool call error"); err != nil {
 					t.Error(err)
 				}
 				if calls > 1 {
