@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/collie-agent/codex-go/internal/testutil"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -62,6 +63,9 @@ func TestAgentCommandsPersistSuccessfulRuns(t *testing.T) {
 	db, store := persistenceStore(t)
 	_ = db
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if testutil.RespondWithCriteria(t, w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"id":"resp_final","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"{\"status\":\"completed\",\"answer\":\"done\",\"Observation\":[\"found README\"],\"CompletionEvidence\":[\"read README\"]}"}]}]}`)
 	}))
@@ -151,8 +155,11 @@ func TestServerDefaultsToReactWithoutAnalyzer(t *testing.T) {
 	_, store := persistenceStore(t)
 	var observed atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if testutil.RespondWithCriteria(t, w, r) {
+			return
+		}
 		var request struct{ Model, Input string }
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		if err := decodeModelRequest(r.Body, &request); err != nil {
 			t.Error(err)
 			return
 		}
@@ -167,7 +174,7 @@ func TestServerDefaultsToReactWithoutAnalyzer(t *testing.T) {
 				return
 			}
 			run, err := store.Get(context.Background(), ids[1])
-			if err != nil || run.Status != "running" || run.Mode != "react" || len(run.CompletionCriteria) != 0 {
+			if err != nil || run.Status != "running" || run.Mode != "react" || len(run.CompletionCriteria) != 1 {
 				t.Errorf("run was not checkpointed before execution: %+v, %v", run, err)
 			}
 			observed.Store(true)
@@ -215,8 +222,11 @@ func TestCheckpointFailureStopsToolsAndSuppressesUnsavedAnswers(t *testing.T) {
 				workspace := t.TempDir()
 				var requests atomic.Int32
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if testutil.RespondWithCriteria(t, w, r) {
+						return
+					}
 					var req struct{ Input json.RawMessage }
-					if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					if err := decodeModelRequest(r.Body, &req); err != nil {
 						t.Error(err)
 						return
 					}
@@ -293,8 +303,11 @@ func TestAgentCommandsRetainFailedRunsInExistingConversation(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if testutil.RespondWithCriteria(t, w, r) {
+			return
+		}
 		var req struct{ Input string }
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := decodeModelRequest(r.Body, &req); err != nil {
 			t.Error(err)
 			return
 		}
@@ -389,8 +402,11 @@ func TestAgentCommandsResumeSavedPlanAndSkipCompletedSteps(t *testing.T) {
 	_, store := persistenceStore(t)
 	t.Setenv("CODEX_MYSQL_URL", os.Getenv("CODEX_TEST_MYSQL_URL"))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if testutil.RespondWithCriteria(t, w, r) {
+			return
+		}
 		var req struct{ Model, Input string }
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := decodeModelRequest(r.Body, &req); err != nil {
 			t.Error(err)
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -452,8 +468,11 @@ func TestAgentCommandsResumeFailedReactRunAndReplayCompletedResult(t *testing.T)
 	t.Setenv("CODEX_MYSQL_URL", os.Getenv("CODEX_TEST_MYSQL_URL"))
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if testutil.RespondWithCriteria(t, w, r) {
+			return
+		}
 		var req struct{ Model, Input string }
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := decodeModelRequest(r.Body, &req); err != nil {
 			t.Error(err)
 			w.WriteHeader(http.StatusBadRequest)
 			return

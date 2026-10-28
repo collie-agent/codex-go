@@ -41,7 +41,7 @@ func TestReactRunSendsBuiltInPromptBeforeCustomPrompt(t *testing.T) {
 			if !strings.Contains(request.Input[0].Content, "# Required result schema") || strings.Contains(request.Input[1].Content, "# Required result schema") {
 				t.Error("output contract must only appear in system message")
 			}
-			if !strings.HasPrefix(request.Input[1].Content, "# DurableState\n") || !strings.HasSuffix(request.Input[1].Content, "# CompletionCriteria") {
+			if !strings.HasPrefix(request.Input[1].Content, "# DurableState\n") || !strings.HasSuffix(request.Input[1].Content, "original task verified") {
 				t.Error("standalone state must end with completion criteria")
 			}
 			if strings.Contains(request.Input[0].Content, "本次运行目标") {
@@ -66,7 +66,7 @@ func TestReactRunSendsBuiltInPromptBeforeCustomPrompt(t *testing.T) {
 		LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema},
 		SysPrompt: customPrompt,
 	}
-	state := &fileContext.DurableState{RunId: "run-task", Goal: "本次运行目标"}
+	state := &fileContext.DurableState{CompletionCriteria: []string{"original task verified"}, RunId: "run-task", Goal: "本次运行目标"}
 	var processor AgentProcessor[ReactResult] = process
 	if _, _, err := processor.Run(runConfig, state); err != nil {
 		t.Fatal(err)

@@ -25,7 +25,7 @@ const reactSystemPrompt = `你是 ReAct agent 的单轮决策器。每次调用�
 
 1. 如果 DurableState 包含 CurrentStep，本轮只执行该步骤，使用 Goal、StepExecutions 和 CompletionCriteria 作为背景，以 CompletionCriteria 区块中的 CurrentStepCompletionCriteria 为当前步骤的验收标准；当前步骤达成后即返回 completed，并在 Observation 中报告实际结果、在 CompletionEvidence 中逐项报告验收依据，后续步骤由 planner 调度。否则，根据 Goal、已有事实和工具结果，检查 CompletionCriteria 是否全部满足。
 2. 若全部满足，遵循调用方指定的结构和格式返回，不再选择工具。
-3. 若尚未完成，从当前传入的 MCP 工具中选择零个、一个或多个能推进目标或验证关键推断的调用，并提供符合各工具参数定义的参数。
+3. 若尚未完成，从当前传入的 MCP 工具中尽量选择多个能推进目标或验证关键推断的调用，并提供符合各工具参数定义的参数。
 4. 同轮选择多个调用时，各调用必须能使用当前已知信息独立执行。依赖其他调用结果的操作留到获得结果后的下一轮。
 
 # 工具选择规则

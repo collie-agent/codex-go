@@ -158,7 +158,7 @@ func TestReactRetriesOutputParseErrors(t *testing.T) {
 				cfg := &config.AgentConfig{LLMConfig: &config.LLMConfig{
 					BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: schema,
 				}}
-				got, next, err := process.Run(cfg, &fileContext.DurableState{RunId: "retry-task", Goal: "answer"})
+				got, next, err := process.Run(cfg, &fileContext.DurableState{CompletionCriteria: []string{"original task verified"}, RunId: "retry-task", Goal: "answer"})
 				if calls != 4 {
 					t.Fatalf("requests = %d, want 4; err = %v", calls, err)
 				}
@@ -185,7 +185,7 @@ func TestReactDoesNotRetryRequestErrors(t *testing.T) {
 	cfg := &config.AgentConfig{LLMConfig: &config.LLMConfig{
 		BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema,
 	}}
-	_, _, err := process.Run(cfg, &fileContext.DurableState{RunId: "request-error"})
+	_, _, err := process.Run(cfg, &fileContext.DurableState{CompletionCriteria: []string{"original task verified"}, RunId: "request-error"})
 	if err == nil || !strings.Contains(err.Error(), "create response") || calls != 1 {
 		t.Fatalf("requests = %d, err = %v", calls, err)
 	}
@@ -258,8 +258,6 @@ func TestUpdateContext(t *testing.T) {
 	rc := fileContext.NewReactContext(nil)
 	retained := &fileContext.ToolResult{ToolName: "read_file", Result: "original"}
 	rc.AppendToolResult(retained)
-	rc.AppendToolResult(&fileContext.ToolResult{ToolName: "list_dir"})
-	rc.AppendToolResult(&fileContext.ToolResult{ToolName: "glob"})
 	r.updateContext(&mcpSdk.CallToolResult{
 		Content:           []mcpSdk.Content{&mcpSdk.TextContent{Text: "permission denied"}},
 		StructuredContent: map[string]any{"path": "a.go"},
@@ -464,7 +462,7 @@ func TestReactRetriesInvalidToolCalls(t *testing.T) {
 			defer server.Close()
 			process := &ReactProcess[ReactResult]{BaseReactProcess: BaseReactProcess[ReactResult]{ctx: t.Context(), maxTurn: 1}}
 			cfg := &config.AgentConfig{LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.LineProtocolLLMOutputSchema}}
-			got, _, err := process.Run(cfg, &fileContext.DurableState{RunId: "retry-tool-task", Goal: "answer"})
+			got, _, err := process.Run(cfg, &fileContext.DurableState{CompletionCriteria: []string{"original task verified"}, RunId: "retry-tool-task", Goal: "answer"})
 			if recover {
 				if err != nil || got.Answer != "done" || calls != 2 {
 					t.Fatalf("result=%+v calls=%d err=%v", got, calls, err)

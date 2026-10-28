@@ -23,6 +23,9 @@ import (
 	"github.com/openai/openai-go/v3/shared"
 )
 
+// ErrEmptyResponse 区分正常空文本与协议解析失败，由调用方决定是否继续。
+var ErrEmptyResponse = errors.New("response output is empty")
+
 type responsesApiClient[T any] struct {
 	client          *openai.Client
 	agentConfig     *config.AgentConfig
@@ -278,7 +281,7 @@ func (c *responsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId,
 		return result, toolCalls, text, nil
 	}
 	if strings.TrimSpace(text) == "" {
-		return result, nil, "", fmt.Errorf("task %s: response output is empty", taskId)
+		return result, nil, "", fmt.Errorf("task %s: %w", taskId, ErrEmptyResponse)
 	}
 	if c.agentConfig.LLMConfig.OutputSchema == config.LineProtocolLLMOutputSchema {
 		text = lineProtocolResponseDocument(text)

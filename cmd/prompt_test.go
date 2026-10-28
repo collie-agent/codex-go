@@ -1,7 +1,7 @@
 package main
 
 import (
-	"encoding/json"
+	"github.com/collie-agent/codex-go/internal/testutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,10 +17,13 @@ func TestRunAgentSendsYAMLSysPromptAfterBuiltInPrompt(t *testing.T) {
 
 	var requestInput string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if testutil.RespondWithCriteria(t, w, r) {
+			return
+		}
 		var request struct {
 			Input string `json:"input"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		if err := decodeModelRequest(r.Body, &request); err != nil {
 			t.Errorf("decode model request: %v", err)
 			return
 		}
@@ -54,10 +57,13 @@ func TestRunAgentKeepsBuiltInPromptWhenYAMLSysPromptIsEmpty(t *testing.T) {
 		t.Run(strings.ReplaceAll(sysPrompt, "\n", "empty"), func(t *testing.T) {
 			var requestInput string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if testutil.RespondWithCriteria(t, w, r) {
+					return
+				}
 				var request struct {
 					Input string `json:"input"`
 				}
-				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				if err := decodeModelRequest(r.Body, &request); err != nil {
 					t.Errorf("decode model request: %v", err)
 					return
 				}

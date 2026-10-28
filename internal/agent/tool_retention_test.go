@@ -1,0 +1,86 @@
+package agent
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/collie-agent/codex-go/internal/config"
+	fileContext "github.com/collie-agent/codex-go/internal/context"
+	filemcp "github.com/collie-agent/codex-go/internal/mcp"
+)
+
+func TestReactRetainsDiscoveryResultsForThreeTurns(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "sample.txt"), []byte("sample"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	turn := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		turn++
+		var request struct {
+			Input []struct {
+				Type   string `json:"type"`
+				CallID string `json:"call_id"`
+				Output string `json:"output"`
+			} `json:"input"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&request); err != nil {
+			t.Error(err)
+		}
+		for _, id := range []string{"discovery_glob", "discovery_list_dir"} {
+			calls, outputs := 0, 0
+			for _, item := range request.Input {
+				if item.CallID == id {
+					switch item.Type {
+					case "function_call":
+						calls++
+					case "function_call_output":
+						outputs++
+						if item.Output == "" {
+							t.Error("empty discovery result")
+						}
+					}
+				}
+			}
+			want := 0
+			if turn >= 2 && turn <= 4 {
+				want = 1
+			}
+			if calls != want || outputs != want {
+				t.Errorf("turn %d: %s call/result counts = %d/%d, want %d/%d", turn, id, calls, outputs, want, want)
+			}
+		}
+		call := func(id, name, args string) any {
+			return map[string]any{"type": "function_call", "id": "fc_" + id, "call_id": id, "name": name, "arguments": args}
+		}
+		switch turn {
+		case 1:
+			writeObservationResponse(w, []any{
+				call("discovery_glob", "glob", `{"pattern":"*.txt"}`),
+				call("discovery_list_dir", "list_dir", `{"path":"."}`),
+			})
+		case 2, 3, 4:
+			writeObservationResponse(w, []any{call(fmt.Sprintf("read_%d", turn), "read_file", `{"path":"sample.txt"}`)})
+		default:
+			writeObservationResponse(w, []any{observationMessage(`{"status":"completed","answer":"done"}`)})
+		}
+	}))
+	defer server.Close()
+	process, err := NewReactProcess[ReactResult](t.Context(), filemcp.Config{Workspace: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.AgentConfig{
+		LLMConfig:  &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema},
+		AllowTools: map[config.McpToolName]struct{}{config.GlobMCPToolName: {}, config.ListDirMCPToolName: {}, config.ReadFileMCPToolName: {}},
+	}
+	result, _, err := process.Run(cfg, &fileContext.DurableState{CompletionCriteria: []string{"original task verified"}, RunId: "retention", Goal: "inspect workspace"})
+	if err != nil || result.Answer != "done" || turn != 5 {
+		t.Fatalf("Run = %+v, %v; requests = %d", result, err, turn)
+	}
+}

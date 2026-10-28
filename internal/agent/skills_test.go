@@ -75,7 +75,7 @@ func TestReactRunIncludesRegisteredSkillsInModelContext(t *testing.T) {
 	cfg := &config.AgentConfig{LLMConfig: &config.LLMConfig{
 		BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema,
 	}}
-	result, _, err := process.Run(cfg, &state.DurableState{RunId: "skills-run", Goal: "answer"})
+	result, _, err := process.Run(cfg, &state.DurableState{CompletionCriteria: []string{"original task verified"}, RunId: "skills-run", Goal: "answer"})
 	if err != nil || result.Answer != "done" {
 		t.Fatalf("ReAct result = %+v, err = %v", result, err)
 	}
@@ -211,7 +211,7 @@ func TestReactRunLoadsBuiltInSkillWithoutToolConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	process.SetSkills(skills)
-	result, _, err := process.Run(cfg, &state.DurableState{RunId: "load-skill", Goal: "Implement this feature using test-driven development."})
+	result, _, err := process.Run(cfg, &state.DurableState{CompletionCriteria: []string{"original task verified"}, RunId: "load-skill", Goal: "Implement this feature using test-driven development."})
 	if err != nil || result.Answer != "done" || calls != 2 {
 		t.Fatalf("result = %+v, err = %v, model requests = %d", result, err, calls)
 	}

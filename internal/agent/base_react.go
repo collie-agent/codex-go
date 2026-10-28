@@ -21,7 +21,7 @@ import (
 
 const toolCallIDMetaKey = "call_id"
 
-var reserveOnceResultTool = map[config.McpToolName]struct{}{
+var threeTurnResultTools = map[config.McpToolName]struct{}{
 	config.ListDirMCPToolName: struct{}{},
 	config.GlobMCPToolName:    struct{}{},
 }
@@ -113,7 +113,7 @@ func (r *BaseReactProcess[T]) newContext(cfg *config.AgentConfig, durable *fileC
 }
 
 // run 是模板方法：公共循环统一维护重试预算、checkpoint 和工具副作用顺序。
-// validate 与 control 是内部策略，分别由具体 Process 提供结果契约和可选控制流。
+// validate 与 control 分别提供结果校验和控制工具策略。
 func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState *fileContext.DurableState, rc *fileContext.ReactContext, modelContext fileContext.Contexter, validate func(T) error, control func([]*mcpSdk.CallToolParams) ([]AgentProcessorType, bool, error)) (T, []AgentProcessorType, error) {
 	var zero T
 	if r.mcpClientSess != nil {
@@ -125,7 +125,26 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 	worker := NewWorker[T](r.ctx, agentConfig, r.mcpClientSess)
 	formatErrors := 0
 	toolCallErrors := 0
+	resultTurns := make(map[*fileContext.ToolResult]int)
 	for i := 1; i <= r.maxTurn; i++ {
+		// 按决策轮而非工具完成次数计数；同批并发调用及轮内纠错不缩短保留期。
+		rc.UpdateToolResults(func(previous []*fileContext.ToolResult) []*fileContext.ToolResult {
+			next := make([]*fileContext.ToolResult, 0, len(previous))
+			for _, result := range previous {
+				if result == nil {
+					continue
+				}
+				if _, limited := threeTurnResultTools[config.McpToolName(result.ToolName)]; limited {
+					resultTurns[result]++
+					if resultTurns[result] > 3 {
+						delete(resultTurns, result)
+						continue
+					}
+				}
+				next = append(next, result)
+			}
+			return next
+		})
 		var result T
 		var toolParams []*mcpSdk.CallToolParams
 		// 格式纠错留在当前轮，避免最后一轮的可恢复错误直接耗尽执行预算。
@@ -320,21 +339,8 @@ func (r *BaseReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, t
 		result.Status = filemcp.ToolCallFailedStatus
 	}
 
-	// Remove short-lived results and append the new result under one lock:
-	// tool calls may complete concurrently.
-	rc.UpdateToolResults(func(previous []*fileContext.ToolResult) []*fileContext.ToolResult {
-		next := make([]*fileContext.ToolResult, 0, len(previous)+1)
-		for _, ts := range previous {
-			if ts == nil {
-				continue
-			}
-			if _, ok := reserveOnceResultTool[config.McpToolName(ts.ToolName)]; ok {
-				continue
-			}
-			next = append(next, ts)
-		}
-		return append(next, result)
-	})
+	// 并发工具只追加结果，统一在下一轮决策前处理过期历史。
+	rc.AppendToolResult(result)
 	// 错误独立于结果详情打印，确保 error 级别也能看到可恢复的工具失败。
 	if result.Error != "" {
 		log.Printf("[react] tool calling error: %s", result.Error)

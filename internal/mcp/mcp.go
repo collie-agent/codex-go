@@ -80,6 +80,7 @@ func RegisterTools(server *sdk.Server, config Config) error {
 	registerExecTool(server, workspace, config)
 	registerSwitchToPlanExecuteTool(server)
 	registerLoadSkillTool(server)
+	registerUpdateCompletionCriteriaTool(server)
 	return nil
 }
 

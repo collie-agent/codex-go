@@ -71,7 +71,7 @@ func TestReactSwitchToPlanExecute(t *testing.T) {
 				}
 				return nil
 			})
-			durable := &state.DurableState{Goal: "implement feature", RunId: "switch-test"}
+			durable := &state.DurableState{CompletionCriteria: []string{"original task verified"}, Goal: "implement feature", RunId: "switch-test"}
 			results, err := o.Run(cfg, durable)
 			if failCheckpoint {
 				if !errors.Is(err, sentinel) || calls != 1 || durable.PlanningContext == "" {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/collie-agent/codex-go/internal/testutil"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -61,6 +62,9 @@ func TestResumePreparationPreservesOriginalPlanMode(t *testing.T) {
 	}
 	models := make(chan string, 4)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if testutil.RespondWithCriteria(t, w, r) {
+			return
+		}
 		var req struct{ Model string }
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Error(err)
@@ -180,6 +184,9 @@ func TestLockLossStopsRunningTool(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if testutil.RespondWithCriteria(t, w, r) {
+			return
+		}
 		script := "import pathlib,time\np=pathlib.Path('heartbeat')\nwhile True:\n p.write_text(str(time.monotonic_ns()))\n time.sleep(0.02)\n"
 		args, _ := json.Marshal(map[string]any{"command": "python3", "args": []string{"-c", script}})
 		w.Header().Set("Content-Type", "application/json")
@@ -292,6 +299,9 @@ func TestAgentRunsShareOnlyEarlierConversationOutcomes(t *testing.T) {
 			}
 			requests := make(chan string, 1)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if testutil.RespondWithCriteria(t, w, r) {
+					return
+				}
 				body, _ := io.ReadAll(r.Body)
 				var decoded any
 				if err := json.Unmarshal(body, &decoded); err != nil {

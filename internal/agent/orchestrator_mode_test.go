@@ -95,7 +95,7 @@ func TestOrchestratorModeRouting(t *testing.T) {
 			if err := o.SetMode(tt.mode); err != nil {
 				t.Fatal(err)
 			}
-			state := &fileContext.DurableState{RunId: "mode-test", Goal: "answer the question"}
+			state := &fileContext.DurableState{CompletionCriteria: []string{"original task verified"}, RunId: "mode-test", Goal: "answer the question"}
 			results, err := o.Run(cfg, state)
 			if err != nil || len(results) != 1 || results[0].Answer != "done" {
 				t.Fatalf("Run() = %+v, %v", results, err)
@@ -261,7 +261,7 @@ func TestPlanCheckpointFailureStopsStepScheduling(t *testing.T) {
 		}
 		return nil
 	})
-	_, err := o.Run(plannerTestConfig(server.URL, config.JsonLLMOutputSchema), &fileContext.DurableState{RunId: "plan-write-failure", Goal: "inspect files"})
+	_, err := o.Run(plannerTestConfig(server.URL, config.JsonLLMOutputSchema), &fileContext.DurableState{CompletionCriteria: []string{"original task verified"}, RunId: "plan-write-failure", Goal: "inspect files"})
 	if err == nil || !strings.Contains(err.Error(), "plan checkpoint rejected") {
 		t.Fatalf("Run() error = %v, want plan checkpoint failure", err)
 	}

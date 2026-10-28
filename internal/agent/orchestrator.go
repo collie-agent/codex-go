@@ -316,7 +316,7 @@ func (o *ProcessorOrchestrator) runProcessor(agentType AgentProcessorType, agent
 			next = []AgentProcessorType{PlanAgentType}
 			return processorResult{react: &result, state: state, next: next}, nil
 		}
-		return processorResult{react: &result, next: next}, err
+		return processorResult{react: &result, state: state, next: next}, err
 	default:
 		return processorResult{}, fmt.Errorf("unsupported processor type %q", agentType)
 	}

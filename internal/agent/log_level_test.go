@@ -70,7 +70,7 @@ func TestReactLogLevels(t *testing.T) {
 				os.Stderr = output
 				log.SetOutput(output)
 				defer func() { os.Stderr = stderr; log.SetOutput(writer) }()
-				got, _, err := process.Run(cfg.ForAgent("react"), &fileContext.DurableState{RunId: "log-test", Goal: "list files"})
+				got, _, err := process.Run(cfg.ForAgent("react"), &fileContext.DurableState{CompletionCriteria: []string{"original task verified"}, RunId: "log-test", Goal: "list files"})
 				if err != nil || got.Answer != "done" || calls != 2 {
 					t.Fatalf("Run() = %+v, %v; model calls = %d", got, err, calls)
 				}

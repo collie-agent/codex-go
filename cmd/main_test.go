@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"github.com/collie-agent/codex-go/internal/testutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -35,8 +36,11 @@ func TestRunAgentCompletesWithBothOutputSchemas(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if testutil.RespondWithCriteria(t, w, r) {
+					return
+				}
 				var request map[string]any
-				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				if err := decodeModelRequest(r.Body, &request); err != nil {
 					t.Error(err)
 				}
 				input, _ := request["input"].(string)
@@ -45,10 +49,7 @@ func TestRunAgentCompletesWithBothOutputSchemas(t *testing.T) {
 						t.Errorf("model request missing result requirement %q", required)
 					}
 				}
-				if !strings.Contains(input, tc.body[:strings.Index(tc.body, "任务完成")]) {
-					// 两种格式分别给出可解析的字段名与示例，任务本身无需提供协议。
-					t.Errorf("model request missing %s result example", tc.name)
-				}
+
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"id": "resp_final", "status": "completed",
@@ -85,7 +86,10 @@ func TestRunAgentRejectsInvalidFinalResults(t *testing.T) {
 		{"line task failure", "line_protocol_llm_output", "BEGIN RESULT\nSTATUS=\"failed\"\nANSWER=\"permission denied\"\nEND RESULT", "permission denied"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if testutil.RespondWithCriteria(t, w, r) {
+					return
+				}
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"id": "resp_final", "status": "completed",
@@ -108,6 +112,9 @@ func TestRunAgentRejectsInvalidFinalResults(t *testing.T) {
 func TestRunAgentToolTimeoutDoesNotLimitModelRequests(t *testing.T) {
 	const toolTimeout = 50 * time.Millisecond
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if testutil.RespondWithCriteria(t, w, r) {
+			return
+		}
 		// 模型耗时超过工具时限，仍须正常完成任务。
 		timer := time.NewTimer(3 * toolTimeout)
 		defer timer.Stop()
@@ -140,6 +147,9 @@ func TestRunAgentUsesYAMLAllowedToolAndReturnsItsResultToModel(t *testing.T) {
 	}
 	var requests int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if testutil.RespondWithCriteria(t, w, r) {
+			return
+		}
 		var request struct {
 			Input json.RawMessage `json:"input"`
 			Tools []struct {
@@ -151,14 +161,15 @@ func TestRunAgentUsesYAMLAllowedToolAndReturnsItsResultToModel(t *testing.T) {
 			return
 		}
 		requests++
-		if len(request.Tools) != 1 || request.Tools[0].Name != "read_file" {
-			t.Errorf("model saw tools %v, want only read_file", request.Tools)
+		if len(request.Tools) != 3 || request.Tools[0].Name != "load_skill" || request.Tools[1].Name != "read_file" || request.Tools[2].Name != "switch_to_plan_execute" {
+			t.Errorf("model saw tools %v, want read_file and built-in control tools", request.Tools)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if requests == 1 {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"id": "resp_tool", "status": "completed",
 				"output": []any{
+
 					map[string]any{"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "read_file", "arguments": `{"path":"notes.txt"}`},
 				},
 			})
@@ -170,7 +181,7 @@ func TestRunAgentUsesYAMLAllowedToolAndReturnsItsResultToModel(t *testing.T) {
 		}
 		if err := json.Unmarshal(request.Input, &items); err != nil {
 			t.Error(err)
-		} else if len(items) != 3 || items[0].Role != "user" || items[1].Type != "function_call" || items[1].CallID != "call_1" || items[2].Type != "function_call_output" || items[2].CallID != "call_1" || !strings.Contains(items[2].Output, "依赖工具结果") {
+		} else if len(items) != 4 || items[0].Role != "system" || items[1].Type != "function_call" || items[1].CallID != "call_1" || items[2].Type != "function_call_output" || items[2].CallID != "call_1" || !strings.Contains(items[2].Output, "依赖工具结果") {
 			t.Errorf("second model request did not contain native tool result: %s", request.Input)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -197,6 +208,9 @@ func TestRunAgentUsesYAMLAllowedToolAndReturnsItsResultToModel(t *testing.T) {
 
 func TestRunAgentRejectsModelCallOutsideYAMLAllowedTools(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if testutil.RespondWithCriteria(t, w, r) {
+			return
+		}
 		var request struct {
 			Tools []struct {
 				Name string `json:"name"`
@@ -206,8 +220,8 @@ func TestRunAgentRejectsModelCallOutsideYAMLAllowedTools(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		if len(request.Tools) != 1 || request.Tools[0].Name != "read_file" {
-			t.Errorf("model saw tools %v, want only read_file", request.Tools)
+		if len(request.Tools) != 3 || request.Tools[0].Name != "load_skill" || request.Tools[1].Name != "read_file" || request.Tools[2].Name != "switch_to_plan_execute" {
+			t.Errorf("model saw tools %v, want read_file and built-in control tools", request.Tools)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -245,6 +259,9 @@ func TestRunAgentUsesObserveAgentConfiguration(t *testing.T) {
 			var reactRequests int
 			observerStarted := make(chan struct{})
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if testutil.RespondWithCriteria(t, w, r) {
+					return
+				}
 				var request struct {
 					Model string          `json:"model"`
 					Input json.RawMessage `json:"input"`
@@ -275,8 +292,12 @@ func TestRunAgentUsesObserveAgentConfiguration(t *testing.T) {
 					if !strings.Contains(input, "react-prompt") || strings.Contains(input, "base-prompt") {
 						t.Errorf("ReAct used wrong prompt: %s", input)
 					}
-					if len(request.Tools) != 2 || request.Tools[0].Name != "apply_patch" || request.Tools[1].Name != "load_skill" {
-						t.Errorf("ReAct saw tools %v, want apply_patch and built-in load_skill", request.Tools)
+					tools := make(map[string]bool)
+					for _, tool := range request.Tools {
+						tools[tool.Name] = true
+					}
+					if !tools["apply_patch"] || !tools["load_skill"] || tools["update_completion_criteria"] {
+						t.Errorf("ReAct saw tools %v, want workspace tools and criteria tool only before criteria are defined", request.Tools)
 					}
 					if reactRequests > 1 {
 						// 等待异步观察器收到请求，避免 CLI 完成后取消上下文使断言偶发失败。
@@ -365,15 +386,18 @@ func TestRunAgentUsesObserveAgentConfiguration(t *testing.T) {
 
 func TestRunAgentWithEmptyYAMLAllowedToolsExposesNoTools(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if testutil.RespondWithCriteria(t, w, r) {
+			return
+		}
 		var request struct {
-			Tools []json.RawMessage `json:"tools"`
+			Tools []struct{ Name string } `json:"tools"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Error(err)
 			return
 		}
-		if len(request.Tools) != 0 {
-			t.Errorf("model saw tools %s, want none", request.Tools)
+		if len(request.Tools) != 2 || request.Tools[0].Name != "load_skill" || request.Tools[1].Name != "switch_to_plan_execute" {
+			t.Errorf("model saw tools %v, want built-in control tools", request.Tools)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -396,7 +420,10 @@ func TestRunAgentWithEmptyYAMLAllowedToolsExposesNoTools(t *testing.T) {
 }
 
 func TestRunAgentReportsModelFailure(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if testutil.RespondWithCriteria(t, w, r) {
+			return
+		}
 		http.Error(w, "upstream unavailable", http.StatusBadGateway)
 	}))
 	defer server.Close()

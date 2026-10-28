@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"slices"
 	"strings"
 
 	"github.com/collie-agent/codex-go/internal/config"
@@ -62,10 +63,19 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 	}
 	agentConfig = agentConfig.ForAgent("react")
 	rc := r.newContext(agentConfig, durableState)
+	modelContext := fileContext.SingleAgentModelContext{ReactContext: rc}
+	// 验收标准是运行级一次性能力；已有标准或计划步骤不再暴露更新工具。
+	delete(agentConfig.AllowTools, config.UpdateCompletionCriteriaMCPToolName)
+	if modelContext.NeedsCompletionCriteria() {
+		agentConfig.AllowTools[config.UpdateCompletionCriteriaMCPToolName] = struct{}{}
+	}
 	if r.allowPlanSwitch && len(durableState.StepExecutions) == 0 {
 		agentConfig.AllowTools[config.SwitchToPlanExecuteMCPToolName] = struct{}{}
 	}
 	validate := func(result T) error {
+		if modelContext.NeedsCompletionCriteria() {
+			return fmt.Errorf("ReAct requires update_completion_criteria before returning a result")
+		}
 		reactResult, ok := any(result).(ReactResult)
 		if !ok {
 			return nil
@@ -90,6 +100,13 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 		return nil
 	}
 	control := func(params []*mcpSdk.CallToolParams) ([]AgentProcessorType, bool, error) {
+		if len(params) == 1 && params[0].Name == string(config.UpdateCompletionCriteriaMCPToolName) {
+			if err := r.updateCompletionCriteria(params[0], rc, durableState, agentConfig); err != nil {
+				return nil, true, err
+			}
+			return nil, true, nil
+		}
+		// 允许先通过工具收集上下文；标准仅在返回最终结果前强制校验。
 		if len(params) != 1 || params[0].Name != string(config.SwitchToPlanExecuteMCPToolName) {
 			return nil, false, nil
 		}
@@ -102,7 +119,7 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 		}
 		return nil, true, nil
 	}
-	return r.run(agentConfig, durableState, rc, rc, validate, control)
+	return r.run(agentConfig, durableState, rc, modelContext, validate, control)
 }
 
 // switchToPlanExecute handles the MCP control tool and records the handoff context.
@@ -125,4 +142,52 @@ func (r *ReactProcess[T]) switchToPlanExecute(toolParam *mcpSdk.CallToolParams, 
 	durableState.PlanningContext = handoff + "\n\n# Switch request\n" + string(args)
 	log.Printf("task %s: [react] switching to plan-execute", durableState.RunId)
 	return true, nil
+}
+
+// updateCompletionCriteria 通过 MCP 校验输入，在下一次决策前保存运行级标准。
+func (r *ReactProcess[T]) updateCompletionCriteria(param *mcpSdk.CallToolParams, rc *fileContext.ReactContext, durable *fileContext.DurableState, cfg *config.AgentConfig) error {
+	response, err := r.mcpClientSess.CallTool(r.ctx, param)
+	if err != nil {
+		return fmt.Errorf("update completion criteria: %w", err)
+	}
+	if response == nil {
+		return fmt.Errorf("update completion criteria: missing MCP response")
+	}
+	if response.IsError {
+		r.updateContext(response, param, rc, nil, cfg)
+		return nil
+	}
+	encoded, err := json.Marshal(response.StructuredContent)
+	if err != nil {
+		return fmt.Errorf("encode completion criteria: %w", err)
+	}
+	var result filemcp.UpdateCompletionCriteriaArgs
+	if err := json.Unmarshal(encoded, &result); err != nil {
+		return fmt.Errorf("decode completion criteria: %w", err)
+	}
+	if !hasNonEmptyItems(result.CompletionCriteria) {
+		return fmt.Errorf("MCP returned empty completion_criteria")
+	}
+	for _, criterion := range result.CompletionCriteria {
+		if strings.TrimSpace(criterion) == "" {
+			return fmt.Errorf("MCP returned blank completion_criteria")
+		}
+	}
+	previous := durable.CompletionCriteria
+	durable.CompletionCriteria = slices.Clone(result.CompletionCriteria)
+	// checkpoint 失败时恢复原状态，不对外发布尚未保存的标准。
+	if r.checkpoint != nil {
+		if err := r.checkpoint(); err != nil {
+			durable.CompletionCriteria = previous
+			return err
+		}
+	}
+	delete(cfg.AllowTools, config.UpdateCompletionCriteriaMCPToolName)
+	// 标准本身就是成功结果；移除失败重试的调用历史，避免继续携带一次性工具上下文。
+	rc.UpdateToolResults(func(results []*fileContext.ToolResult) []*fileContext.ToolResult {
+		return slices.DeleteFunc(results, func(result *fileContext.ToolResult) bool {
+			return result != nil && result.ToolName == string(config.UpdateCompletionCriteriaMCPToolName)
+		})
+	})
+	return nil
 }

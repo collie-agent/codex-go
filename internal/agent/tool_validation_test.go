@@ -37,7 +37,7 @@ func TestToolArgumentValidationFeedbackAndRetry(t *testing.T) {
 	call.Meta[toolCallIDMetaKey] = "call_corrected"
 	r.batchToolCallings([]*mcpSdk.CallToolParams{call}, rc, &config.AgentConfig{})
 	_, results = rc.FormatForModel()
-	if len(results) != 1 || results[0].Status != filemcp.ToolCallSuceessStatus || results[0].Error != "" || results[0].Result == "" {
+	if len(results) != 2 || results[1].Status != filemcp.ToolCallSuceessStatus || results[1].Error != "" || results[1].Result == "" {
 		t.Fatalf("corrected call failed: %+v", results)
 	}
 }
@@ -70,14 +70,15 @@ func TestAllToolSchemasRejectWrongArgumentTypes(t *testing.T) {
 		args map[string]any
 		want string
 	}{
-		"load_skill":             {map[string]any{"skill_name": 123}, "invalid arguments"},
-		"switch_to_plan_execute": {map[string]any{"reason": 123, "summary": "remaining work"}, "invalid arguments"},
-		"list_dir":               {map[string]any{"path": ".", "depth": "1"}, "depth must be a JSON integer"},
-		"read_file":              {map[string]any{"path": "README.md", "offset": "1", "limit": "200"}, "limit must be a JSON integer"},
-		"glob":                   {map[string]any{"pattern": "**/*.go", "include_ignored": "false"}, "include_ignored must be a JSON boolean"},
-		"grep":                   {map[string]any{"pattern": "TODO", "literal": "true", "limit": "200"}, "literal must be a JSON boolean"},
-		"apply_patch":            {map[string]any{"patch": 123}, "invalid arguments"},
-		"exec":                   {map[string]any{"command": "git", "args": "status"}, "invalid arguments"},
+		"update_completion_criteria": {map[string]any{"completion_criteria": "done"}, "invalid arguments"},
+		"load_skill":                 {map[string]any{"skill_name": 123}, "invalid arguments"},
+		"switch_to_plan_execute":     {map[string]any{"reason": 123, "summary": "remaining work"}, "invalid arguments"},
+		"list_dir":                   {map[string]any{"path": ".", "depth": "1"}, "depth must be a JSON integer"},
+		"read_file":                  {map[string]any{"path": "README.md", "offset": "1", "limit": "200"}, "limit must be a JSON integer"},
+		"glob":                       {map[string]any{"pattern": "**/*.go", "include_ignored": "false"}, "include_ignored must be a JSON boolean"},
+		"grep":                       {map[string]any{"pattern": "TODO", "literal": "true", "limit": "200"}, "literal must be a JSON boolean"},
+		"apply_patch":                {map[string]any{"patch": 123}, "invalid arguments"},
+		"exec":                       {map[string]any{"command": "git", "args": "status"}, "invalid arguments"},
 	}
 	for tool, err := range r.mcpClientSess.Tools(t.Context(), nil) {
 		if err != nil {
