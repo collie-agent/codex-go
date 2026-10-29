@@ -50,6 +50,11 @@ func (o *ObserveProcess[T]) Run(agentConfig *config.AgentConfig, durableState *f
 	// Observation only analyzes supplied data, so no MCP tools are exposed.
 	client.SetContextLogLabel("observe")
 	client.SetLogLevel(agentConfig.LogLevel)
+	output, cleanup := provider.NewConfiguredOutputer(agentConfig.RedisConfig(), agentConfig.LogLevel)
+	defer cleanup()
+	if output != nil {
+		client.SetOutputer(output)
+	}
 	request := observationContext.ModelRequestWithSysPrompt(agentConfig.SysPrompt)
 	systemPrompt := appendContextFewShot(request.SystemPrompt, &observationContext, agentConfig.LLMConfig.OutputSchema)
 	client.SetSystemPrompt(systemPrompt)

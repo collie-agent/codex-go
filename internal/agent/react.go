@@ -122,6 +122,7 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 // switchToPlanExecute handles the MCP control tool and records the handoff context.
 func (r *ReactProcess[T]) switchToPlanExecute(toolParam *mcpSdk.CallToolParams, rc *fileContext.ReactContext, durableState *fileContext.DurableState) (bool, error) {
 	response, err := r.mcpClientSess.CallTool(r.ctx, toolParam)
+	r.publishControlToolResult(toolParam, rc, response, err)
 	if err != nil {
 		return false, fmt.Errorf("switch to plan-execute: %w", err)
 	}
@@ -144,6 +145,10 @@ func (r *ReactProcess[T]) switchToPlanExecute(toolParam *mcpSdk.CallToolParams, 
 // updateCompletionCriteria 通过 MCP 校验输入，在下一次决策前保存运行级标准。
 func (r *ReactProcess[T]) updateCompletionCriteria(param *mcpSdk.CallToolParams, rc *fileContext.ReactContext, durable *fileContext.DurableState, cfg *config.AgentConfig) error {
 	response, err := r.mcpClientSess.CallTool(r.ctx, param)
+	// isError 分支由 updateContext 发布，避免同一调用重复写入 Stream。
+	if err != nil || response == nil || !response.IsError {
+		r.publishControlToolResult(param, rc, response, err)
+	}
 	if err != nil {
 		return fmt.Errorf("update completion criteria: %w", err)
 	}

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -63,7 +64,20 @@ func (StepExecution) TableName() string { return "step_execution" }
 // Migrate 必须由独立命令显式调用；普通运行不会自动建表。
 func Migrate(ctx context.Context, db *gorm.DB) error {
 	db = db.WithContext(ctx)
-	if err := db.AutoMigrate(&Conversation{}, &AgentRun{}, &StepExecution{}); err != nil {
+	// 新库使用独立 SQL 建表，已有库仍通过 AutoMigrate 升级。
+	schemaSQL, err := loadSchema()
+	if err != nil {
+		return err
+	}
+	for _, statement := range strings.Split(schemaSQL, ";") {
+		if strings.TrimSpace(statement) == "" {
+			continue
+		}
+		if err := db.Exec(statement).Error; err != nil {
+			return err
+		}
+	}
+	if err := db.AutoMigrate(&Conversation{}, &AgentRun{}, &StepExecution{}, &SSEStreamEvent{}); err != nil {
 		return err
 	}
 	// 显式指定外键方向，避免两个模型同名 ConvID 被推断为反向关联。

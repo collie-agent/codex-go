@@ -10,7 +10,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -41,6 +40,36 @@ type baseResponsesApiClient[T any] struct {
 	systemPrompt    string
 	corrections     []string
 	logLevel        config.LogLevel
+	output          Outputer
+	stderr          Outputer
+}
+
+// SetOutputer 在运行前配置输出目标；nil 恢复默认 stderr 输出。
+// 自定义目标接收所有正文 delta；默认 stderr 仅在 debug 级别展示 delta。
+// 与其他配置方法一样，不应在请求执行期间调用。
+func (c *baseResponsesApiClient[T]) SetOutputer(output Outputer) {
+	if output == nil {
+		c.stderr = NewStderrOutputer(nil)
+	}
+	c.output = output
+}
+
+// emitOutput 的故障仅影响旁路输出，不能导致已完成的模型请求被重新执行。
+func (c *baseResponsesApiClient[T]) emitOutput(ctx context.Context, taskID string, kind OutputKind, data any) {
+	encoded, err := json.Marshal(data)
+	if err == nil {
+		output := c.output
+		if output == nil {
+			if kind == OutputTextDelta && c.logLevel != config.DebugLogLevel {
+				return
+			}
+			output = c.stderr
+		}
+		err = output.Emit(ctx, OutputEvent{TaskID: taskID, Label: c.contextLogLabel, Kind: kind, Data: encoded})
+	}
+	if err != nil {
+		log.Printf("task %s: emit output kind=%s: %v", taskID, kind, err)
+	}
 }
 
 func (c *baseResponsesApiClient[T]) SetLogLevel(level config.LogLevel) {
@@ -92,6 +121,7 @@ func NewResponsesApiClient[T any](llmConfig *config.LLMConfig, allowTools map[co
 		strategy:    strategy,
 		agentConfig: &config.AgentConfig{LLMConfig: llmConfig, AllowTools: allowTools},
 		client:      &client,
+		stderr:      NewStderrOutputer(nil),
 	}}
 	return c, nil
 }
@@ -125,9 +155,7 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 		}
 		// Print the exact schema attached to text.format for JSON output runs.
 		if c.logLevel.InfoEnabled() {
-			if encodedSchema, err := json.MarshalIndent(schema, "", "  "); err == nil {
-				fmt.Fprintf(os.Stderr, "task %s: JSON schema=\n%s\n", taskId, encodedSchema)
-			}
+			c.emitOutput(ctx, taskId, OutputSchema, schema)
 		}
 		// Responses API 通过 text.format 约束最终文本，工具调用仍按原有流程处理。
 		textConfig.Format.OfJSONSchema = &responses.ResponseFormatTextJSONSchemaConfigParam{
@@ -215,19 +243,13 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 		if err != nil {
 			return result, nil, "", fmt.Errorf("task %s: encode LLM context: %w", taskId, err)
 		}
-		if c.contextLogLabel != "" {
-			log.Printf("task %s: [%s] LLM context=\n%s", taskId, c.contextLogLabel, encodedContext)
-		} else {
-			log.Printf("task %s: LLM context=\n%s", taskId, encodedContext)
-		}
+		c.emitOutput(ctx, taskId, OutputContext, ContextOutput{Context: string(encodedContext)})
 	}
 	// Middleware 位于 SDK 重试循环内；正文只随 SDK 的 Read 被动收集，不能抢先读取并阻塞重试。
 	var attemptBodies []*usageBody
-	var onTextDelta func(string)
-	if c.logLevel == config.DebugLogLevel {
-		onTextDelta = func(delta string) {
-			fmt.Fprintf(os.Stderr, "task %s: LLM response text delta=%s\n", taskId, delta)
-		}
+	// 自定义目标接收全部流式片段，stderr 的展示级别由输出适配器处理。
+	onTextDelta := func(delta string) {
+		c.emitOutput(ctx, taskId, OutputTextDelta, TextOutput{Text: delta})
 	}
 	response, err := c.strategy.create(ctx, c.client, params, onTextDelta, option.WithMiddleware(func(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
 		resp, requestErr := next(req)
@@ -267,7 +289,7 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 			if usageResponse.Status == "" {
 				usageResponse.Status = responses.ResponseStatus(status)
 			}
-			c.logResponseUsage(taskId, params.Model, usageResponse)
+			c.logResponseUsage(ctx, taskId, params.Model, usageResponse)
 		}
 		if resp != nil && resp.Body != nil {
 			body := &usageBody{ReadCloser: resp.Body, record: record}
@@ -310,8 +332,7 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 		if item.Type == "function_call" {
 			call := item.AsFunctionCall()
 			// 两种日志级别均保留完整调用参数，便于追踪实际执行的操作。
-			fmt.Fprintf(os.Stderr, "task %s: tool calling name=%s call_id=%s arguments=%s\n",
-				taskId, call.Name, call.CallID, call.Arguments)
+			c.emitOutput(ctx, taskId, OutputToolCall, ToolCallOutput{Name: call.Name, CallID: call.CallID, Arguments: call.Arguments})
 			toolCalls = append(toolCalls, call)
 		}
 	}
@@ -319,7 +340,7 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 	text := response.OutputText()
 	// 响应文本是用户可见输出；error 级别及携带工具调用的轮次也保留。
 	if strings.TrimSpace(text) != "" {
-		fmt.Fprintf(os.Stderr, "task %s: LLM response text=%s\n", taskId, text)
+		c.emitOutput(ctx, taskId, OutputText, TextOutput{Text: text})
 	}
 	if len(toolCalls) > 0 {
 		// 普通说明可以伴随工具调用；可解析的最终结果与工具调用互斥。
@@ -330,9 +351,13 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 		}
 		var finalResult T
 		if strings.TrimSpace(document) != "" && outputParser.Parse(document, &finalResult) == nil {
+			rejection := errors.New("response contains both a final result and tool calls; the rejected tool batch was not executed. Return only the final result if the task is complete, or only tool calls with optional explanatory text if more work is needed")
+			for _, call := range toolCalls {
+				c.emitOutput(ctx, taskId, OutputToolError, ToolResultOutput{Name: call.Name, CallID: call.CallID, Error: rejection.Error()})
+			}
 			return result, nil, "", fmt.Errorf("task %s: %w", taskId, &OutputParseError{
 				Output: text,
-				Err:    errors.New("response contains both a final result and tool calls; the rejected tool batch was not executed. Return only the final result if the task is complete, or only tool calls with optional explanatory text if more work is needed"),
+				Err:    rejection,
 			})
 		}
 		return result, toolCalls, text, nil
@@ -350,7 +375,7 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 	return result, toolCalls, "", nil
 }
 
-func (c *baseResponsesApiClient[T]) logResponseUsage(taskID, model string, response *responses.Response) {
+func (c *baseResponsesApiClient[T]) logResponseUsage(ctx context.Context, taskID, model string, response *responses.Response) {
 	input, output, cached, uncached := "unknown", "unknown", "unknown", "unknown"
 	u := response.Usage
 	// SDK 数值零值不能区分缺失/null 与显式 0，必须检查字段元数据。
@@ -367,16 +392,11 @@ func (c *baseResponsesApiClient[T]) logResponseUsage(taskID, model string, respo
 			uncached = strconv.FormatInt(u.InputTokens-u.InputTokensDetails.CachedTokens, 10)
 		}
 	}
-	label, responseID := "", ""
-	if c.contextLogLabel != "" {
-		label = fmt.Sprintf("[%s] ", c.contextLogLabel)
-	}
-	if response.ID != "" {
-		responseID = " response_id=" + response.ID
-	}
-	// 不受日志级别过滤；标准 logger 单次写入，沿用上下文日志输出位置。
-	log.Printf("task %s: %sLLM usage model=%s%s status=%s input_tokens=%s output_tokens=%s cached_input_tokens=%s uncached_input_tokens=%s",
-		taskID, label, model, responseID, response.Status, input, output, cached, uncached)
+	// 不受日志级别过滤，保留每次 HTTP 尝试的计数和未知值语义。
+	c.emitOutput(ctx, taskID, OutputUsage, UsageOutput{
+		Model: model, ResponseID: response.ID, Status: string(response.Status),
+		InputTokens: input, OutputTokens: output, CachedInputTokens: cached, UncachedInputTokens: uncached,
+	})
 }
 
 // usageBody 不改变 SDK 的读取结果；Close 在重试、正常读取及取消兜底路径均只执行一次。

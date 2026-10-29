@@ -8,11 +8,6 @@ import (
 	"strings"
 )
 
-type LLMOutputParser[T any] interface {
-	// model must be a non-nil pointer to the destination.
-	Parse(text string, model T) error
-}
-
 type JsonOutput[T any] struct{}
 
 func (*JsonOutput[T]) Parse(text string, model T) error {

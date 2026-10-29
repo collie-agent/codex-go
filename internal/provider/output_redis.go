@@ -1,0 +1,44 @@
+package provider
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"github.com/collie-agent/codex-go/internal/entity"
+)
+
+// TaskStreamWriter 将 Stream 协议和过期策略交给 rdb 管理。
+type TaskStreamWriter interface {
+	WriteTaskStream(context.Context, string, *entity.LLMResponse) (string, error)
+}
+
+// RedisOutputer 使用调用方持有的 Stream writer，不负责关闭连接。
+type RedisOutputer struct{ writer TaskStreamWriter }
+
+func NewRedisOutputer(writer TaskStreamWriter) *RedisOutputer {
+	return &RedisOutputer{writer: writer}
+}
+
+// Emit 的 entry ID 由 Redis 生成，消费者从 XREAD/XRANGE 的 ID 字段读取。
+func (o *RedisOutputer) Emit(ctx context.Context, event OutputEvent) error {
+	switch event.Kind {
+	case OutputSchema, OutputContext:
+		return nil
+	case OutputText, OutputTextDelta, OutputToolCall, OutputToolResult, OutputToolError, OutputUsage:
+	default:
+		return fmt.Errorf("redis output: unsupported event type %q", event.Kind)
+	}
+	if strings.TrimSpace(event.TaskID) == "" {
+		return fmt.Errorf("redis output: task ID is required")
+	}
+	if !json.Valid(event.Data) {
+		return fmt.Errorf("redis output: invalid JSON data for %s", event.Kind)
+	}
+	// JSON 作为 delta 原样传递，供 ReadTaskStream 和 SSE 消费者统一读取。
+	_, err := o.writer.WriteTaskStream(ctx, event.TaskID, &entity.LLMResponse{
+		Type: string(event.Kind), Delta: string(event.Data),
+	})
+	return err
+}

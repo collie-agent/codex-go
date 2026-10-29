@@ -41,6 +41,7 @@ type BaseReactProcess[T LLMSchema] struct {
 	serverSess    *mcpSdk.ServerSession
 	checkpoint    func() error
 	skills        []Skill
+	output        provider.Outputer
 }
 
 // 最大轮数固定在代码中，避免任务通过配置无限延长。
@@ -122,7 +123,11 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 	if r.serverSess != nil {
 		defer r.serverSess.Close()
 	}
+	var cleanup func()
+	r.output, cleanup = provider.NewConfiguredOutputer(agentConfig.RedisConfig(), agentConfig.LogLevel)
+	defer cleanup()
 	worker := NewWorker[T](r.ctx, agentConfig, r.mcpClientSess)
+	worker.output = r.output
 	formatErrors := 0
 	toolCallErrors := 0
 	resultTurns := make(map[*fileContext.ToolResult]int)
@@ -342,6 +347,11 @@ func (r *BaseReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, t
 
 	// 并发工具只追加结果，统一在下一轮决策前处理过期历史。
 	rc.AppendToolResult(result)
+	// 工具实际执行完成后发布一次结果，不能在模型历史重放时重复发送。
+	if rc.DurableState != nil {
+		r.publishToolResult(rc.DurableState.RunId, result)
+	}
+
 	// 错误独立于结果详情打印，确保 error 级别也能看到可恢复的工具失败。
 	if result.Error != "" {
 		log.Printf("[react] tool calling error: %s", result.Error)
@@ -369,4 +379,49 @@ func hasNonEmptyItems(items []string) bool {
 		}
 	}
 	return true
+}
+
+// publishToolResult 只发布执行结果，不改变上下文或触发工具重试。
+func (r *BaseReactProcess[T]) publishToolResult(taskID string, result *fileContext.ToolResult) {
+	if r.output == nil {
+		return
+	}
+	kind := provider.OutputToolResult
+	if result.Error != "" {
+		kind = provider.OutputToolError
+	}
+	data, err := json.Marshal(provider.ToolResultOutput{Name: result.ToolName, CallID: result.ToolCallId, Result: json.RawMessage(result.Result), Error: result.Error})
+	if err == nil {
+		err = r.output.Emit(r.ctx, provider.OutputEvent{TaskID: taskID, Label: "react", Kind: kind, Data: data})
+	}
+	if err != nil {
+		log.Printf("task %s: emit tool outcome: %v", taskID, err)
+	}
+}
+
+// 控制工具不会保留普通工具历史，因此在控制流分支中单独发布结果。
+func (r *BaseReactProcess[T]) publishControlToolResult(param *mcpSdk.CallToolParams, rc *fileContext.ReactContext, response *mcpSdk.CallToolResult, callErr error) {
+	if r.output == nil || rc.DurableState == nil {
+		return
+	}
+	callID, _ := param.Meta[toolCallIDMetaKey].(string)
+	result := &fileContext.ToolResult{ToolName: param.Name, ToolCallId: callID}
+	if callErr != nil {
+		result.Error = callErr.Error()
+	}
+	if response == nil && callErr == nil {
+		result.Error = "MCP returned no result; execution outcome is unknown"
+	}
+	if response != nil {
+		content, err := json.Marshal(response.Content)
+		if err != nil {
+			result.Error += "failed to encode tool result: " + err.Error()
+		} else {
+			result.Result = string(content)
+		}
+		if response.IsError {
+			result.Error += "MCP tool execution failed: " + result.Result
+		}
+	}
+	r.publishToolResult(rc.DurableState.RunId, result)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"sort"
 	"strings"
@@ -21,6 +22,7 @@ type Worker[T LLMSchema] struct {
 	agentConfig   *config.AgentConfig
 	mcpClientSess *mcpSdk.ClientSession
 	corrections   []string
+	output        provider.Outputer
 }
 
 // toolCallError 表示模型生成的调用不合法，可反馈纠正；请求和传输错误不属于此类。
@@ -37,8 +39,7 @@ func NewWorker[T LLMSchema](ctx context.Context, agentConfig *config.AgentConfig
 	}
 }
 
-func (w *Worker[T]) Run(modelContext fileContext.Contexter) (T, string, []*mcpSdk.CallToolParams, error) {
-	var result T
+func (w *Worker[T]) Run(modelContext fileContext.Contexter) (result T, text string, calls []*mcpSdk.CallToolParams, runErr error) {
 	request := modelContext.ModelRequest()
 	// 上下文禁用工具时，即使 worker 带有 MCP 会话和权限，也不向模型暴露工具。
 	var allowTools map[config.McpToolName]struct{}
@@ -53,6 +54,15 @@ func (w *Worker[T]) Run(modelContext fileContext.Contexter) (T, string, []*mcpSd
 	}
 	client.SetContextLogLabel(request.LogLabel)
 	client.SetLogLevel(w.agentConfig.LogLevel)
+	output := w.output
+	if output == nil {
+		var cleanup func()
+		output, cleanup = provider.NewConfiguredOutputer(w.agentConfig.RedisConfig(), w.agentConfig.LogLevel)
+		defer cleanup()
+	}
+	if output != nil {
+		client.SetOutputer(output)
+	}
 	// 输出协议和示例属于系统指令，状态正文始终位于工具结果之后。
 	client.SetSystemPrompt(appendContextFewShot(request.SystemPrompt, modelContext, w.agentConfig.LLMConfig.OutputSchema))
 	client.SetCorrectionMessages(w.corrections)
@@ -77,6 +87,18 @@ func (w *Worker[T]) Run(modelContext fileContext.Contexter) (T, string, []*mcpSd
 	if err != nil {
 		return result, "", nil, err
 	}
+	// 模型调用已被发布，但校验可能整批拒绝；每个被拒绝调用都需要终态。
+	defer func() {
+		if runErr == nil || output == nil {
+			return
+		}
+		for _, call := range toolCalls {
+			data, _ := json.Marshal(provider.ToolResultOutput{Name: call.Name, CallID: call.CallID, Error: "tool batch was not executed: " + runErr.Error()})
+			if err := output.Emit(w.ctx, provider.OutputEvent{TaskID: request.RunID, Label: request.LogLabel, Kind: provider.OutputToolError, Data: data}); err != nil {
+				log.Printf("task %s: emit rejected tool error: %v", request.RunID, err)
+			}
+		}
+	}()
 	if !request.AllowTools && len(toolCalls) > 0 {
 		var zero T
 		return zero, "", nil, fmt.Errorf("task %s: %s returned unexpected tool calls", request.RunID, request.LogLabel)

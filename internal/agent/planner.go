@@ -74,6 +74,11 @@ func (p *PlannerProcess) Run(agentConfig *config.AgentConfig, durableState *file
 		return PlannerResult{}, nil, fmt.Errorf("task %s: planner: %w", taskID, err)
 	}
 	client.SetLogLevel(agentConfig.LogLevel)
+	output, cleanup := provider.NewConfiguredOutputer(agentConfig.RedisConfig(), agentConfig.LogLevel)
+	defer cleanup()
+	if output != nil {
+		client.SetOutputer(output)
+	}
 	request := plannerContext.ModelRequest()
 	client.SetSystemPrompt(appendContextFewShot(request.SystemPrompt, plannerContext, agentConfig.LLMConfig.OutputSchema))
 	result, toolCalls, _, err := client.Run(p.ctx, taskID, request.Input, nil)

@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -62,9 +61,7 @@ func testResponseUsage(t *testing.T, level config.LogLevel, usage, input, output
 	client.SetLogLevel(level)
 	client.SetContextLogLabel("observe")
 	var logs bytes.Buffer
-	previous := log.Writer()
-	log.SetOutput(&logs)
-	t.Cleanup(func() { log.SetOutput(previous) })
+	client.SetOutputer(NewStderrOutputer(&logs))
 	result, calls, _, err := client.Run(context.Background(), "usage-task", "private prompt", nil)
 	if err != nil || result.Answer != "ok" || len(calls) != 0 {
 		t.Fatalf("result=%+v calls=%v err=%v", result, calls, err)
@@ -108,9 +105,7 @@ func TestResponsesUsageLoggedBeforeOutputHandling(t *testing.T) {
 				}
 				client.SetLogLevel(level)
 				var logs bytes.Buffer
-				previous := log.Writer()
-				log.SetOutput(&logs)
-				defer log.SetOutput(previous)
+				client.SetOutputer(NewStderrOutputer(&logs))
 				history := []ToolMessage{{ChatCompletionToolMessageParam: *openai.ToolMessage("result", "previous_call").OfTool, Name: "inspect", Arguments: "{}"}}
 				for range 2 {
 					_, calls, _, err := client.RunWithToolMessages(context.Background(), "usage-task", "private prompt", nil, history)

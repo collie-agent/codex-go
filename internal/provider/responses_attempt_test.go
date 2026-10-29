@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -51,9 +50,7 @@ func TestResponsesUsageEveryHTTPAttempt(t *testing.T) {
 			}
 			client.SetLogLevel(config.ErrorLogLevel)
 			var logs bytes.Buffer
-			previous := log.Writer()
-			log.SetOutput(&logs)
-			defer log.SetOutput(previous)
+			client.SetOutputer(NewStderrOutputer(&logs))
 			result, _, _, err := client.Run(context.Background(), "attempt-task", "prompt", nil)
 			wantAttempts := 1
 			if scenario == "retry success" {
@@ -158,9 +155,7 @@ func TestResponsesUsageTransportFailures(t *testing.T) {
 			client.client = &sdkClient
 			client.SetLogLevel(config.ErrorLogLevel)
 			var logs bytes.Buffer
-			previous := log.Writer()
-			log.SetOutput(&logs)
-			defer log.SetOutput(previous)
+			client.SetOutputer(NewStderrOutputer(&logs))
 			_, _, _, err = client.Run(ctx, "transport-task", "prompt", nil)
 			if !errors.Is(err, wantErr) {
 				t.Fatalf("lost error: %v want %v", err, wantErr)
@@ -192,9 +187,7 @@ func TestResponsesUsageNoHTTPAttemptBeforeValidation(t *testing.T) {
 	sdkClient := openai.NewClient(option.WithAPIKey("secret"), option.WithBaseURL("http://provider.test"), option.WithHTTPClient(&http.Client{Transport: usageTransport(func(*http.Request) (*http.Response, error) { attempts++; return nil, errors.New("unexpected HTTP") })}), option.WithMaxRetries(0))
 	client.client = &sdkClient
 	var logs bytes.Buffer
-	previous := log.Writer()
-	log.SetOutput(&logs)
-	defer log.SetOutput(previous)
+	client.SetOutputer(NewStderrOutputer(&logs))
 	_, _, _, err = client.RunWithToolMessages(context.Background(), "invalid-task", "prompt", nil, []ToolMessage{{Name: "inspect"}})
 	if err == nil || !strings.Contains(err.Error(), "requires call ID") {
 		t.Fatalf("unexpected error: %v", err)
@@ -255,9 +248,7 @@ func TestResponsesUsageBodyLifecycle(t *testing.T) {
 			client.client = &sdkClient
 			client.SetLogLevel(config.ErrorLogLevel)
 			var logs bytes.Buffer
-			previous := log.Writer()
-			log.SetOutput(&logs)
-			defer log.SetOutput(previous)
+			client.SetOutputer(NewStderrOutputer(&logs))
 			result, _, _, err := client.Run(ctx, "lifecycle-task", "prompt", nil)
 			if scenario == "retry" {
 				if err != nil || result.Answer != "ok" || attempts != 2 {

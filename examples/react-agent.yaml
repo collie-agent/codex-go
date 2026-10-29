@@ -1,6 +1,11 @@
 name: react
 # debug 额外显示流式文本片段；info 显示上下文和工具结果；error 仍显示工具调用和完整响应文本。
 log_level: info
+# 可选 Redis Stream 输出，格式说明见 docs/redis-output.md。
+redis:
+  addr: 127.0.0.1:6379
+#   password_env: CODEX_REDIS_PASSWORD
+#   db: 0
 base:
   llm:
     # 留空 base_url 时默认使用 https://api.openai.com/v1。

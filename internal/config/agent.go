@@ -14,6 +14,7 @@ import (
 type AgentConfig struct {
 	Name       string
 	LogLevel   LogLevel
+	Global     *GlobalConfig
 	LLMConfig  *LLMConfig
 	AllowTools map[McpToolName]struct{}
 	SysPrompt  string
@@ -53,6 +54,7 @@ func (c *AgentConfig) ForAgent(name string) *AgentConfig {
 	// 保留只读配置集合，供 ReAct 副本解析内部观察器配置；每次返回的
 	// 模型和工具设置仍独立复制，调用方修改不会影响集合中的原始配置。
 	clone.configs = c.configs
+	clone.Global = c.Global
 	clone.agentInstructions = slices.Clone(c.agentInstructions)
 	return clone
 }
@@ -62,6 +64,8 @@ func cloneAgentConfig(c *AgentConfig) *AgentConfig {
 		return nil
 	}
 	clone := &AgentConfig{NextAgents: append([]string(nil), c.NextAgents...), MultiAgent: c.MultiAgent, Name: c.Name, LogLevel: c.LogLevel, SysPrompt: c.SysPrompt, LLMConfig: nil, AllowTools: make(map[McpToolName]struct{}, len(c.AllowTools))}
+	// 全局设置由整个运行共享，不参与 agent 独立配置的复制与覆盖。
+	clone.Global = c.Global
 	clone.agentInstructions = slices.Clone(c.agentInstructions)
 	if c.MultiAgent != nil {
 		graph := *c.MultiAgent
@@ -151,7 +155,11 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 			resolved[name].AllowTools = map[McpToolName]struct{}{}
 		}
 	}
-	// 日志级别属于整个运行，所有独立代理及配置副本使用相同级别。
+	redisConfig, err := resolveRedis(raw.Redis)
+	if err != nil {
+		return nil, err
+	}
+	// 日志级别沿用现有解析方式；Redis 仅保存到全局配置。
 	for _, cfg := range resolved {
 		cfg.LogLevel = raw.LogLevel
 	}
@@ -171,6 +179,7 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 	}
 	out := cloneAgentConfig(resolved[entry])
 	out.Name = raw.Name
+	out.Global = &GlobalConfig{Redis: redisConfig}
 	out.configs = resolved
 	out.MultiAgent = raw.MultiAgent
 	for name := range raw.Agents {
@@ -270,6 +279,7 @@ func rejectNull(node *yaml.Node) error {
 }
 
 type yamlAgentConfig struct {
+	Redis      *yamlRedisConfig              `yaml:"redis"`
 	Name       string                        `yaml:"name"`
 	MultiAgent *MultiAgentConfig             `yaml:"multi-agent"`
 	LogLevel   LogLevel                      `yaml:"log_level"`

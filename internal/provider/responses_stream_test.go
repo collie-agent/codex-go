@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -49,6 +48,7 @@ func TestResponsesStreamReturnsCompleteText(t *testing.T) {
 			defer file.Close()
 			previous := os.Stderr
 			os.Stderr = file
+			client.SetOutputer(nil)
 			defer func() { os.Stderr = previous }()
 			result, _, _, err := client.Run(context.Background(), "stream-test", "question", nil)
 			if err != nil || result.Answer != "complete" {
@@ -82,9 +82,7 @@ func TestResponsesStreamLogsTerminalUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	var logs bytes.Buffer
-	previous := log.Writer()
-	log.SetOutput(&logs)
-	defer log.SetOutput(previous)
+	client.SetOutputer(NewStderrOutputer(&logs))
 	_, _, _, err = client.Run(context.Background(), "stream-usage", "question", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -181,9 +179,7 @@ func TestResponsesStreamUsageBeforeHTTPBodyEOF(t *testing.T) {
 		t.Fatal(err)
 	}
 	var logs bytes.Buffer
-	previous := log.Writer()
-	log.SetOutput(&logs)
-	defer log.SetOutput(previous)
+	client.SetOutputer(NewStderrOutputer(&logs))
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_, _, _, err = client.Run(ctx, "done-usage", "question", nil)
