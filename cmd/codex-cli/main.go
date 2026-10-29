@@ -1,4 +1,4 @@
-// Command agent-server runs agents through the processor orchestrator.
+// Command codex-cli runs agents through the processor orchestrator.
 package main
 
 import (

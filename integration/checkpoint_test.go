@@ -27,7 +27,7 @@ import (
 func buildCommands(t *testing.T) []string {
 	t.Helper()
 	var paths []string
-	for _, target := range []string{"./cmd", "./cmd/agent-server"} {
+	for _, target := range []string{"./cmd", "./cmd/codex-cli"} {
 		path := filepath.Join(t.TempDir(), "agent")
 		cmd := exec.Command("go", "build", "-o", path, target)
 		cmd.Dir = ".."

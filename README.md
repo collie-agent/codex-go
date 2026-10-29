@@ -29,7 +29,7 @@ Go 实现的coding agent，通过 OpenAI Responses API 进行模型决策，通�
 make build
 ```
 
-构建产物为 `bin/codex-mcp`、`bin/agent-server` 和 `bin/codex-migrate`，使用 `-trimpath` 和 `-s -w` 减小二进制体积。可以用 `GOOS`、`GOARCH`、`BUILD_DIR` 覆盖构建目标和输出目录。
+构建产物为 `bin/codex-mcp`、`bin/codex-cli` 和 `bin/codex-migrate`，使用 `-trimpath` 和 `-s -w` 减小二进制体积。可以用 `GOOS`、`GOARCH`、`BUILD_DIR` 覆盖构建目标和输出目录。
 
 创建 `agent.yaml`，将 `your-model` 替换为实际模型名：
 
@@ -49,7 +49,7 @@ base:
 export OPENAI_API_KEY='your-key'
 export CODEX_MYSQL_URL='mysql://user:password@127.0.0.1:3306/codex-go'
 ./bin/codex-migrate
-./bin/agent-server --config agent.yaml \
+./bin/codex-cli --config agent.yaml \
   --task '阅读项目并说明主要模块的职责' \
   --workspace /path/to/workspace \
   --mcp-command ./bin/codex-mcp
@@ -58,7 +58,7 @@ export CODEX_MYSQL_URL='mysql://user:password@127.0.0.1:3306/codex-go'
 普通配置默认直接进入 ReAct；`name: multi-agent` 自动选择多代理编排器。需要规划后逐步执行时，指定 `--mode plan-execute`：
 
 ```sh
-./bin/agent-server --config agent.yaml \
+./bin/codex-cli --config agent.yaml \
   --task '完成目标，并按步骤验证结果' \
   --workspace /path/to/workspace \
   --mcp-command ./bin/codex-mcp \
@@ -68,17 +68,17 @@ export CODEX_MYSQL_URL='mysql://user:password@127.0.0.1:3306/codex-go'
 按保存的 `run_id` 显式恢复 ReAct 或计划执行运行（不需要重新提供任务目标）：
 
 ```sh
-./bin/agent-server --config agent.yaml --run-id <run_id> \
+./bin/codex-cli --config agent.yaml --run-id <run_id> \
   --workspace /path/to/workspace --mcp-command ./bin/codex-mcp
 ```
 
 计划执行恢复示例：首次运行时将 YAML `name` 设为 `plan-execute`，并保存 stderr 输出的 `run_id`；崩溃或失败后，用当前配置和该 ID 恢复：
 
 ```sh
-./bin/agent-server --config plan-agent.yaml --task '检查项目并修复目标问题' \
+./bin/codex-cli --config plan-agent.yaml --task '检查项目并修复目标问题' \
   --workspace /path/to/workspace --mcp-command ./bin/codex-mcp
 # 使用上次 stderr 中的 run_id；不要再传 --task。
-./bin/agent-server --config plan-agent.yaml --run-id <run_id> \
+./bin/codex-cli --config plan-agent.yaml --run-id <run_id> \
   --workspace /path/to/workspace --mcp-command ./bin/codex-mcp
 ```
 
@@ -93,7 +93,7 @@ export CODEX_MYSQL_URL='mysql://user:password@127.0.0.1:3306/codex-go'
 使用 [`examples/supervisor-worker.yaml`](examples/supervisor-worker.yaml)，替换模型名并设置上述数据库及 API key 环境变量后执行：
 
 ```sh
-./bin/agent-server --config examples/supervisor-worker.yaml \
+./bin/codex-cli --config examples/supervisor-worker.yaml \
   --task '检查项目，分别完成实现与复核后汇总结论' \
   --workspace /path/to/workspace --mcp-command ./bin/codex-mcp
 ```
@@ -116,10 +116,10 @@ worker 的 `failed` 作为结果返回，失败输出中的 `next` 不执行；�
 
 | 入口 | 用途与执行方式 |
 | --- | --- |
-| `./bin/agent-server --config agent.yaml --task '目标' --workspace /path/to/workspace --mcp-command ./bin/codex-mcp` | 通过编排器执行，ReAct 通过 MCP stdio 连接独立子进程；支持 ReAct、计划执行和多代理 |
+| `./bin/codex-cli --config agent.yaml --task '目标' --workspace /path/to/workspace --mcp-command ./bin/codex-mcp` | 通过编排器执行，ReAct 通过 MCP stdio 连接独立子进程；支持 ReAct、计划执行和多代理 |
 | `./bin/codex-mcp --workspace /path/to/workspace --timeout 30s` | 单独提供 MCP stdio 工具服务，供 MCP 客户端连接 |
 
-`agent-server` 是命令行任务执行入口，通过 stdio 连接 MCP 子进程，当前不提供 HTTP 服务。`--mcp-command` 默认是 `codex-mcp`，需能从 PATH 找到；使用构建目录时建议像示例一样显式传入路径。
+`codex-cli` 是命令行任务执行入口，通过 stdio 连接 MCP 子进程，当前不提供 HTTP 服务。`--mcp-command` 默认是 `codex-mcp`，需能从 PATH 找到；使用构建目录时建议像示例一样显式传入路径。
 
 ## 运行机制与执行流程
 
@@ -127,7 +127,7 @@ worker 的 `failed` 作为结果返回，失败输出中的 `next` 不执行；�
 
 `ProcessorOrchestrator` 从当前节点返回的后继类型调度下一批处理器。同批分支并发执行，配置和状态按分支复制，批次结束后按调度顺序合并结果；任一节点失败会等待本批节点退出后返回错误。当前内置任务流程主要按顺序执行。
 
-| agent-server 配置 | 起点与后续流程 |
+| codex-cli 配置 | 起点与后续流程 |
 | --- | --- |
 | `name: react`，不传 `--mode` | ReAct → end |
 | `name: plan-execute`，不传 `--mode` | ReAct → end |
@@ -139,7 +139,7 @@ worker 的 `failed` 作为结果返回，失败输出中的 `next` 不执行；�
 
 ```mermaid
 flowchart TD
-    A[agent-server 加载配置与任务] --> B{显式指定 mode?}
+    A[codex-cli 加载配置与任务] --> B{显式指定 mode?}
     B -->|未传| R[ReAct 执行]
     B -->|react| R[ReAct 执行]
     B -->|plan-execute| P[planner]
@@ -265,7 +265,7 @@ Agent 使用时需在 `allow_tools` 中加入 `exec`，示例配置默认未启�
 
 命令固定在 Workspace 根目录执行，可读写整个 Workspace（包括 `.git` 和删除文件），默认禁网；系统运行文件只读挂载，临时目录独立，不继承宿主凭据环境或 HOME。stdin 为 EOF，结束、超时或取消后清理全部子进程，不保留后台任务。
 
-`agent-server` 和 `codex-mcp` 均可重复传入 `--runtime-dir /path/to/runtime`，由宿主授权额外只读运行时目录。对于 Node prefix 布局，可分别传入 `--runtime-dir /path/to/node/bin --runtime-dir /path/to/node/lib`。运行目录加入受控 PATH；命令调用不能追加挂载或继承宿主环境。
+`codex-cli` 和 `codex-mcp` 均可重复传入 `--runtime-dir /path/to/runtime`，由宿主授权额外只读运行时目录。对于 Node prefix 布局，可分别传入 `--runtime-dir /path/to/node/bin --runtime-dir /path/to/node/lib`。运行目录加入受控 PATH；命令调用不能追加挂载或继承宿主环境。
 
 执行需要 Linux、bwrap 和 seccomp，缺少隔离能力时仅 `exec` 调用失败，文件工具仍可用，不回退到宿主执行。命名 Unix socket、io_uring 和非本机 ABI 不可用；此版本没有 CPU、内存、进程数或磁盘配额。设计说明见 [命令隔离 ADR](docs/adr/0002-command-sandbox-boundary.md)。
 
@@ -276,14 +276,14 @@ Agent 使用时需在 `allow_tools` 中加入 `exec`，示例配置默认未启�
 | 参数 | 说明 |
 | --- | --- |
 | `--workspace` | 新建任务必填；恢复时可省略并使用原运行保存的工作目录 |
-| `--config` | YAML 配置路径；`agent-server` 必填 |
+| `--config` | YAML 配置路径；`codex-cli` 必填 |
 | `--conv-id` | 可选，关联已有会话；省略时创建新会话，每个新任务均创建独立 run_id |
 | `--task` | Agent 模式必填，非空任务目标 |
 | `--run-id` | 显式恢复已有运行；与 `--task` 互斥，必须同时提供 `--config` |
 | `--timeout` | 正数，默认 `30s`，仅限制单次工具调用，不是整个任务或模型请求的超时 |
 | `--runtime-dir` | 可重复，额外只读命令运行时目录 |
-| `--mcp-command` | 仅 `agent-server`，MCP 可执行文件路径，默认 `codex-mcp` |
-| `--mode` | 仅 `agent-server`，可选 `react`、`plan-execute` 或 `multi-agent`；多代理 YAML 默认使用 `multi-agent`，其他配置默认 `react` |
+| `--mcp-command` | 仅 `codex-cli`，MCP 可执行文件路径，默认 `codex-mcp` |
+| `--mode` | 仅 `codex-cli`，可选 `react`、`plan-execute` 或 `multi-agent`；多代理 YAML 默认使用 `multi-agent`，其他配置默认 `react` |
 
 每次 ReAct 运行最多 100 轮，计划执行时每一步各自拥有此上限，当前不提供 YAML 或 CLI 配置项。ReAct 和观察器遇到输出解析错误时，每次运行累计最多纠正 3 次，第 4 次格式错误终止；ReAct 的格式纠错留在当前轮内。模型请求失败和业务校验失败直接返回错误。
 
@@ -293,13 +293,13 @@ Agent 使用时需在 `allow_tools` 中加入 `exec`，示例配置默认未启�
 {"status":"completed","answer":"任务已完成。","Observation":[],"CompletionEvidence":[]}
 ```
 
-最终结果必须包含 `status`（`completed` 或 `failed`）和非空的完成答案；计划步骤成功时还必须提供非空的 `Observation` 与 `CompletionEvidence`。CLI 成功完成以 0 退出并打印答案，配置错误、执行失败或达到轮数上限时报告原因并以非 0 退出；`agent-server` 参数缺失或非法 `--mode` 以 2 退出。
+最终结果必须包含 `status`（`completed` 或 `failed`）和非空的完成答案；计划步骤成功时还必须提供非空的 `Observation` 与 `CompletionEvidence`。CLI 成功完成以 0 退出并打印答案，配置错误、执行失败或达到轮数上限时报告原因并以非 0 退出；`codex-cli` 参数缺失或非法 `--mode` 以 2 退出。
 
 stdout 只输出保存成功后的最终答案；stderr 输出运行 ID、错误和模型/工具诊断信息。LLM 请求上下文日志以 YAML 展示并省略工具定义。
 
 ## 运行持久化与迁移
 
-`agent-server` 必须配置 `CODEX_MYSQL_URL`，格式为
+`codex-cli` 必须配置 `CODEX_MYSQL_URL`，格式为
 `mysql://<user>:<password>@127.0.0.1:3306/<database>`。数据库名使用 `codex-go`，需预先创建；用户名、密码中的特殊字符需要 URL 编码。缺少配置、连接失败或未执行迁移时直接报错。
 
 ```sh
@@ -311,7 +311,7 @@ stdout 只输出保存成功后的最终答案；stderr 输出运行 ID、错误
 
 新任务先保存 pending run，再向 stderr 输出 `run_id=<id> conv_id=<id>`，随后进入 running。成功保存 completed 和完整 JSON 结果（包含 Answer、Observation、CompletionEvidence）；失败保存 failed 和错误。运行目标、绝对工作目录、已确定模式和运行级验收标准也会保存。checkpoint 写入失败立即停止后续调度，不输出未保存的最终答案。
 
-`agent-server` 可以用 `--conv-id <已有 conv_id>` 关联会话。会话仅表示归属，不共享消息历史。普通 ReAct 不创建执行步骤记录。使用 `--run-id` 可显式恢复 pending、running 或 failed 运行；进程启动不会自动恢复遗留运行。运行锁由 MySQL 专用连接持有，崩溃后连接断开即可重新接管。
+`codex-cli` 可以用 `--conv-id <已有 conv_id>` 关联会话。会话仅表示归属，不共享消息历史。普通 ReAct 不创建执行步骤记录。使用 `--run-id` 可显式恢复 pending、running 或 failed 运行；进程启动不会自动恢复遗留运行。运行锁由 MySQL 专用连接持有，崩溃后连接断开即可重新接管。
 
 计划模式会在首个执行步骤前保存完整有序计划；步骤按 `position` 恢复，而非按时间戳或 `step_id` 排序。每步进入模型前保存 `running`，完成或失败时将步骤状态、运行检查点和结构化结果在同一事务中提交。检查点写入失败会中止调度；恢复时跳过 completed 步骤，并从头执行其他步骤。
 
@@ -368,7 +368,7 @@ CODEX_TEST_MYSQL_URL="$CODEX_MYSQL_URL" \
 
 ```text
 cmd/main.go           源码入口：直接 ReAct 或 MCP stdio 服务，不纳入 make build
-cmd/agent-server/     编排任务的 CLI，连接独立 MCP 子进程
+cmd/codex-cli/     编排任务的 CLI，连接独立 MCP 子进程
 cmd/mcp/              独立 MCP stdio 服务
 cmd/migrate/          显式创建/升级持久化表
 internal/config/      YAML 校验、基础配置与独立配置解析

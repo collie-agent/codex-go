@@ -6,19 +6,19 @@ GOARCH ?= $(shell $(GO) env GOARCH)
 LDFLAGS := -s -w
 BUILD_FLAGS := -trimpath -ldflags="$(LDFLAGS)"
 
-.PHONY: all build mcp agent-server migrate clean
+.PHONY: all build mcp codex-cli migrate clean
 
 all: build
 
-build: mcp agent-server migrate
+build: mcp codex-cli migrate
 
 mcp:
 	mkdir -p $(BUILD_DIR)
 	GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build $(BUILD_FLAGS) -o $(BUILD_DIR)/codex-mcp ./cmd/mcp
 
-agent-server:
+codex-cli:
 	mkdir -p $(BUILD_DIR)
-	GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build $(BUILD_FLAGS) -o $(BUILD_DIR)/agent-server ./cmd/agent-server
+	GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build $(BUILD_FLAGS) -o $(BUILD_DIR)/codex-cli ./cmd/codex-cli
 
 migrate:
 	mkdir -p $(BUILD_DIR)

@@ -39,7 +39,7 @@ func LoadSkills() ([]Skill, error) {
 	root := filepath.Join(home, ".agents", "skills")
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			// 未安装任何技能不应阻止 agent-server 启动。
+			// 未安装任何技能不应阻止 codex-cli 启动。
 			if path == root && os.IsNotExist(walkErr) {
 				return nil
 			}

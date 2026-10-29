@@ -1,4 +1,4 @@
-# 同一份配置可通过 agent-server 的 --mode 选择 ReAct 或 plan-execute。
+# 同一份配置可通过 codex-cli 的 --mode 选择 ReAct 或 plan-execute。
 # name 必填，但实际运行模式由 --mode 决定。
 name: react
 log_level: info
