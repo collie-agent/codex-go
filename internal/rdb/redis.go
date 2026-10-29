@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/collie-agent/codex-go/internal/entity"
@@ -12,23 +11,12 @@ import (
 )
 
 const (
-	LLM_CHAT_QUEUE = "codex-go-task-queue"
-	STREAM_NAME    = "codex-go-resp-stream"
+	TASK_QUEUE_NAME = "codex-go-task-queue"
+	STREAM_NAME     = "codex-go-resp-stream"
 )
 
 type RedisManager struct {
 	client redis.UniversalClient
-}
-
-func NewRedisManager() *RedisManager {
-	addr := os.Getenv("LLM_AGG_REDIS_ADDR")
-	if addr == "" {
-		addr = "localhost:6379"
-	}
-	return NewRedisManagerWithClient(redis.NewClient(&redis.Options{
-		Addr:     addr,
-		Password: os.Getenv("LLM_AGG_REDIS_PASSWORD"),
-	}))
 }
 
 // NewRedisManagerWithClient 复用调用方配置的连接；连接生命周期由调用方管理。

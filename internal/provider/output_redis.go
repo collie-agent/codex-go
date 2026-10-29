@@ -17,12 +17,23 @@ type TaskStreamWriter interface {
 // RedisOutputer 使用调用方持有的 Stream writer，不负责关闭连接。
 type RedisOutputer struct{ writer TaskStreamWriter }
 
+type taskStreamIDKey struct{}
+
+// WithTaskStreamID groups all output from one queued task, including delegated
+// agent runs, in the producer's response stream without changing run identities.
+func WithTaskStreamID(ctx context.Context, taskID string) context.Context {
+	return context.WithValue(ctx, taskStreamIDKey{}, taskID)
+}
+
 func NewRedisOutputer(writer TaskStreamWriter) *RedisOutputer {
 	return &RedisOutputer{writer: writer}
 }
 
 // Emit 的 entry ID 由 Redis 生成，消费者从 XREAD/XRANGE 的 ID 字段读取。
 func (o *RedisOutputer) Emit(ctx context.Context, event OutputEvent) error {
+	if taskID, ok := ctx.Value(taskStreamIDKey{}).(string); ok && taskID != "" {
+		event.TaskID = taskID
+	}
 	switch event.Kind {
 	case OutputSchema, OutputContext:
 		return nil

@@ -19,7 +19,7 @@ base:
 
 `addr` 必填，格式为 `host:port`；`db` 默认为 0。密码可以使用 `password` 或 `password_env`，两者互斥。省略 `redis` 时不建立 Redis 连接。Redis 是全局配置，只能在 YAML 顶层声明，不能放在 `base` 或 `agents.<name>` 中。规划器、观察器和各代理共享同一份全局设置。
 
-每个 task 写入 `codex-go-resp-stream-{task_id}`。普通运行的 task_id 为 RunId；多代理任务使用其实际任务 ID。每条记录包含 Redis 自动生成的 entry ID，以及两个字段：
+每个 task 写入 `codex-go-resp-stream-{task_id}`。普通运行的 task_id 为 RunId；多代理任务使用其实际任务 ID。通过 `codex-consumer` 消费时，该消息及其所有代理的输出统一使用消息中的 `TaskId`，数据库中的运行 ID 仍独立生成。每条记录包含 Redis 自动生成的 entry ID，以及两个字段：
 
 | 字段 | 内容 |
 | --- | --- |

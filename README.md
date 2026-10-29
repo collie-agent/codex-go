@@ -15,6 +15,8 @@ Go 实现的coding agent，通过 OpenAI Responses API 进行模型决策，通�
 
 ## 快速开始
 
+Redis List 后台消费入口为 `codex-consumer`，启动方式和消息格式见 [Redis 任务消费](docs/redis-consumer.md)。
+
 ### 环境准备
 
 - Go 1.26.0 或兼容该 `go.mod` 的工具链。
@@ -29,7 +31,7 @@ Go 实现的coding agent，通过 OpenAI Responses API 进行模型决策，通�
 make build
 ```
 
-构建产物为 `bin/codex-mcp`、`bin/codex-cli` 和 `bin/codex-migrate`，使用 `-trimpath` 和 `-s -w` 减小二进制体积。可以用 `GOOS`、`GOARCH`、`BUILD_DIR` 覆盖构建目标和输出目录。
+构建产物为 `bin/codex-mcp`、`bin/codex-cli`、`bin/codex-consumer` 和 `bin/codex-migrate`，使用 `-trimpath` 和 `-s -w` 减小二进制体积。可以用 `GOOS`、`GOARCH`、`BUILD_DIR` 覆盖构建目标和输出目录。
 
 创建 `agent.yaml`，将 `your-model` 替换为实际模型名：
 
