@@ -248,7 +248,11 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 	// Middleware 位于 SDK 重试循环内；正文只随 SDK 的 Read 被动收集，不能抢先读取并阻塞重试。
 	var attemptBodies []*usageBody
 	// 自定义目标接收全部流式片段，stderr 的展示级别由输出适配器处理。
+	answer := &answerStream{lineProtocol: c.agentConfig.LLMConfig.OutputSchema == config.LineProtocolLLMOutputSchema}
 	onTextDelta := func(delta string) {
+		if text := answer.feed(delta); text != "" {
+			c.emitOutput(ctx, taskId, OutputAnswerDelta, TextOutput{Text: text})
+		}
 		c.emitOutput(ctx, taskId, OutputTextDelta, TextOutput{Text: delta})
 	}
 	response, err := c.strategy.create(ctx, c.client, params, onTextDelta, option.WithMiddleware(func(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
@@ -260,6 +264,9 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 			status = fmt.Sprintf("http_error_%d", resp.StatusCode)
 		}
 		record := func(body []byte, readErr error) {
+			if c.logLevel == config.DebugLogLevel && len(body) > 0 {
+				c.emitOutput(ctx, taskId, OutputRawResponse, RawResponseOutput{Body: string(body)})
+			}
 			usageResponse := &responses.Response{}
 			// SSE 的终态事件本身已完整；[DONE]、取消或断连不保证 HTTP EOF。
 			// 仅解析 SDK 已读取的数据，绝不主动读取被丢弃的重试正文。
@@ -338,9 +345,14 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 	}
 
 	text := response.OutputText()
-	// 响应文本是用户可见输出；error 级别及携带工具调用的轮次也保留。
-	if strings.TrimSpace(text) != "" {
-		c.emitOutput(ctx, taskId, OutputText, TextOutput{Text: text})
+	// 按传输模式互斥输出：流式只发片段，非流式只发提取后的 answer。
+	if !c.agentConfig.LLMConfig.Stream && strings.TrimSpace(text) != "" {
+		visibleText := answer.feed(text)
+		// 默认 stderr 保留完整诊断（观察器等响应没有 answer 字段）。
+		if c.output == nil {
+			visibleText = text
+		}
+		c.emitOutput(ctx, taskId, OutputText, TextOutput{Text: visibleText})
 	}
 	if len(toolCalls) > 0 {
 		// 普通说明可以伴随工具调用；可解析的最终结果与工具调用互斥。

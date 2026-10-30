@@ -32,7 +32,7 @@ func configuration(t *testing.T, addr, endpoint string) string {
 	return path
 }
 
-func TestConsumerRunsTasksInOrderAfterInvalidMessagesAndFailedRun(t *testing.T) {
+func TestConsumerCompletesSuccessfulTaskAfterOutputButNotFailedTask(t *testing.T) {
 	raw := os.Getenv("CODEX_TEST_MYSQL_URL")
 	if raw == "" {
 		t.Skip("set CODEX_TEST_MYSQL_URL for consumer integration tests")
@@ -83,6 +83,22 @@ func TestConsumerRunsTasksInOrderAfterInvalidMessagesAndFailedRun(t *testing.T) 
 			if err != nil {
 				t.Error(err)
 			}
+			for taskID, want := range map[string]int{"queued-task": 1, "failed-task": 0} {
+				events, err := client.XRange(context.Background(), rdb.STREAM_NAME+"-"+taskID, "-", "+").Result()
+				if err != nil {
+					t.Error(err)
+					continue
+				}
+				count := 0
+				for _, event := range events {
+					if event.Values["type"] == "task_completed" {
+						count++
+					}
+				}
+				if count != want {
+					t.Errorf("task %s: completion events = %d, want %d", taskID, count, want)
+				}
+			}
 		case <-time.After(3 * time.Second):
 			t.Error("consumer did not exit")
 		}
@@ -102,6 +118,7 @@ func TestConsumerRunsTasksInOrderAfterInvalidMessagesAndFailedRun(t *testing.T) 
 	defer reader.Close()
 	manager := rdb.NewRedisManagerWithClient(reader)
 	lastID := ""
+	sawAnswer := false
 	for {
 		events, err := manager.ReadTaskStream(ctx, "queued-task", lastID)
 		if err != nil {
@@ -110,6 +127,12 @@ func TestConsumerRunsTasksInOrderAfterInvalidMessagesAndFailedRun(t *testing.T) 
 		for _, event := range events {
 			lastID = event.ID
 			if event.Type == "text" && strings.Contains(event.Delta, "queue task done") {
+				sawAnswer = true
+			}
+			if event.Type == "task_completed" {
+				if !sawAnswer || event.Delta != "{}" {
+					t.Fatalf("completion must follow task output with empty JSON payload: sawAnswer=%v event=%+v", sawAnswer, event)
+				}
 				return
 			}
 		}

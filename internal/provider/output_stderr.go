@@ -39,6 +39,11 @@ type ContextOutput struct {
 	Context string `json:"context"`
 }
 
+// RawResponseOutput 保留 Responses API 返回的原始 HTTP 正文。
+type RawResponseOutput struct {
+	Body string `json:"body"`
+}
+
 // StderrOutputer 将结构化事件呈现为可读日志；必须通过 NewStderrOutputer 创建。
 // OutputSchema.Data 是 schema 本身；其余 Data 分别编码对应的 *Output 结构。
 // 时间前缀使用本地时间，与标准 logger 的日期时间格式一致。
@@ -70,18 +75,27 @@ func (o *StderrOutputer) Emit(ctx context.Context, event OutputEvent) error {
 			return err
 		}
 		message = "LLM response text=" + data.Text
-	case OutputTextDelta:
+	case OutputTextDelta, OutputAnswerDelta:
 		var data TextOutput
 		if err := json.Unmarshal(event.Data, &data); err != nil {
 			return err
 		}
 		message = "LLM response text delta=" + data.Text
+		if event.Kind == OutputAnswerDelta {
+			message = "LLM answer delta=" + data.Text
+		}
 	case OutputContext:
 		var data ContextOutput
 		if err := json.Unmarshal(event.Data, &data); err != nil {
 			return err
 		}
 		message = "LLM context=\n" + data.Context
+	case OutputRawResponse:
+		var data RawResponseOutput
+		if err := json.Unmarshal(event.Data, &data); err != nil {
+			return err
+		}
+		message = "LLM raw response=\n" + data.Body
 	case OutputSchema:
 		var data bytes.Buffer
 		if err := json.Indent(&data, event.Data, "", "  "); err != nil {

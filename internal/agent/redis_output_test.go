@@ -98,19 +98,31 @@ func TestPlannerPublishesRedisOutput(t *testing.T) {
 	}
 }
 
-func TestObserverPublishesRedisOutput(t *testing.T) {
+func TestObserverPrintsWithoutPublishingRedisOutput(t *testing.T) {
 	redisClient, addr := testutil.StartRedis(t)
-	server := plannerTestServer(t, `{"ConfirmedFacts":[],"ReportedErrors":[]}`, false)
+	server := plannerTestServer(t, `{"ConfirmedFacts":["found evidence"],"ReportedErrors":[]}`, false)
 	cfg := plannerTestConfig(server.URL, config.JsonLLMOutputSchema)
 	cfg.LogLevel = config.ErrorLogLevel
 	cfg.Global = &config.GlobalConfig{Redis: &config.RedisConfig{Addr: addr}}
 	durable := &fileContext.DurableState{RunId: "observe-task", Goal: "inspect"}
 	observation := fileContext.NewObservationContext(durable, &fileContext.Observation{}, &fileContext.ToolResult{ToolName: "read_file", ToolCallId: "read", Result: "hello"})
+	output, err := os.CreateTemp(t.TempDir(), "observation-log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer output.Close()
+	stderr := os.Stderr
+	os.Stderr = output
+	defer func() { os.Stderr = stderr }()
 	if _, _, err := NewObserveProcess[ObserveResult](t.Context(), observation).Run(cfg, durable); err != nil {
 		t.Fatal(err)
 	}
+	logs, err := os.ReadFile(output.Name())
+	if err != nil || !strings.Contains(string(logs), `found evidence`) {
+		t.Fatalf("observation missing from stderr: %s, err=%v", logs, err)
+	}
 	entries, err := redisClient.XRange(t.Context(), "codex-go-resp-stream-observe-task", "-", "+").Result()
-	if err != nil || len(entries) != 2 || entries[0].Values["type"] != "usage" || entries[1].Values["type"] != "text" {
+	if err != nil || len(entries) != 0 {
 		t.Fatalf("entries=%v err=%v", entries, err)
 	}
 }
@@ -239,10 +251,10 @@ func TestWorkerStreamsRedisAtErrorLogLevel(t *testing.T) {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
 	entries, err := redisClient.XRange(t.Context(), "codex-go-resp-stream-stream-task", "-", "+").Result()
-	if err != nil || len(entries) != 3 {
+	if err != nil || len(entries) != 2 {
 		t.Fatalf("entries=%v err=%v", entries, err)
 	}
-	for i, kind := range []string{"text_delta", "usage", "text"} {
+	for i, kind := range []string{"text_delta", "usage"} {
 		if entries[i].Values["type"] != kind {
 			t.Fatalf("entry %d=%+v", i, entries[i])
 		}

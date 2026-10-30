@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/collie-agent/codex-go/internal/entity"
+	"github.com/collie-agent/codex-go/internal/rdb"
+	"github.com/collie-agent/codex-go/internal/testutil"
 )
 
 type fakeBackend struct{ task entity.TaskMessage }
@@ -87,4 +89,82 @@ func TestStreamReplaysAndPersists(t *testing.T) {
 		t.Fatal("events not persisted")
 	}
 	cancel()
+}
+
+// Exercise the wire protocol against Redis so replay uses real, exclusive Stream IDs.
+func TestStreamDeliversAndResumesTaskCompletion(t *testing.T) {
+	for _, mode := range []string{"live", "replay", "header", "query"} {
+		t.Run(mode, func(t *testing.T) {
+			client, _ := testutil.StartRedis(t)
+			backend := rdb.NewRedisManagerWithClient(client)
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+			textID, err := backend.WriteTaskStream(ctx, "task", &entity.LLMResponse{Type: "text", Delta: `{"text":"done"}`})
+			if err != nil {
+				t.Fatal(err)
+			}
+			publish := func() string {
+				t.Helper()
+				id, err := backend.WriteTaskStream(ctx, "task", &entity.LLMResponse{Type: "task_completed", Delta: `{}`})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return id
+			}
+			completionID := ""
+			if mode != "live" {
+				completionID = publish()
+			}
+			srv := httptest.NewServer(New(backend, fakeStore{}, time.Second))
+			defer srv.Close()
+			url := srv.URL + "/tasks/task/events"
+			if mode == "query" {
+				url += "?last_event_id=" + textID
+			}
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "header" {
+				req.Header.Set("Last-Event-ID", textID)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != "text/event-stream" {
+				t.Fatalf("unexpected response: %s %v", resp.Status, resp.Header)
+			}
+			if mode == "live" {
+				completionID = publish()
+			}
+			reader := bufio.NewReader(resp.Body)
+			readEvent := func(wantID, wantType, wantDelta string) {
+				t.Helper()
+				id, err := reader.ReadString('\n')
+				if err != nil || id != "id: "+wantID+"\n" {
+					t.Fatalf("SSE id=%q err=%v, want %s", id, err, wantID)
+				}
+				data, err := reader.ReadString('\n')
+				if err != nil || !strings.HasPrefix(data, "data: ") {
+					t.Fatalf("SSE data=%q err=%v", data, err)
+				}
+				var event entity.StreamEvent
+				if err := json.Unmarshal([]byte(strings.TrimPrefix(data, "data: ")), &event); err != nil {
+					t.Fatal(err)
+				}
+				if event.ID != wantID || event.Type != wantType || event.Delta != wantDelta {
+					t.Fatalf("unexpected event: %+v", event)
+				}
+				if line, err := reader.ReadString('\n'); err != nil || line != "\n" {
+					t.Fatalf("SSE separator=%q err=%v", line, err)
+				}
+			}
+			if mode == "live" || mode == "replay" {
+				readEvent(textID, "text", `{"text":"done"}`)
+			}
+			readEvent(completionID, "task_completed", `{}`)
+		})
+	}
 }

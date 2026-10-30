@@ -13,14 +13,16 @@ type LLMOutputParser[T any] interface {
 type OutputKind string
 
 const (
-	OutputSchema     OutputKind = "schema"
-	OutputContext    OutputKind = "context"
-	OutputTextDelta  OutputKind = "text_delta"
-	OutputText       OutputKind = "text"
-	OutputToolCall   OutputKind = "tool_call"
-	OutputToolResult OutputKind = "tool_result"
-	OutputToolError  OutputKind = "tool_error"
-	OutputUsage      OutputKind = "usage"
+	OutputSchema      OutputKind = "schema"
+	OutputContext     OutputKind = "context"
+	OutputAnswerDelta OutputKind = "answer_delta"
+	OutputTextDelta   OutputKind = "text_delta"
+	OutputText        OutputKind = "text"
+	OutputToolCall    OutputKind = "tool_call"
+	OutputToolResult  OutputKind = "tool_result"
+	OutputToolError   OutputKind = "tool_error"
+	OutputUsage       OutputKind = "usage"
+	OutputRawResponse OutputKind = "raw_response"
 )
 
 // ToolResultOutput 用 call_id 关联工具调用；Result 保存原生 MCP content JSON。

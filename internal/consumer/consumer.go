@@ -61,6 +61,8 @@ func RunWithConcurrency(ctx context.Context, opts application.Options, concurren
 	client := redis.NewClient(&redis.Options{
 		Addr: cfg.Addr, Username: cfg.Username, Password: cfg.Password, DB: cfg.DB,
 		ContextTimeoutEnabled: true,
+		// 完成事件使用 XADD，禁用自动重试以免响应丢失时重复发布。
+		MaxRetries: -1,
 	})
 	defer client.Close()
 	ctx, cancel := context.WithCancel(ctx)
@@ -127,6 +129,16 @@ func consume(ctx context.Context, client *redis.Client, opts application.Options
 		if _, err := application.Run(taskCtx, taskOpts); err != nil {
 			fmt.Fprintf(opts.Stderr, "consumer: task_id=%q failed: %v\n", message.TaskId, err)
 		} else {
+			// 仅在整个任务及最终检查点成功后发布，避免将子代理或模型轮次结束误报为任务完成。
+			// 使用独立限时上下文，退出信号不应丢弃已领取任务的完成通知。
+			publishCtx, cancel := context.WithTimeout(taskCtx, 5*time.Second)
+			_, err := rdb.NewRedisManagerWithClient(client).WriteTaskStream(publishCtx, message.TaskId, &entity.LLMResponse{
+				Type: "task_completed", Delta: "{}",
+			})
+			cancel()
+			if err != nil {
+				fmt.Fprintf(opts.Stderr, "consumer: task_id=%q publish completion failed: %v\n", message.TaskId, err)
+			}
 			fmt.Fprintf(opts.Stderr, "consumer: task_id=%q completed\n", message.TaskId)
 		}
 	}

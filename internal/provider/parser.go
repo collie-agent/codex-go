@@ -31,6 +31,7 @@ func (*JsonOutput[T]) Parse(text string, model T) error {
 //	text="hello"
 //	end_response
 //
+// 字段和块边界可以用换行或空格、Tab 分隔；字符串内的空白保持原样。
 // 每个字段必须写成 FIELD=JSON_LITERAL。值只能是 JSON 字符串、数字、
 // 布尔值或 null；不允许数组或对象字面量：
 //
@@ -281,6 +282,7 @@ var (
 )
 
 func parseLineProtocol(document string) (*ParsedBlock, error) {
+	document = normalizeProtocolSpacing(document)
 	document = strings.ReplaceAll(strings.ReplaceAll(document, "\r\n", "\n"), "\r", "\n")
 	lines := strings.Split(strings.TrimSuffix(document, "\n"), "\n")
 	if document == "" || document == "\n" {
@@ -342,6 +344,7 @@ func parseLineProtocol(document string) (*ParsedBlock, error) {
 // lineProtocolResponseDocument 只在 LLM 响应入口去掉块外说明，协议解析器仍严格校验。
 // 保留所有边界之间的内容，避免静默选取多根块中的一个或掩盖损坏的子块。
 func lineProtocolResponseDocument(text string) string {
+	text = normalizeProtocolSpacing(text)
 	normalized := strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
 	lines := strings.Split(normalized, "\n")
 	first, last := -1, -1

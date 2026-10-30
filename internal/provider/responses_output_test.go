@@ -195,7 +195,7 @@ func TestResponsesEmitsStreamingDeltaToCustomOutputAtEveryLevel(t *testing.T) {
 			if data.Text != "partial" || events[0].TaskID != "output-task" || events[0].Label != "observe" {
 				t.Fatalf("delta event=%+v", events[0])
 			}
-			if len(output.ofKind(OutputText)) != 1 || len(output.ofKind(OutputUsage)) != 1 {
+			if len(output.ofKind(OutputText)) != 0 || len(output.ofKind(OutputUsage)) != 1 {
 				t.Fatalf("terminal events=%v", output.events)
 			}
 		})
@@ -284,7 +284,7 @@ func TestResponsesEmitsText(t *testing.T) {
 	if err := json.Unmarshal(events[0].Data, &data); err != nil {
 		t.Fatal(err)
 	}
-	if events[0].TaskID != "output-task" || events[0].Label != "observe" || data.Text != `{"answer":"ok"}` {
+	if events[0].TaskID != "output-task" || events[0].Label != "observe" || data.Text != "ok" {
 		t.Fatalf("event=%+v data=%+v", events[0], data)
 	}
 }

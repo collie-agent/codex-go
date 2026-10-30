@@ -58,7 +58,7 @@ func TestResponsesStreamReturnsCompleteText(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.Count(string(data), "LLM response text=") != 1 || !strings.Contains(string(data), `LLM response text={"answer":"complete"}`) {
+			if strings.Contains(string(data), "LLM response text=") {
 				t.Fatalf("unexpected response log: %s", data)
 			}
 

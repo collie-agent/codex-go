@@ -236,3 +236,98 @@ func TestRedisOutputerRoundTripsThroughTaskStream(t *testing.T) {
 		t.Fatalf("ttl=%v err=%v", ttl, err)
 	}
 }
+
+func TestRedisStreamsAnswerDelta(t *testing.T) {
+	client, _ := testutil.StartRedis(t)
+	output := provider.NewRedisOutputer(rdb.NewRedisManagerWithClient(client))
+	if err := output.Emit(t.Context(), provider.OutputEvent{TaskID: "answer", Kind: provider.OutputAnswerDelta, Data: json.RawMessage(`{"text":"你好"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := client.XRange(t.Context(), "codex-go-resp-stream-answer", "-", "+").Result()
+	if err != nil || len(entries) != 1 || entries[0].Values["type"] != "answer_delta" || entries[0].Values["delta"] != `{"text":"你好"}` {
+		t.Fatalf("entries=%v err=%v", entries, err)
+	}
+}
+
+func TestResponsesRedisNonStreamingTextContainsExtractedAnswer(t *testing.T) {
+	redisClient, _ := testutil.StartRedis(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"{\"answer\":\"hello\\n世界\",\"status\":\"completed\"}"}]}]}`)
+	}))
+	defer server.Close()
+	client, err := provider.NewResponsesApiClient[struct {
+		Answer string `json:"answer"`
+	}](&config.LLMConfig{BaseUrl: server.URL, Model: "test", OutputSchema: config.JsonLLMOutputSchema}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.SetOutputer(provider.NewRedisOutputer(rdb.NewRedisManagerWithClient(redisClient)))
+	if _, _, _, err := client.Run(t.Context(), "answer-text", "question", nil); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := redisClient.XRange(t.Context(), "codex-go-resp-stream-answer-text", "-", "+").Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var texts []string
+	for _, entry := range entries {
+		switch entry.Values["type"] {
+		case "text":
+			texts = append(texts, entry.Values["delta"].(string))
+		case "text_delta", "answer_delta":
+			t.Fatalf("non-streaming delta: %+v", entry)
+		}
+	}
+	if len(texts) != 1 || texts[0] != `{"text":"hello\n世界"}` {
+		t.Fatalf("texts=%q", texts)
+	}
+}
+
+func TestResponsesRedisStreamingNeverEmitsText(t *testing.T) {
+	for _, withDelta := range []bool{true, false} {
+		t.Run(fmt.Sprint(withDelta), func(t *testing.T) {
+			redisClient, _ := testutil.StartRedis(t)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				if withDelta {
+					fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"{\\\"answer\\\":\\\"hello\\\"}\"}\n\n")
+				}
+				fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"{\\\"answer\\\":\\\"hello\\\"}\"}]}]}}\n\n")
+			}))
+			defer server.Close()
+			client, err := provider.NewResponsesApiClient[struct {
+				Answer string `json:"answer"`
+			}](&config.LLMConfig{Stream: true, BaseUrl: server.URL, Model: "test", OutputSchema: config.JsonLLMOutputSchema}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client.SetOutputer(provider.NewRedisOutputer(rdb.NewRedisManagerWithClient(redisClient)))
+			result, _, _, err := client.Run(t.Context(), "stream-answer", "question", nil)
+			if err != nil || result.Answer != "hello" {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+			entries, err := redisClient.XRange(t.Context(), "codex-go-resp-stream-stream-answer", "-", "+").Result()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var raw, answer int
+			for _, entry := range entries {
+				switch entry.Values["type"] {
+				case "text":
+					t.Fatalf("streaming response emitted text: %+v", entry)
+				case "text_delta":
+					raw++
+				case "answer_delta":
+					answer++
+					if entry.Values["delta"] != `{"text":"hello"}` {
+						t.Fatalf("answer=%+v", entry)
+					}
+				}
+			}
+			if withDelta && (raw != 1 || answer != 1) {
+				t.Fatalf("raw=%d answer=%d", raw, answer)
+			}
+		})
+	}
+}
