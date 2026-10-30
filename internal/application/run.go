@@ -16,6 +16,7 @@ import (
 	"github.com/collie-agent/codex-go/internal/config"
 	state "github.com/collie-agent/codex-go/internal/context"
 	"github.com/collie-agent/codex-go/internal/database"
+	"github.com/collie-agent/codex-go/internal/provider"
 )
 
 type Options struct {
@@ -24,6 +25,7 @@ type Options struct {
 	RuntimeDirs                                                  []string
 	Skills                                                       []agent.Skill
 	Stderr                                                       io.Writer
+	Output                                                       provider.Outputer
 }
 
 // Run creates the recovery identity before starting any model or tool execution.
@@ -83,7 +85,7 @@ func Run(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 		return nil, err
 	}
 	// ID 只在 pending checkpoint 提交后输出，stdout 留给最终答案。
-	if _, err := fmt.Fprintf(opts.Stderr, "run_id=%s conv_id=%s\n", run.RunID, run.ConvID); err != nil {
+	if err := emitTaskInfo(ctx, opts, loaded, run); err != nil {
 		return nil, err
 	}
 	run.Status = "running"
@@ -146,4 +148,18 @@ func finishRun(ctx context.Context, store *database.RunStore, run *database.Agen
 		return nil, runErr
 	}
 	return results, nil
+}
+
+func emitTaskInfo(ctx context.Context, opts Options, loaded *config.AgentConfig, run database.AgentRun) error {
+	output := opts.Output
+	if output == nil {
+		var cleanup func()
+		output, cleanup = provider.NewTaskOutputer(loaded.RedisConfig(), loaded.LogLevel, opts.Stderr)
+		defer cleanup()
+	}
+	data, err := json.Marshal(provider.TaskInfoOutput{RunID: run.RunID, ConvID: run.ConvID})
+	if err != nil {
+		return err
+	}
+	return output.Emit(ctx, provider.OutputEvent{TaskID: run.RunID, Kind: provider.OutputTaskInfo, Data: data})
 }

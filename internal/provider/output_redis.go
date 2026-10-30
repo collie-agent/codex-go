@@ -37,7 +37,7 @@ func (o *RedisOutputer) Emit(ctx context.Context, event OutputEvent) error {
 	switch event.Kind {
 	case OutputSchema, OutputContext:
 		return nil
-	case OutputAnswerDelta, OutputText, OutputTextDelta, OutputToolCall, OutputToolResult, OutputToolError, OutputUsage:
+	case OutputTaskInfo, OutputAnswerDelta, OutputText, OutputTextDelta, OutputToolCall, OutputToolResult, OutputToolError, OutputUsage:
 	default:
 		return fmt.Errorf("redis output: unsupported event type %q", event.Kind)
 	}

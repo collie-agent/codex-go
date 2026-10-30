@@ -17,6 +17,7 @@ import (
 	"github.com/collie-agent/codex-go/internal/consumer"
 	"github.com/collie-agent/codex-go/internal/database"
 	"github.com/collie-agent/codex-go/internal/entity"
+	"github.com/collie-agent/codex-go/internal/provider"
 	"github.com/collie-agent/codex-go/internal/rdb"
 	"github.com/collie-agent/codex-go/internal/testutil"
 	"github.com/redis/go-redis/v9"
@@ -132,6 +133,98 @@ func TestConsumerCompletesSuccessfulTaskAfterOutputButNotFailedTask(t *testing.T
 			if event.Type == "task_completed" {
 				if !sawAnswer || event.Delta != "{}" {
 					t.Fatalf("completion must follow task output with empty JSON payload: sawAnswer=%v event=%+v", sawAnswer, event)
+				}
+				return
+			}
+		}
+	}
+}
+
+func TestConsumerContinuesConversationFromMessage(t *testing.T) {
+	raw := os.Getenv("CODEX_TEST_MYSQL_URL")
+	if raw == "" {
+		t.Skip("set CODEX_TEST_MYSQL_URL for consumer integration tests")
+	}
+	t.Setenv("CODEX_MYSQL_URL", raw)
+	db, err := database.Open(t.Context(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close(db)
+	if err := database.Migrate(t.Context(), db); err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	store := database.NewRunStore(db)
+	prior, err := store.Create(t.Context(), "", "inspect workspace", workspace, "react")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior.Status = "completed"
+	prior.Result = json.RawMessage(`{"status":"completed","answer":"previous conversation evidence"}`)
+	if err := store.Save(t.Context(), &prior); err != nil {
+		t.Fatal(err)
+	}
+	client, addr := testutil.StartRedis(t)
+	requests := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if testutil.RespondWithCriteria(t, w, r) {
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		requests <- string(body)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"conversation-test","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"{\"status\":\"completed\",\"answer\":\"continued\"}"}]}]}`)
+	}))
+	defer server.Close()
+	// 使用协议字面量，避免编码器与解码器同时遗漏 ConvId 而误通过。
+	message := fmt.Sprintf(`{"Input":"continue previous task","TaskId":"conversation-task","ConvId":%q}`, prior.ConvID)
+	if err := client.RPush(t.Context(), rdb.TASK_QUEUE_NAME, message).Err(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	done := make(chan error, 1)
+	opts := application.Options{ConfigPath: configuration(t, addr, server.URL), Workspace: workspace, Timeout: time.Second, Stderr: io.Discard}
+	go func() { done <- consumer.Run(ctx, opts) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Error(err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Error("consumer did not exit")
+		}
+	})
+	reader := redis.NewClient(&redis.Options{Addr: addr, ContextTimeoutEnabled: true})
+	defer reader.Close()
+	manager := rdb.NewRedisManagerWithClient(reader)
+	lastID := ""
+	var info provider.TaskInfoOutput
+	for {
+		events, err := manager.ReadTaskStream(ctx, "conversation-task", lastID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range events {
+			lastID = event.ID
+			if event.Type == "task_info" {
+				if err := json.Unmarshal([]byte(event.Delta), &info); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if event.Type == "task_completed" {
+				if info.ConvID != prior.ConvID || info.RunID == "" || info.RunID == prior.RunID {
+					t.Errorf("expected a new run in conversation %s, got %+v", prior.ConvID, info)
+				}
+				select {
+				case body := <-requests:
+					if !strings.Contains(body, "previous conversation evidence") {
+						t.Errorf("model input missing previous conversation result: %s", body)
+					}
+				case <-ctx.Done():
+					t.Fatal("queued task did not reach the model")
 				}
 				return
 			}

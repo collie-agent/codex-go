@@ -23,6 +23,7 @@ const (
 	OutputToolError   OutputKind = "tool_error"
 	OutputUsage       OutputKind = "usage"
 	OutputRawResponse OutputKind = "raw_response"
+	OutputTaskInfo    OutputKind = "task_info"
 )
 
 // ToolResultOutput 用 call_id 关联工具调用；Result 保存原生 MCP content JSON。
@@ -32,6 +33,11 @@ type ToolResultOutput struct {
 	CallID string          `json:"call_id"`
 	Result json.RawMessage `json:"result,omitempty"`
 	Error  string          `json:"error,omitempty"`
+}
+
+type TaskInfoOutput struct {
+	RunID  string `json:"run_id"`
+	ConvID string `json:"conv_id"`
 }
 
 type OutputEvent struct {

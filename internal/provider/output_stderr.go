@@ -69,6 +69,12 @@ func (o *StderrOutputer) Emit(ctx context.Context, event OutputEvent) error {
 	}
 	var message string
 	switch event.Kind {
+	case OutputTaskInfo:
+		var data TaskInfoOutput
+		if err := json.Unmarshal(event.Data, &data); err != nil {
+			return err
+		}
+		message = fmt.Sprintf("run_id=%s conv_id=%s", data.RunID, data.ConvID)
 	case OutputText:
 		var data TextOutput
 		if err := json.Unmarshal(event.Data, &data); err != nil {
@@ -141,6 +147,9 @@ func (o *StderrOutputer) Emit(ctx context.Context, event OutputEvent) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	line := time.Now().Format("2006/01/02 15:04:05") + " " + prefix + message + "\n"
+	if event.Kind == OutputTaskInfo {
+		line = message + "\n"
+	}
 	n, err := io.WriteString(o.writer, line)
 	if err == nil && n != len(line) {
 		return io.ErrShortWrite

@@ -41,6 +41,28 @@ func TestCreateTask(t *testing.T) {
 	}
 }
 
+func TestCreateTaskWithConversation(t *testing.T) {
+	f := &fakeBackend{}
+	w := httptest.NewRecorder()
+	New(f, fakeStore{}, 0).ServeHTTP(w, httptest.NewRequest("POST", "/tasks", strings.NewReader(`{"input":"continue task","ConvId":"existing-conversation"}`)))
+	if w.Code != http.StatusCreated || f.task.ConvId != "existing-conversation" {
+		t.Fatalf("status=%d body=%s task=%+v", w.Code, w.Body, f.task)
+	}
+}
+
+func TestCreateTaskWithoutConversation(t *testing.T) {
+	for _, body := range []string{`{"input":"new task"}`, `{"input":"new task","ConvId":""}`} {
+		t.Run(body, func(t *testing.T) {
+			f := &fakeBackend{}
+			w := httptest.NewRecorder()
+			New(f, fakeStore{}, 0).ServeHTTP(w, httptest.NewRequest("POST", "/tasks", strings.NewReader(body)))
+			if w.Code != http.StatusCreated || f.task.ConvId != "" || f.task.Input != "new task" || f.task.TaskId == "" {
+				t.Fatalf("status=%d body=%s task=%+v", w.Code, w.Body, f.task)
+			}
+		})
+	}
+}
+
 type streamBackend struct{ ids chan string }
 
 func (s *streamBackend) RPush(context.Context, string, string) (int64, error) { return 1, nil }

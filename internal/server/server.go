@@ -31,7 +31,8 @@ func New(backend Backend, store Store, interval time.Duration) http.Handler {
 	router := gin.New()
 	router.POST("/tasks", func(c *gin.Context) {
 		var req struct {
-			Input string `json:"input"`
+			Input  string `json:"input"`
+			ConvId string
 		}
 		if c.ShouldBindJSON(&req) != nil || strings.TrimSpace(req.Input) == "" {
 			c.JSON(400, gin.H{"error": "input is required"})
@@ -43,7 +44,8 @@ func New(backend Backend, store Store, interval time.Duration) http.Handler {
 			return
 		}
 		id := hex.EncodeToString(b)
-		data, _ := json.Marshal(entity.TaskMessage{Input: req.Input, TaskId: id})
+		// 可选会话 ID 随任务入队，由消费者传给 application.Run。
+		data, _ := json.Marshal(entity.TaskMessage{Input: req.Input, TaskId: id, ConvId: req.ConvId})
 		if _, err := backend.RPush(c.Request.Context(), rdb.TASK_QUEUE_NAME, string(data)); err != nil {
 			c.JSON(500, gin.H{"error": "cannot enqueue task"})
 			return

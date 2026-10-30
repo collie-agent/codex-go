@@ -3,6 +3,7 @@ package entity
 type TaskMessage struct {
 	Input  string
 	TaskId string
+	ConvId string
 }
 
 type LLMResponse struct {

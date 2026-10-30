@@ -82,10 +82,8 @@ func Resume(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 	if run.Status != "pending" && run.Status != "running" && run.Status != "failed" {
 		return nil, fmt.Errorf("run %s has unsupported status %q", run.RunID, run.Status)
 	}
-	if opts.Stderr != nil {
-		if _, err := fmt.Fprintf(opts.Stderr, "run_id=%s conv_id=%s\n", run.RunID, run.ConvID); err != nil {
-			return nil, err
-		}
+	if err := emitTaskInfo(ctx, opts, loaded, run); err != nil {
+		return nil, err
 	}
 	steps, err := lockedStore.Steps(ctx, run.RunID)
 	if err != nil {

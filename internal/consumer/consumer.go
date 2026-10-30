@@ -123,6 +123,8 @@ func consume(ctx context.Context, client *redis.Client, opts application.Options
 		}
 		taskOpts := opts
 		taskOpts.Task = message.Input
+		// 会话归属按消息指定；省略时由 application 为本任务创建新会话。
+		taskOpts.ConvID = message.ConvId
 		// 退出信号只停止领取；已经出队的任务必须运行完成，避免丢失。
 		// 队列任务 ID 仅关联输出；持久化 run ID 仍由 application 生成。
 		taskCtx := provider.WithTaskStreamID(context.WithoutCancel(ctx), message.TaskId)

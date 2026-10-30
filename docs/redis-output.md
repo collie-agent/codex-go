@@ -36,6 +36,7 @@ delta: {"text":"hello"}
 
 | type | delta 示例 |
 | --- | --- |
+| `task_info` | `{"run_id":"8ab8b473adf7df4574a37fa158d4ff59","conv_id":"09db16c71e2c040d0dc32019f2b504b9"}` |
 | `task_completed` | `{}`（仅队列任务整体成功完成后） |
 | `text_delta` | `{"text":"hello"}` |
 | `answer_delta` | `{"text":"解码后的答案片段"}` |
@@ -45,13 +46,15 @@ delta: {"text":"hello"}
 | `text` | `{"text":"提取并解码后的 answer"}` |
 | `usage` | `{"model":"your-model","response_id":"resp-1","status":"completed","input_tokens":"20","output_tokens":"5","cached_input_tokens":"4","uncached_input_tokens":"16"}` |
 
+`task_info` 在新运行的 pending 检查点保存后、开始执行前发送；恢复未完成的运行时也会发送原有 ID。直接重放已完成的运行不会发送该事件。队列任务通过 `TaskId` 对应的 Stream 接收事件；其中的 `run_id` 和 `conv_id` 是数据库中的运行和会话 ID。该事件写入失败会使启动或恢复返回错误。
+
 工具失败时，`tool_error` 也保留能获取到的 `result`。`result` 是 MCP content 的 JSON 数组，`arguments` 是模型生成的 JSON 字符串。模型校验导致整批调用被拒绝时，每个调用收到一个 `tool_error`，说明该批未执行。结果只在执行完成时写入，不随后续模型历史重放重复写入。
 
 `task_completed` 由 `codex-consumer` 在整个任务执行和最终检查点保存成功后写入一次；模型轮次、执行步骤或子代理完成不会单独产生此事件，失败任务也不会产生。该事件沿用任务消息中的 `TaskId`，支持与普通输出相同的回放和续传；直接运行代理不会产生此队列任务事件。
 
 Stream 不发送 schema 和请求上下文。流式 delta、工具结果和 usage 不受 `log_level` 过滤；`stream: false` 时只发送提取后的 `text`，不发送 `text_delta/answer_delta`。usage 按每次 HTTP 尝试记录，缺失计数使用字符串 `"unknown"`，与 `"0"` 区分。
 
-消费者可以用 `XRANGE` 读取历史，或用 `XREAD` 从最后收到的 ID 继续读取。通过 `internal/rdb/redis.go` 的 `WriteTaskStream` 写入，`ReadTaskStream` 可读取相同协议；每次写入将过期时间刷新为 24 小时，不自动裁剪。写入错误会记录诊断，不触发模型或工具重试；Redis 写入也不自动重试，以避免重复事件。
+消费者可以用 `XRANGE` 读取历史，或用 `XREAD` 从最后收到的 ID 继续读取。通过 `internal/rdb/redis.go` 的 `WriteTaskStream` 写入，`ReadTaskStream` 可读取相同协议；每次写入将过期时间刷新为 24 小时，不自动裁剪。模型和工具输出的写入错误会记录诊断，不触发模型或工具重试；Redis 写入也不自动重试，以避免重复事件。
 
 ```sh
 redis-cli XRANGE codex-go-resp-stream-your-task-id - +

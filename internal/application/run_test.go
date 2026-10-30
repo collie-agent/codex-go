@@ -3,7 +3,9 @@ package application_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/collie-agent/codex-go/internal/provider"
 	"github.com/collie-agent/codex-go/internal/testutil"
 	"io"
 	"net/http"
@@ -348,6 +350,50 @@ func TestAgentRunsShareOnlyEarlierConversationOutcomes(t *testing.T) {
 			}
 			if strings.Index(input, "previous-success") > strings.Index(input, "previous-error") {
 				t.Error("history is not chronological")
+			}
+		})
+	}
+}
+
+type taskInfoSink struct{ events []provider.OutputEvent }
+
+func (s *taskInfoSink) Emit(_ context.Context, event provider.OutputEvent) error {
+	s.events = append(s.events, event)
+	return errors.New("stop after task info")
+}
+
+func TestRunAndResumeEmitTaskInfo(t *testing.T) {
+	_, store := runStore(t)
+	for _, resume := range []bool{false, true} {
+		t.Run(fmt.Sprintf("resume=%v", resume), func(t *testing.T) {
+			sink := &taskInfoSink{}
+			opts := application.Options{ConfigPath: agentConfig(t, "http://localhost"), Task: "test", Workspace: t.TempDir(), Timeout: time.Second, Stderr: io.Discard, Output: sink}
+			var expected database.AgentRun
+			if resume {
+				var err error
+				expected, err = store.Create(t.Context(), "", opts.Task, opts.Workspace, "react")
+				if err != nil {
+					t.Fatal(err)
+				}
+				opts.RunID = expected.RunID
+			}
+			if resume {
+				_, _ = application.Resume(t.Context(), opts)
+			} else {
+				_, _ = application.Run(t.Context(), opts)
+			}
+			if len(sink.events) != 1 || sink.events[0].Kind != provider.OutputTaskInfo {
+				t.Fatalf("events=%+v", sink.events)
+			}
+			var info struct {
+				RunID  string `json:"run_id"`
+				ConvID string `json:"conv_id"`
+			}
+			if err := json.Unmarshal(sink.events[0].Data, &info); err != nil || info.RunID == "" || info.ConvID == "" || sink.events[0].TaskID != info.RunID {
+				t.Fatalf("event=%+v info=%+v err=%v", sink.events[0], info, err)
+			}
+			if resume && (info.RunID != expected.RunID || info.ConvID != expected.ConvID) {
+				t.Fatalf("info=%+v expected=%+v", info, expected)
 			}
 		})
 	}

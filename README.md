@@ -311,7 +311,7 @@ stdout 只输出保存成功后的最终答案；stderr 输出运行 ID、错误
 
 迁移创建 `conversation`、`agent_run` 与 `step_execution`。主键分别为 `conv_id`、`run_id` 和 `(run_id, step_id)`；运行及步骤外键分别引用其归属记录。时间列严格使用 `create_at`、`update_at`，不包含软删除字段。
 
-新任务先保存 pending run，再向 stderr 输出 `run_id=<id> conv_id=<id>`，随后进入 running。成功保存 completed 和完整 JSON 结果（包含 Answer、Observation、CompletionEvidence）；失败保存 failed 和错误。运行目标、绝对工作目录、已确定模式和运行级验收标准也会保存。checkpoint 写入失败立即停止后续调度，不输出未保存的最终答案。
+新任务先保存 pending run，再通过 Outputer 向 stderr 输出 `run_id=<id> conv_id=<id>`，并在配置 Redis 时发送包含两个 ID 的 `task_info` Stream 事件，随后进入 running。恢复未完成的运行时也会输出原有 ID；事件格式及写入行为见 [Redis 输出](docs/redis-output.md)。成功保存 completed 和完整 JSON 结果（包含 Answer、Observation、CompletionEvidence）；失败保存 failed 和错误。运行目标、绝对工作目录、已确定模式和运行级验收标准也会保存。checkpoint 写入失败立即停止后续调度，不输出未保存的最终答案。
 
 `codex-cli` 可以用 `--conv-id <已有 conv_id>` 关联会话。会话仅表示归属，不共享消息历史。普通 ReAct 不创建执行步骤记录。使用 `--run-id` 可显式恢复 pending、running 或 failed 运行；进程启动不会自动恢复遗留运行。运行锁由 MySQL 专用连接持有，崩溃后连接断开即可重新接管。
 

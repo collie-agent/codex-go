@@ -331,3 +331,17 @@ func TestResponsesRedisStreamingNeverEmitsText(t *testing.T) {
 		})
 	}
 }
+
+func TestRedisOutputerWritesTaskInfo(t *testing.T) {
+	client, _ := testutil.StartRedis(t)
+	manager := rdb.NewRedisManagerWithClient(client)
+	output := provider.NewRedisOutputer(manager)
+	data := json.RawMessage(`{"run_id":"run-1","conv_id":"conv-1"}`)
+	if err := output.Emit(t.Context(), provider.OutputEvent{TaskID: "run-1", Kind: provider.OutputTaskInfo, Data: data}); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := manager.ReadTaskStream(t.Context(), "run-1", "")
+	if err != nil || len(entries) != 1 || entries[0].Type != "task_info" || entries[0].Delta != string(data) {
+		t.Fatalf("entries=%v err=%v", entries, err)
+	}
+}

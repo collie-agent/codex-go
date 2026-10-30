@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"io"
 	"time"
 
 	"github.com/collie-agent/codex-go/internal/config"
@@ -39,4 +40,14 @@ func (o *configuredOutputer) Emit(ctx context.Context, event OutputEvent) error 
 		logErr = o.stderr.Emit(ctx, event)
 	}
 	return errors.Join(logErr, o.stream.Emit(ctx, event))
+}
+
+// NewTaskOutputer directs task metadata to the supplied log writer and configured stream.
+func NewTaskOutputer(cfg *config.RedisConfig, level config.LogLevel, writer io.Writer) (Outputer, func()) {
+	output, cleanup := NewConfiguredOutputer(cfg, level)
+	if output == nil {
+		return NewStderrOutputer(writer), cleanup
+	}
+	output.(*configuredOutputer).stderr = NewStderrOutputer(writer)
+	return output, cleanup
 }
