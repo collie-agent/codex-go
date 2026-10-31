@@ -116,3 +116,51 @@ data: {"ID":"1793261930926-0","Type":"task_completed","Delta":"{}"}
 服务按 `--flush-interval` 将该连接已发送的事件批量写入 MySQL，断开时也会尝试写入剩余事件。Redis 读取或数据库写入失败会结束连接；由于响应头已经发送，客户端通常只能观察到连接断开。续传仍从 Redis 读取，并受 Redis Stream 保留时间限制；数据库写入不保证客户端已处理事件，也不作为该接口的回放来源。
 
 模型配置 `stream: false` 时，`text` 的 Delta 为 `{"text":"提取并解码后的 answer"}`；`stream: true` 时发送 `text_delta/answer_delta`，不发送 `text`。互斥规则按模型轮次生效。
+
+## 查询会话的全部代理运行
+
+`GET /conversations/{conv_id}/runs`
+
+返回持久化的会话运行及工具调用快照，不依赖 SSE 订阅或 Redis 事件保留时间。
+
+```json
+{
+  "conv_id": "conversation-id",
+  "runs": [
+    {
+      "run_id": "run-id",
+      "conv_id": "conversation-id",
+      "goal": "inspect repository",
+      "status": "completed",
+      "result": {"answer": "done"},
+      "error": "",
+      "failure_type": "",
+      "mode": "react",
+      "create_at": "2026-10-31T12:00:00Z",
+      "update_at": "2026-10-31T12:01:00Z",
+      "tool_calls": [
+        {
+          "execution_id": "run-id",
+          "call_id": "call-1",
+          "position": 0,
+          "name": "read_file",
+          "arguments": "{\"path\":\"README.md\"}",
+          "status": "completed",
+          "result": "file contents",
+          "error": "",
+          "batch": 0,
+          "batch_position": 0
+        }
+      ]
+    }
+  ]
+}
+```
+
+- 包含该会话所有状态的运行，按 `create_at`、`run_id` 升序返回，不分页。
+- `result` 保留数据库中的 JSON 值，无结果时为 `null`；错误文本通过 `error` 返回。
+- `tool_calls` 包含该运行所有执行实例（含计划步骤及多代理委派）的已持久化调用。通过 `execution_id`、`position` 区分实例及调用顺序；参数和工具结果保留为字符串。尚无结果的调用仍返回其当前状态，不推断成功或失败。
+- 工具调用按 `create_at`、`execution_id`、`position` 升序返回；这不表示并行调用的完成顺序。
+- 已有会话无运行时返回 `200` 和 `runs: []`；运行无工具调用时返回 `tool_calls: []`。
+- 会话不存在返回 `404`；数据库读取失败返回 `500`；未配置会话查询能力返回 `503`。错误响应格式为 `{"error":"..."}`。
+- 查询返回已提交的快照，执行中的最新增量仍以 SSE 为准。

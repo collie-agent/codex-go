@@ -5,6 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"github.com/collie-agent/codex-go/internal/database"
+	"gorm.io/gorm"
 	"fmt"
 	"log"
 	"net/http"
@@ -29,6 +32,26 @@ func New(backend Backend, store Store, interval time.Duration) http.Handler {
 		interval = time.Second
 	}
 	router := gin.New()
+	router.GET("/conversations/:conv_id/runs", func(c *gin.Context) {
+		reader, ok := store.(interface {
+			ConversationRuns(context.Context, string) ([]database.ConversationRun, error)
+		})
+		if !ok {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "conversation history unavailable"})
+			return
+		}
+		runs, err := reader.ConversationRuns(c.Request.Context(), c.Param("conv_id"))
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "conversation not found"})
+			return
+		}
+		if err != nil {
+			log.Printf("read conversation runs: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "cannot read conversation runs"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"conv_id": c.Param("conv_id"), "runs": runs})
+	})
 	router.POST("/tasks", func(c *gin.Context) {
 		var req struct {
 			Input  string `json:"input"`
