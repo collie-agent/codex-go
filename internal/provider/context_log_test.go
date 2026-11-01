@@ -76,3 +76,20 @@ func TestFormatLLMContextListsToolsAndPreservesInput(t *testing.T) {
 		})
 	}
 }
+
+func TestContextLogExpandsHistoryWithTrailingSpaces(t *testing.T) {
+	prompt := "# Conversation history\n\n  > - Result:\n  > \n  >   > first line\n  >   > second line\n"
+	params := responses.ResponseNewParams{Model: "test", Input: responses.ResponseNewParamsInputUnion{OfString: openai.String(prompt)}}
+	before, _ := json.Marshal(params)
+	formatted, err := formatLLMContext(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(formatted), `history\n`) || !strings.Contains(string(formatted), "# Conversation history\n") || !strings.Contains(string(formatted), "> first line\n") {
+		t.Fatalf("history printed as escaped string instead of lines:\n%s", formatted)
+	}
+	after, _ := json.Marshal(params)
+	if string(before) != string(after) {
+		t.Fatal("logging changed API input")
+	}
+}

@@ -15,20 +15,14 @@ import (
 	mcpSdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-type ReactStatus string
+type ReactStatus = fileContext.ReactStatus
 
 const (
-	CompletedReactStatus ReactStatus = "completed"
-	FailedReactStatus    ReactStatus = "failed"
+	CompletedReactStatus = fileContext.CompletedReactStatus
+	FailedReactStatus    = fileContext.FailedReactStatus
 )
 
-type ReactResult struct {
-	Status ReactStatus `json:"status" lineprotocol:"STATUS"`
-	Answer string      `json:"answer" lineprotocol:"ANSWER"`
-	// 计划步骤完成时必填；普通 ReAct 模式使用空列表。
-	Observation        []string `json:"Observation" lineprotocol:"OBSERVATION"`
-	CompletionEvidence []string `json:"CompletionEvidence" lineprotocol:"COMPLETION_EVIDENCE"`
-}
+type ReactResult = fileContext.ReactResult
 
 // BusinessFailureError distinguishes a terminal model decision from an execution fault.
 // Keep the structured result on the error because orchestrators may discard failed outputs.

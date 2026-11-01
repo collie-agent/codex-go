@@ -14,7 +14,7 @@ import (
 	state "github.com/collie-agent/codex-go/internal/context"
 )
 
-func TestResumeReplaysInterruptedHistoryAfterSystemMessage(t *testing.T) {
+func TestResumeKeepsHistoricalMarkdownSeparateFromCurrentToolMessages(t *testing.T) {
 	db, store := runStore(t)
 	ctx := context.Background()
 	prior, err := store.Create(ctx, "", "historical goal", t.TempDir(), "react")
@@ -60,24 +60,17 @@ func TestResumeReplaysInterruptedHistoryAfterSystemMessage(t *testing.T) {
 			t.Error(err)
 		}
 		items := request.Input
-		if len(items) != 8 {
-			t.Errorf("want system, three call/output pairs, current state; got %+v", items)
+		if len(items) != 4 {
+			t.Errorf("want system, current call/output, current state; got %d messages", len(items))
 		} else {
-			if items[0].Role != "system" || items[7].Role != "user" {
-				t.Errorf("wrong message order: %+v", items)
+			if items[0].Role != "system" || items[3].Role != "user" || items[1].CallID != "current-call" || items[2].CallID != "current-call" || items[2].Output != "current result" {
+				t.Errorf("current tool messages lost: %+v", items)
 			}
-			for i, id := range []string{"history-first", "history-second", "current-call"} {
-				call, output := items[1+2*i], items[2+2*i]
-				if call.Type != "function_call" || call.CallID != id || output.Type != "function_call_output" || output.CallID != id {
-					t.Errorf("missing ordered call/output pair for %s: %+v", id, items)
+			for _, want := range []string{"- tool_interactions:", "history-first", "history-second", "first historical result", "permission denied"} {
+				if !strings.Contains(string(items[0].Content), want) {
+					t.Errorf("historical Markdown missing %q", want)
 				}
 			}
-			if items[2].Output != "first historical result" || !strings.Contains(items[4].Output, "permission denied") || items[6].Output != "current result" {
-				t.Errorf("tool results lost: %+v", items)
-			}
-		}
-		if len(items) > 0 && (strings.Contains(string(items[0].Content), "tool_interactions") || strings.Contains(string(items[0].Content), "first historical result")) {
-			t.Error("confirmed tool interactions duplicated in system history")
 		}
 		writeResult(w, `{"status":"completed","answer":"done"}`)
 	}))
@@ -128,18 +121,15 @@ func TestResumeKeepsHistoricalToolOwnershipAndUnknownOutcome(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Error(err)
 		}
-		if len(request.Input) != 4 {
-			t.Errorf("want system, confirmed call/output, user; got %d messages", len(request.Input))
+		if len(request.Input) != 2 {
+			t.Errorf("want historical system reference and current user; got %d messages", len(request.Input))
 		} else {
 			system := request.Input[0].Content
-			// The execution retains call IDs so detached native outputs remain attributable.
-			for _, want := range []string{prior.RunID, `"tool_call_ids": [`, `"confirmed-call"`, `"unknown-call"`, "outcome unknown"} {
+			// 历史工具保留执行实例归属和结果不确定性，不能作为当前原生工具消息。
+			for _, want := range []string{prior.RunID, "- tool_interactions:", "confirmed-call", "unknown-call", "saved evidence", "outcome unknown"} {
 				if !strings.Contains(system, want) {
 					t.Errorf("system history missing ownership/uncertainty %q", want)
 				}
-			}
-			if strings.Contains(system, "saved evidence") || request.Input[1].CallID != "confirmed-call" || request.Input[2].CallID != "confirmed-call" {
-				t.Error("confirmed evidence must occur only in its native call/output pair")
 			}
 		}
 		writeResult(w, `{"status":"completed","answer":"done"}`)
@@ -148,5 +138,84 @@ func TestResumeKeepsHistoricalToolOwnershipAndUnknownOutcome(t *testing.T) {
 	_, err = application.Resume(ctx, application.Options{RunID: current.RunID, ConfigPath: agentConfig(t, server.URL), Timeout: time.Second, Stderr: io.Discard})
 	if err != nil || requests != 1 {
 		t.Fatalf("resume error=%v requests=%d", err, requests)
+	}
+}
+
+// Resume 的可观察边界是发给模型的请求，历史必须按步骤进度选择内容。
+func TestResumeSelectsInterruptedPlanHistoryByStepProgress(t *testing.T) {
+	db, store := runStore(t)
+	ctx := context.Background()
+	prior, err := store.Create(ctx, "", "historical plan", t.TempDir(), "plan-execute")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&prior).Update("create_at", time.Now().Add(-time.Hour)).Error; err != nil {
+		t.Fatal(err)
+	}
+	durable := &state.DurableState{RunId: prior.RunID, Goal: prior.Goal, StepExecutions: []state.StepExecution{
+		{StepId: "first", Revision: 1, Intent: "first-intent", Status: state.CompletedExecutionStatus, CompletionCriteria: "first-criterion", Observation: []string{"first-observation"}, CompletionEvidence: []string{"first-evidence"}},
+		{StepId: "second", Revision: 1, Intent: "second-intent", Status: state.CompletedExecutionStatus, CompletionCriteria: "second-criterion", Observation: []string{"second-observation"}, CompletionEvidence: []string{"second-evidence"}},
+		{StepId: "third", Revision: 1, Intent: "third-intent", Status: state.FailedExecutionStatus, CompletionCriteria: "third-criterion"},
+		{StepId: "fourth", Revision: 1, Intent: "fourth-intent", Status: state.PendingExecutionStatus, CompletionCriteria: "fourth-criterion"},
+	}}
+	// 用公开存储接口准备每步独立实例，避免把测试绑到数据库表结构。
+	for i, name := range []string{"first", "second", "third"} {
+		durable.ExecutionID = prior.RunID + "-" + name
+		durable.StepExecutions[i].ExecutionID = durable.ExecutionID
+		durable.ToolExecutions = []*state.ToolResult{{ToolCallId: name + "-call", ToolName: "read_file", Arguments: `{"path":"` + name + `-path"}`, Status: "success", Result: name + "-tool-result"}}
+		durable.ExecutionResult = nil
+		if i < 2 {
+			durable.ExecutionResult = json.RawMessage(`{"status":"completed","answer":"` + name + `-answer"}`)
+		}
+		if err := store.SaveDurableCheckpoint(ctx, &prior, durable, "plan-execute"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prior.Status = "interrupted"
+	// 保留运行级回答和完成证据，但其中的步骤和观察不能再次展开。
+	prior.Result = json.RawMessage(`{"answer":"historical run answer\nsecond line","Observation":["duplicated-run-observation"],"CompletionEvidence":["historical-run-evidence", "historical-run-proof-two"],"steps":[{"Observation":["first-observation"],"CompletionEvidence":["first-evidence"]}]}`)
+	if err := store.SaveDurableCheckpoint(ctx, &prior, durable, "plan-execute"); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.Create(ctx, prior.ConvID, "new task", prior.Workspace, "react")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Input []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+		}
+		history := ""
+		for _, item := range request.Input {
+			if item.Role == "system" {
+				history += item.Content
+			}
+		}
+		for _, want := range []string{"Conversation history", "historical run answer", "historical-run-evidence", "historical-run-proof-two", "> second line", "first-intent", "second-intent", "completed", "first-observation", "second-observation", "first-evidence", "second-evidence", "third-intent", "failed", "third-criterion", "third-call", "third-path", "third-tool-result"} {
+			if !strings.Contains(history, want) {
+				t.Errorf("history missing %q", want)
+			}
+		}
+		for _, absent := range []string{"duplicated-run-observation", "first-answer", "second-answer", prior.RunID + "-first", prior.RunID + "-second", "first-criterion", "second-criterion", "first-call", "second-call", "first-path", "second-path", "first-tool-result", "second-tool-result", "fourth", "pending"} {
+			if strings.Contains(history, absent) {
+				t.Errorf("history unexpectedly includes %q", absent)
+			}
+		}
+		for _, summary := range []string{"historical run answer", "historical-run-evidence", "historical-run-proof-two", "first-observation", "second-observation", "first-evidence", "second-evidence"} {
+			if count := strings.Count(history, summary); count != 1 {
+				t.Errorf("completed step summary %q occurs %d times, want once", summary, count)
+			}
+		}
+		writeResult(w, `{"status":"completed","answer":"done"}`)
+	}))
+	defer server.Close()
+	if _, err := application.Resume(ctx, application.Options{RunID: current.RunID, ConfigPath: agentConfig(t, server.URL), Timeout: time.Second, Stderr: io.Discard}); err != nil {
+		t.Fatal(err)
 	}
 }

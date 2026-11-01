@@ -76,19 +76,7 @@ func Run(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 	}
 	defer database.Close(db)
 	store := database.NewRunStore(db)
-	if opts.ConvID != "" && isContinuation(opts.Task) {
-		prior, err := store.LatestConversationRun(ctx, opts.ConvID)
-		if err != nil {
-			return nil, fmt.Errorf("find interrupted conversation run: %w", err)
-		}
-		if prior.Status != "interrupted" {
-			return nil, fmt.Errorf("conversation latest run %s is %s, not interrupted", prior.RunID, prior.Status)
-		}
-		// Continue is a control request, not a replacement goal. Resume validates
-		// and locks the original run and restores its workspace and mode.
-		opts.RunID, opts.Task, opts.Workspace, opts.Mode = prior.RunID, "", "", ""
-		return Resume(ctx, opts)
-	}
+	// 普通输入始终创建新运行，是否承接历史目标由模型结合上下文判断。
 	run, err := store.Create(ctx, opts.ConvID, opts.Task, workspace, mode)
 	if err != nil {
 		return nil, err
@@ -134,15 +122,6 @@ func Run(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 	return executeRun(ctx, executionCtx, lockedStore, &run, durable, orchestrator, loaded, opts.Interrupt)
 }
 
-func isContinuation(input string) bool {
-	switch strings.ToLower(strings.TrimSpace(input)) {
-	case "continue", "继续":
-		return true
-	default:
-		return false
-	}
-}
-
 func executionContext(lockCtx context.Context, interrupt *Interrupt) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancelCause(lockCtx)
 	if interrupt != nil {
@@ -169,13 +148,11 @@ func executeRun(ctx, executionCtx context.Context, store *database.RunStore, run
 	for _, prior := range previous {
 		switch prior.Status {
 		case "completed":
-			durable.PreviousRunOutcomes = append(durable.PreviousRunOutcomes, state.RunOutcome{RunID: prior.RunID, Result: string(prior.Result), Error: prior.Error})
-		case "failed":
-			durable.PreviousRunOutcomes = append(durable.PreviousRunOutcomes, state.RunOutcome{RunID: prior.RunID, Error: prior.Error})
-		case "interrupted":
+			durable.PreviousRunOutcomes = append(durable.PreviousRunOutcomes, state.RunOutcome{RunID: prior.RunID, Goal: prior.Goal, Status: prior.Status, Result: string(prior.Result), Error: prior.Error})
+		case "failed", "interrupted":
 			history, err := interruptedHistory(ctx, store, prior)
 			if err != nil {
-				return nil, fmt.Errorf("load interrupted run %s: %w", prior.RunID, err)
+				return nil, fmt.Errorf("load historical run %s: %w", prior.RunID, err)
 			}
 			durable.PreviousRunOutcomes = append(durable.PreviousRunOutcomes, history)
 		}

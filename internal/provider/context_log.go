@@ -31,6 +31,13 @@ func formatLLMContext(params responses.ResponseNewParams) ([]byte, error) {
 	expand = func(node *yaml.Node) {
 		node.Style = 0
 		if node.Kind == yaml.ScalarNode && node.Tag == "!!str" && strings.Contains(node.Value, "\n") {
+			// YAML 遇到行尾空白会强制使用双引号，即使指定 LiteralStyle。
+			// 仅规范化日志副本，避免整段历史退化为带字面 \n 的单行。
+			lines := strings.Split(node.Value, "\n")
+			for i := range lines {
+				lines[i] = strings.TrimRight(lines[i], " \t\r")
+			}
+			node.Value = strings.Join(lines, "\n")
 			node.Style = yaml.LiteralStyle
 		}
 		for _, child := range node.Content {

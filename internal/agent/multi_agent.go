@@ -17,32 +17,10 @@ import (
 	filemcp "github.com/collie-agent/codex-go/internal/mcp"
 )
 
-type AgentID string
-
-type AgentHandoff struct {
-	Agent              AgentID  `json:"agent" lineprotocol:"AGENT"`
-	Task               string   `json:"task" lineprotocol:"TASK"`
-	CompletionCriteria []string `json:"completion_criteria" lineprotocol:"COMPLETION_CRITERIA"`
-	Context            string   `json:"context" lineprotocol:"CONTEXT"`
-}
-
-type MultiAgentResult struct {
-	// 仅入口缺少验收标准的首轮响应填写；后续响应不能改写已保存标准。
-	EntryCompletionCriteria []string       `json:"entry_completion_criteria,omitempty" lineprotocol:"ENTRY_COMPLETION_CRITERIA"`
-	Result                  ReactResult    `json:"result" lineprotocol:"RESULT"`
-	Next                    []AgentHandoff `json:"next" lineprotocol:"NEXT"`
-}
-
-// DelegatedTask 是一次委派的独立执行上下文；同名 worker 的多次任务也不共享历史。
-type DelegatedTask struct {
-	TaskID             string            `json:"task_id"`
-	Worker             AgentID           `json:"worker"`
-	Goal               string            `json:"goal"`
-	CompletionCriteria []string          `json:"completion_criteria"`
-	Context            string            `json:"context"`
-	Result             *MultiAgentResult `json:"result"`
-	Failure            string            `json:"failure"`
-}
+type AgentID = state.AgentID
+type AgentHandoff = state.AgentHandoff
+type MultiAgentResult = state.MultiAgentResult
+type DelegatedTask = state.DelegatedTask
 
 // DelegationReport 仅传递已完成任务的结果与来源，避免递归携带路由和输入上下文。
 type DelegationReport struct {
@@ -263,7 +241,7 @@ func (r *multiAgentRun) execute(task DelegatedTask, parent AgentID, upstream []D
 		}
 		errs := make([]error, len(tasks))
 		var wg sync.WaitGroup
-		for i := range tasks {//对子agent并发
+		for i := range tasks { //对子agent并发
 			wg.Go(func() {
 				log.Printf("task %s: [multi-agent] %s -> %s: delegate %s", r.durable.RunId, task.Worker, tasks[i].Worker, tasks[i].TaskID)
 				output, err := r.execute(tasks[i], task.Worker, slices.Clone(upstream))

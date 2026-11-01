@@ -73,8 +73,33 @@ func TestPreviousAgentRunOutcomesFollowAdditionalInstructions(t *testing.T) {
 	rc.SetSysPrompt("Use Chinese.")
 	// 系统提示词独立发送；历史结果必须紧随补充指令进入同一模型请求。
 	rc.FormatForModel()
-	want := "# Additional instructions\n\nUse Chinese.\n\n# Conversation history\n\n- Result:\n\n  > {\"answer\":\"saved report\",\"Observation\":[\"checked\"]}\n\n- Error:\n\n  > first attempt failed\n  > retry succeeded\n"
+	want := "# Additional instructions\n\nUse Chinese.\n\n# Conversation history\n\n## Agent run\n\n- Run ID:\n\n  > earlier\n\n- Result:\n\n  > - Observation:\n  >   - Item 1:\n  > \n  >     > checked\n  > \n  > - answer:\n  > \n  >   > saved report\n\n- Error:\n\n  > first attempt failed\n  > retry succeeded\n"
 	if !strings.HasSuffix(rc.SystemPrompt(), want) || !strings.HasSuffix(rc.ModelRequest().SystemPrompt, want) {
 		t.Fatalf("system prompt missing ordered Markdown outcomes: %s", rc.SystemPrompt())
+	}
+}
+
+func TestHistoricalToolsRemainMarkdownReference(t *testing.T) {
+	rc := NewReactContext(&DurableState{RunId: "current", Goal: "another task", PreviousRunOutcomes: []RunOutcome{
+		{RunID: "prior", History: "- Goal:\n  > inspect\n", ToolResults: []*ToolResult{{ToolCallId: "old-call", ToolName: "read_file", Arguments: "{}", Status: "success", Result: "line one\n# embedded heading\n- embedded item"}}},
+	}})
+	rc.AppendToolResult(&ToolResult{ToolCallId: "current-call", ToolName: "read_file", Status: "success", Result: "current result"})
+	_, tools := rc.FormatForModel()
+	if len(tools) != 1 || tools[0].ToolCallId != "current-call" {
+		t.Fatalf("historical calls leaked into current tool messages: %+v", tools)
+	}
+	prompt := rc.SystemPrompt()
+	for _, want := range []string{"## Agent run", "- Tool call:", "old-call", "  > line one\n  > # embedded heading\n  > - embedded item"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("missing scoped historical evidence %q: %s", want, prompt)
+		}
+	}
+}
+
+func TestHistoricalResultDecodesJSONNewlines(t *testing.T) {
+	rc := NewReactContext(&DurableState{PreviousRunOutcomes: []RunOutcome{{RunID: "old", Result: `{"answer":"first\nsecond\nkeep literal \\n","status":"completed"}`}}})
+	prompt := rc.ModelRequest().SystemPrompt
+	if !strings.Contains(prompt, "> first\n") || !strings.Contains(prompt, "> second\n") || !strings.Contains(prompt, `keep literal \n`) {
+		t.Fatalf("historical JSON text was not decoded exactly once: %s", prompt)
 	}
 }

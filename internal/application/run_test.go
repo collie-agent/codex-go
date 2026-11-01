@@ -282,9 +282,14 @@ func TestAgentRunsShareOnlyEarlierConversationOutcomes(t *testing.T) {
 			}
 			failed := create(first.ConvID, "failed", now.Add(-2*time.Hour))
 			failed.Status, failed.Error = "failed", "previous-error"
+			if err := store.SaveDurableCheckpoint(ctx, &failed, &state.DurableState{RunId: failed.RunID, Goal: failed.Goal, ExecutionID: failed.RunID, ToolExecutions: []*state.ToolResult{{ToolCallId: "failed-confirmed-call", ToolName: "write_file", Status: "success", Result: "failed-run-saved-file"}}}, "react"); err != nil {
+				t.Fatal(err)
+			}
+			failed.Status, failed.Error = "failed", "previous-error"
 			if err := store.Save(ctx, &failed); err != nil {
 				t.Fatal(err)
 			}
+
 			unfinished := create(first.ConvID, "unfinished", now.Add(-90*time.Minute))
 			unfinished.Error = "pending-error-excluded"
 			if err := store.Save(ctx, &unfinished); err != nil {
@@ -292,7 +297,7 @@ func TestAgentRunsShareOnlyEarlierConversationOutcomes(t *testing.T) {
 			}
 			interrupted := create(first.ConvID, "interrupted-goal", now.Add(-70*time.Minute))
 			interrupted.Status = "interrupted"
-			if err := store.SaveDurableCheckpoint(ctx, &interrupted, &state.DurableState{RunId: interrupted.RunID, Goal: interrupted.Goal, ExecutionID: interrupted.RunID, CompletionCriteria: []string{"prior-criterion"}, ToolExecutions: []*state.ToolResult{{ToolCallId: "prior-call", ToolName: "read_file", Arguments: `{"path":"prior-file"}`, Status: "success", Result: "prior-result"}, {ToolCallId: "unknown-call", ToolName: "write_file", Arguments: `{}`}}}, "react"); err != nil {
+			if err := store.SaveDurableCheckpoint(ctx, &interrupted, &state.DurableState{RunId: interrupted.RunID, Goal: interrupted.Goal, ExecutionID: interrupted.RunID, CompletionCriteria: []string{"prior-criterion"}, ToolExecutions: []*state.ToolResult{{ToolCallId: "prior-call", ToolName: "read_file", Arguments: `{"path":"prior-file"}`, Status: "success", Result: `[{"type":"text","text":"prior-result\nsecond-result-line\nkeep literal \\n"}]`}, {ToolCallId: "unknown-call", ToolName: "write_file", Arguments: `{}`}}}, "react"); err != nil {
 				t.Fatal(err)
 			}
 			plan := create(first.ConvID, "plan-goal", now.Add(-65*time.Minute))
@@ -357,7 +362,7 @@ func TestAgentRunsShareOnlyEarlierConversationOutcomes(t *testing.T) {
 				t.Fatal(err)
 			}
 			input := <-requests
-			for _, want := range []string{"# Conversation history", "previous-success", "full-evidence", "previous-error", "interrupted-goal", "prior-criterion", "prior-call", "prior-file", "prior-result", "unknown-call", "outcome unknown", "plan-goal", "step-intent", "step-criterion", "plan-instance", "plan-call", "plan-result", "multi-goal", "child-goal", "child-criterion", "worker-instance", "worker-call", "worker-result", "worker-saved-answer"} {
+			for _, want := range []string{"# Conversation history", "## Agent run", "- Goal:", "- Status:", "- tool_interactions:", "- ToolCallId:", "previous-success", "full-evidence", "previous-error", "failed-confirmed-call", "failed-run-saved-file", "interrupted-goal", "prior-criterion", "prior-call", "prior-file", "> prior-result\n", "> second-result-line\n", `keep literal \n`, "unknown-call", "outcome unknown", "plan-goal", "step-intent", "step-criterion", "plan-instance", "plan-call", "plan-result", "multi-goal", "child-goal", "child-criterion", "worker-instance", "worker-call", "worker-result", "worker-saved-answer"} {
 				if !strings.Contains(input, want) {
 					t.Errorf("model input missing %q: %s", want, input)
 				}
