@@ -8,9 +8,15 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// formatLLMContext 使用 SDK 的 JSON 序列化，并从日志中省略工具定义。
+// formatLLMContext 使用 SDK 的 JSON 序列化，并在日志中列出可用工具名称。
 // YAML 只用于日志展示，多行字符串展开为文本块，不改变发送给 API 的内容。
 func formatLLMContext(params responses.ResponseNewParams) ([]byte, error) {
+	toolNames := make([]string, 0, len(params.Tools))
+	for _, tool := range params.Tools {
+		if tool.OfFunction != nil {
+			toolNames = append(toolNames, tool.OfFunction.Name)
+		}
+	}
 	// params 是值拷贝，省略日志中的工具定义不会影响实际 API 请求。
 	params.Tools = nil
 	encoded, err := json.Marshal(params)
@@ -32,5 +38,15 @@ func formatLLMContext(params responses.ResponseNewParams) ([]byte, error) {
 		}
 	}
 	expand(&document)
-	return yaml.Marshal(&document)
+	context, err := yaml.Marshal(&document)
+	if err != nil {
+		return nil, err
+	}
+	tools, err := yaml.Marshal(struct {
+		Tools []string `yaml:"tools"`
+	}{Tools: toolNames})
+	if err != nil {
+		return nil, err
+	}
+	return append(context, tools...), nil
 }

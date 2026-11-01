@@ -145,7 +145,7 @@ func TestReactCriteriaCheckpointFailureStopsExecution(t *testing.T) {
 				calls++
 				var output []any
 				if tools {
-					output = append(output, map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": `{"status":"completed","answer":"must not bypass criteria checkpoint"}`}}})
+					output = append(output, map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": `I will set the completion criteria first.`}}})
 				}
 				output = append(output, map[string]any{"type": "function_call", "id": "fc_criteria", "call_id": "criteria", "name": "update_completion_criteria", "arguments": `{"completion_criteria":["result.txt contains the requested result"]}`})
 				w.Header().Set("Content-Type", "application/json")

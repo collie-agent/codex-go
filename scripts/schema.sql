@@ -17,11 +17,13 @@ CREATE TABLE IF NOT EXISTS agent_run (
     create_at DATETIME(3),
     update_at DATETIME(3),
     planning_context LONGTEXT,
+    multi_agent_checkpoint JSON,
     INDEX idx_agent_run_conv_id (conv_id),
     CONSTRAINT fk_agent_run_conversation FOREIGN KEY (conv_id) REFERENCES conversation(conv_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS step_execution (
+    execution_id VARCHAR(64),
     step_id VARCHAR(128) NOT NULL,
     run_id VARCHAR(64) NOT NULL,
     status VARCHAR(16) NOT NULL,
@@ -36,6 +38,34 @@ CREATE TABLE IF NOT EXISTS step_execution (
     PRIMARY KEY (step_id, run_id),
     INDEX idx_step_execution_run_id (run_id),
     CONSTRAINT fk_step_execution_agent_run FOREIGN KEY (run_id) REFERENCES agent_run(run_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS execution_instance (
+    execution_id VARCHAR(64) PRIMARY KEY,
+    run_id VARCHAR(64),
+    result JSON,
+    create_at DATETIME(3),
+    update_at DATETIME(3),
+    INDEX idx_execution_instance_run_id (run_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS tool_execution (
+    execution_id VARCHAR(64),
+    call_id VARCHAR(255),
+    run_id VARCHAR(64),
+    position BIGINT,
+    name VARCHAR(255),
+    arguments LONGTEXT,
+    batch BIGINT,
+    batch_position BIGINT,
+    status VARCHAR(32),
+    result LONGTEXT,
+    error LONGTEXT,
+    payload JSON,
+    create_at DATETIME(3),
+    update_at DATETIME(3),
+    PRIMARY KEY (execution_id, position),
+    INDEX idx_tool_execution_run_id (run_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- Persisted SSE events emitted for an LLM chat task.

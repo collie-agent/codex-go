@@ -58,12 +58,56 @@ func TestResponsesStreamReturnsCompleteText(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.Contains(string(data), "LLM response text=") {
-				t.Fatalf("unexpected response log: %s", data)
+			if got := strings.Contains(string(data), `LLM response text={"answer":"complete"}`); got != level.InfoEnabled() {
+				t.Fatalf("level=%s: unexpected response log: %s", level, data)
 			}
 
 			if got := strings.Count(string(data), "LLM response text delta=partial"); (level == config.DebugLogLevel && got != 1) || (level != config.DebugLogLevel && got != 0) {
 				t.Fatalf("level=%s: unexpected delta logs: %s", level, data)
+			}
+		})
+	}
+}
+
+// 默认 stderr 路径下，正文增量（含提取后的 answer delta）只在 debug 级别打印。
+func TestResponsesStreamLogsDeltaOnlyInDebug(t *testing.T) {
+	for _, level := range []config.LogLevel{config.DebugLogLevel, config.InfoLogLevel, config.ErrorLogLevel} {
+		t.Run(string(level), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				// 完整答案放在同一片段，确保 answer_delta 也会被提取并尝试输出。
+				fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"{\\\"answer\\\":\\\"hi\\\"}\"}\n\n")
+				w.(http.Flusher).Flush()
+				fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"{\\\"answer\\\":\\\"hi\\\"}\"}]}]}}\n\n")
+			}))
+			defer server.Close()
+			client, err := NewResponsesApiClient[struct {
+				Answer string `json:"answer"`
+			}](&config.LLMConfig{Stream: true, BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client.SetLogLevel(level)
+			file, err := os.CreateTemp(t.TempDir(), "stderr")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer file.Close()
+			previous := os.Stderr
+			os.Stderr = file
+			client.SetOutputer(nil)
+			defer func() { os.Stderr = previous }()
+			if _, _, _, err := client.Run(context.Background(), "delta-test", "question", nil); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(file.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{"LLM response text delta=", "LLM answer delta="} {
+				if got := strings.Count(string(data), want); (level == config.DebugLogLevel && got == 0) || (level != config.DebugLogLevel && got != 0) {
+					t.Fatalf("level=%s: unexpected %q logs: %s", level, want, data)
+				}
 			}
 		})
 	}

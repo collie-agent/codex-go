@@ -344,7 +344,7 @@ func TestAgentCommandsRetainFailedRunsInExistingConversation(t *testing.T) {
 		}
 		seen[ids[1]] = true
 		run, err := store.Get(context.Background(), ids[1])
-		if err != nil || run.Status != "failed" || !strings.Contains(run.Error, "permission denied") || len(run.Result) != 0 || stdout.Len() != 0 {
+		if err != nil || run.Status != "failed" || !strings.Contains(run.Error, "permission denied") || !strings.Contains(string(run.Result), "permission denied") || stdout.Len() != 0 {
 			t.Fatalf("failed run=%+v, stdout=%s, err=%v", run, &stdout, err)
 		}
 	}
@@ -388,7 +388,7 @@ func TestAgentCommandsResumePlanFinalizesSavedLastStepWithoutModelCalls(t *testi
 		if err := cmd.Run(); err != nil {
 			t.Fatalf("entry %d resume: %v: %s", i, err, &stderr)
 		}
-		if stdout.String() != "already saved\n" {
+		if stdout.String() != "final answer: already saved\n" {
 			t.Fatalf("entry %d output=%q, want saved answer", i, &stdout)
 		}
 	}
@@ -449,7 +449,7 @@ func TestAgentCommandsResumeSavedPlanAndSkipCompletedSteps(t *testing.T) {
 		if err := cmd.Run(); err != nil {
 			t.Fatalf("entry %d resume: %v: %s", i, err, &stderr)
 		}
-		if stdout.String() != "report finished\n" {
+		if stdout.String() != "final answer: report finished\n" {
 			t.Fatalf("entry %d output=%q, want resumed answer", i, &stdout)
 		}
 		saved, err := store.Get(context.Background(), run.RunID)
@@ -512,7 +512,7 @@ func TestAgentCommandsResumeFailedReactRunAndReplayCompletedResult(t *testing.T)
 			if err := cmd.Run(); err != nil {
 				t.Fatalf("entry %d attempt %d resume: %v: %s", i, attempt, err, &stderr)
 			}
-			if stdout.String() != "resumed result\n" {
+			if stdout.String() != "final answer: resumed result\n" {
 				t.Fatalf("entry %d attempt %d output=%q", i, attempt, &stdout)
 			}
 		}

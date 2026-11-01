@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/collie-agent/codex-go/internal/agent"
 	"github.com/collie-agent/codex-go/internal/application"
 	"github.com/collie-agent/codex-go/internal/config"
 	"github.com/collie-agent/codex-go/internal/entity"
@@ -117,32 +118,64 @@ func consume(ctx context.Context, client *redis.Client, opts application.Options
 			fmt.Fprintf(opts.Stderr, "consumer: invalid task message: %v\n", err)
 			continue
 		}
-		if strings.TrimSpace(message.Input) == "" || strings.TrimSpace(message.TaskId) == "" {
-			fmt.Fprintln(opts.Stderr, "consumer: invalid task message: Input and TaskId are required")
+		if !message.ValidInput() || strings.TrimSpace(message.TaskId) == "" {
+			fmt.Fprintln(opts.Stderr, "consumer: invalid task message: TaskId and either Input or RunId are required")
 			continue
 		}
 		taskOpts := opts
+		taskOpts.Interrupt = application.NewInterrupt()
+		taskOpts.OnRunLocked = func(ctx context.Context, runID string, interrupt *application.Interrupt) (func(), error) {
+			return rdb.ListenInterrupt(ctx, client, runID, interrupt)
+		}
 		taskOpts.Task = message.Input
 		// 会话归属按消息指定；省略时由 application 为本任务创建新会话。
 		taskOpts.ConvID = message.ConvId
 		// 退出信号只停止领取；已经出队的任务必须运行完成，避免丢失。
 		// 队列任务 ID 仅关联输出；持久化 run ID 仍由 application 生成。
 		taskCtx := provider.WithTaskStreamID(context.WithoutCancel(ctx), message.TaskId)
-		if _, err := application.Run(taskCtx, taskOpts); err != nil {
-			fmt.Fprintf(opts.Stderr, "consumer: task_id=%q failed: %v\n", message.TaskId, err)
+		var results []agent.ReactResult
+		var executeErr error
+		if message.RunId != "" {
+			taskOpts.RunID = message.RunId
+			// 恢复采用原运行保存的工作目录及模式，不套用消费者的新任务默认值。
+			taskOpts.Workspace = ""
+			taskOpts.Mode = ""
+			results, executeErr = application.Resume(taskCtx, taskOpts)
 		} else {
-			// 仅在整个任务及最终检查点成功后发布，避免将子代理或模型轮次结束误报为任务完成。
+			results, executeErr = application.Run(taskCtx, taskOpts)
+		}
+		var saveErr *application.InterruptPersistenceError
+		interrupted := errors.Is(executeErr, application.ErrInterrupted) && !errors.As(executeErr, &saveErr)
+		if executeErr != nil {
+			err := executeErr
+			fmt.Fprintf(opts.Stderr, "consumer: task_id=%q failed: %v\n", message.TaskId, err)
+		}
+		// 应用层仅在业务失败结果成功保存后返回结果；恢复终态失败也遵循此约定。
+		businessFailed := hasBusinessFailure(results)
+		if executeErr == nil || interrupted || businessFailed {
+			eventType := "task_completed"
+			if interrupted {
+				eventType = "task_interrupted"
+			}
+			// 只在最终状态保存后发布终态，避免误报任务完成或中断完成。
 			// 使用独立限时上下文，退出信号不应丢弃已领取任务的完成通知。
 			publishCtx, cancel := context.WithTimeout(taskCtx, 5*time.Second)
 			_, err := rdb.NewRedisManagerWithClient(client).WriteTaskStream(publishCtx, message.TaskId, &entity.LLMResponse{
-				Type: "task_completed", Delta: "{}",
+				Type: eventType, Delta: "{}",
 			})
 			cancel()
 			if err != nil {
-				fmt.Fprintf(opts.Stderr, "consumer: task_id=%q publish completion failed: %v\n", message.TaskId, err)
+				fmt.Fprintf(opts.Stderr, "consumer: task_id=%q publish %s failed: %v\n", message.TaskId, eventType, err)
 			}
-			fmt.Fprintf(opts.Stderr, "consumer: task_id=%q completed\n", message.TaskId)
+			if executeErr == nil {
+				fmt.Fprintf(opts.Stderr, "consumer: task_id=%q completed\n", message.TaskId)
+			}
 		}
 	}
 	return nil
+}
+
+// 仅已保存的业务失败会由 application 返回对应结果。
+func hasBusinessFailure(results []agent.ReactResult) bool {
+	return len(results) > 0 && results[0].Status == agent.FailedReactStatus
 }

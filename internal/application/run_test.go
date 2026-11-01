@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/collie-agent/codex-go/internal/application"
+	state "github.com/collie-agent/codex-go/internal/context"
 	"github.com/collie-agent/codex-go/internal/database"
 	"gorm.io/gorm"
 )
@@ -284,6 +285,27 @@ func TestAgentRunsShareOnlyEarlierConversationOutcomes(t *testing.T) {
 			if err := store.Save(ctx, &failed); err != nil {
 				t.Fatal(err)
 			}
+			unfinished := create(first.ConvID, "unfinished", now.Add(-90*time.Minute))
+			unfinished.Error = "pending-error-excluded"
+			if err := store.Save(ctx, &unfinished); err != nil {
+				t.Fatal(err)
+			}
+			interrupted := create(first.ConvID, "interrupted-goal", now.Add(-70*time.Minute))
+			interrupted.Status = "interrupted"
+			if err := store.SaveDurableCheckpoint(ctx, &interrupted, &state.DurableState{RunId: interrupted.RunID, Goal: interrupted.Goal, ExecutionID: interrupted.RunID, CompletionCriteria: []string{"prior-criterion"}, ToolExecutions: []*state.ToolResult{{ToolCallId: "prior-call", ToolName: "read_file", Arguments: `{"path":"prior-file"}`, Status: "success", Result: "prior-result"}, {ToolCallId: "unknown-call", ToolName: "write_file", Arguments: `{}`}}}, "react"); err != nil {
+				t.Fatal(err)
+			}
+			plan := create(first.ConvID, "plan-goal", now.Add(-65*time.Minute))
+			plan.Mode, plan.Status = "plan-execute", "interrupted"
+			if err := store.SaveDurableCheckpoint(ctx, &plan, &state.DurableState{RunId: plan.RunID, ExecutionID: "plan-instance", StepExecutions: []state.StepExecution{{StepId: "step-a", ExecutionID: "plan-instance", Intent: "step-intent", CompletionCriteria: "step-criterion", Status: state.RunningExecutionStatus}}, ToolExecutions: []*state.ToolResult{{ToolCallId: "plan-call", ToolName: "read_file", Status: "success", Result: "plan-result"}}}, "plan-execute"); err != nil {
+				t.Fatal(err)
+			}
+			multi := create(first.ConvID, "multi-goal", now.Add(-62*time.Minute))
+			multi.Mode, multi.Status = "multi-agent", "interrupted"
+			multi.MultiAgentCheckpoint = json.RawMessage(`{"Nodes":{"parent":{"Turns":[{"Local":{"ExecutionID":"worker-instance","ExecutionResult":"eyJhbnN3ZXIiOiJ3b3JrZXItc2F2ZWQtYW5zd2VyIn0=","PreviousRunOutcomes":[{"Result":"recursive-history-excluded"}],"ToolExecutions":[{"ToolCallId":"worker-call","ToolName":"read_file","Status":"success","Result":"worker-result"}]},"Children":[{"task_id":"child","worker":"worker","goal":"child-goal","completion_criteria":["child-criterion"]}]}]}}}`)
+			if err := store.Save(ctx, &multi); err != nil {
+				t.Fatal(err)
+			}
 			current := create(first.ConvID, "continue", now.Add(-time.Hour))
 			current.Error = "current-error-excluded"
 			if err := store.Save(ctx, &current); err != nil {
@@ -335,12 +357,12 @@ func TestAgentRunsShareOnlyEarlierConversationOutcomes(t *testing.T) {
 				t.Fatal(err)
 			}
 			input := <-requests
-			for _, want := range []string{"# Conversation history", "previous-success", "full-evidence", "previous-error"} {
+			for _, want := range []string{"# Conversation history", "previous-success", "full-evidence", "previous-error", "interrupted-goal", "prior-criterion", "prior-call", "prior-file", "prior-result", "unknown-call", "outcome unknown", "plan-goal", "step-intent", "step-criterion", "plan-instance", "plan-call", "plan-result", "multi-goal", "child-goal", "child-criterion", "worker-instance", "worker-call", "worker-result", "worker-saved-answer"} {
 				if !strings.Contains(input, want) {
 					t.Errorf("model input missing %q: %s", want, input)
 				}
 			}
-			for _, excluded := range []string{"future-error-excluded", "other-conversation-excluded"} {
+			for _, excluded := range []string{"future-error-excluded", "other-conversation-excluded", "pending-error-excluded", "recursive-history-excluded"} {
 				if strings.Contains(input, excluded) {
 					t.Errorf("model input leaked %q", excluded)
 				}
@@ -352,6 +374,44 @@ func TestAgentRunsShareOnlyEarlierConversationOutcomes(t *testing.T) {
 				t.Error("history is not chronological")
 			}
 		})
+	}
+}
+
+func TestConversationHistoryContextLimitReturnsProviderError(t *testing.T) {
+	_, store := runStore(t)
+	ctx := context.Background()
+	workspace := t.TempDir()
+	prior, err := store.Create(ctx, "", "prior", workspace, "react")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior.Status = "completed"
+	payload := strings.Repeat("full-history-", 10000) + "history-tail"
+	prior.Result, err = json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(ctx, &prior); err != nil {
+		t.Fatal(err)
+	}
+	seen := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if testutil.RespondWithCriteria(t, w, r) {
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		seen = strings.Contains(string(body), "history-tail")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"context length exceeded","type":"invalid_request_error","code":"context_length_exceeded"}}`))
+	}))
+	defer server.Close()
+	_, err = application.Run(ctx, application.Options{ConfigPath: agentConfig(t, server.URL), ConvID: prior.ConvID, Task: "new task", Workspace: workspace, Timeout: time.Second, Stderr: io.Discard})
+	if !seen {
+		t.Fatal("complete history was not sent to the provider")
+	}
+	if err == nil || !strings.Contains(err.Error(), "context length exceeded") {
+		t.Fatalf("expected context limit error, got %v", err)
 	}
 }
 

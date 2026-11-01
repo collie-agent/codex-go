@@ -60,7 +60,8 @@ func (c *baseResponsesApiClient[T]) emitOutput(ctx context.Context, taskID strin
 	if err == nil {
 		output := c.output
 		if output == nil {
-			if kind == OutputTextDelta && c.logLevel != config.DebugLogLevel {
+			// 默认 stderr 只在 debug 级别展示正文增量，避免流式内容刷屏。
+			if isDeltaOutput(kind) && c.logLevel != config.DebugLogLevel {
 				return
 			}
 			output = c.stderr
@@ -345,14 +346,27 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 	}
 
 	text := response.OutputText()
-	// 按传输模式互斥输出：流式只发片段，非流式只发提取后的 answer。
+	// 完整文本用于诊断；自定义输出仍保持原有的 answer 和增量事件语义。
+	if strings.TrimSpace(text) != "" && c.logLevel.InfoEnabled() {
+		logger := c.stderr
+		if configured, ok := c.output.(*configuredOutputer); ok {
+			logger = configured.stderr
+		}
+		if c.output == nil || logger != c.stderr {
+			data, _ := json.Marshal(TextOutput{Text: text})
+			if err := logger.Emit(ctx, OutputEvent{TaskID: taskId, Label: c.contextLogLabel, Kind: OutputText, Data: data}); err != nil {
+				log.Printf("task %s: emit response text: %v", taskId, err)
+			}
+		}
+	}
 	if !c.agentConfig.LLMConfig.Stream && strings.TrimSpace(text) != "" {
 		visibleText := answer.feed(text)
-		// 默认 stderr 保留完整诊断（观察器等响应没有 answer 字段）。
 		if c.output == nil {
 			visibleText = text
 		}
-		c.emitOutput(ctx, taskId, OutputText, TextOutput{Text: visibleText})
+		if c.output != nil || !c.logLevel.InfoEnabled() {
+			c.emitOutput(ctx, taskId, OutputText, TextOutput{Text: visibleText})
+		}
 	}
 	if len(toolCalls) > 0 {
 		// 普通说明可以伴随工具调用；可解析的最终结果与工具调用互斥。

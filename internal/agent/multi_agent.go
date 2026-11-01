@@ -91,9 +91,17 @@ func (o *MultiAgentProcessorOrchestrator) Run(cfg *config.AgentConfig, durable *
 	ctx, cancel := context.WithCancel(o.ctx)
 	defer cancel()
 	run := multiAgentRun{o: o, ctx: ctx, cancel: cancel, cfg: cfg, durable: durable.Clone(), graph: graph, slots: make(chan struct{}, graph.MaxParallel)}
+	if len(durable.MultiAgentCheckpoint) > 0 {
+		if err := json.Unmarshal(durable.MultiAgentCheckpoint, &run.graphState); err != nil {
+			return nil, fmt.Errorf("multi-agent: decode checkpoint: %w", err)
+		}
+	}
+	if run.graphState.Nodes == nil {
+		run.graphState.Nodes = make(map[string]*delegationNode)
+	}
 	// 首轮结果生成的标准也必须在运行失败时保留，恢复沿用同一验收目标。
 	defer func() { durable.CompletionCriteria = slices.Clone(run.durable.CompletionCriteria) }()
-	task := DelegatedTask{TaskID: run.nextID(), Worker: AgentID(graph.Entry), Goal: durable.Goal, CompletionCriteria: slices.Clone(durable.CompletionCriteria)}
+	task := DelegatedTask{TaskID: fmt.Sprintf("%s/delegation-1", durable.RunId), Worker: AgentID(graph.Entry), Goal: durable.Goal, CompletionCriteria: slices.Clone(durable.CompletionCriteria)}
 	result, err := run.execute(task, "", nil)
 	if err != nil {
 		return nil, err
@@ -113,17 +121,84 @@ type multiAgentRun struct {
 	ids          atomic.Int64
 	turns        atomic.Int64
 	checkpointMu sync.Mutex
+	graphState   delegationGraph
+	pending      map[*delegationTurn]*state.DurableState
 }
 
-func (r *multiAgentRun) nextID() string {
-	return fmt.Sprintf("%s/delegation-%d", r.durable.RunId, r.ids.Add(1))
-}
+// 图与每次独立调用的工具历史作为一个快照提交，确保调度不会越过已确认边界。
+type delegationGraph = state.DelegationGraph[MultiAgentResult, DelegatedTask]
+type delegationNode = state.DelegationNode[MultiAgentResult, DelegatedTask]
+type delegationTurn = state.DelegationTurn[DelegatedTask]
 
+func (r *multiAgentRun) saveLocked() error {
+	// Persist only each turn's own state, not the conversation inherited at runtime.
+	snapshot := delegationGraph{NextID: r.graphState.NextID, Nodes: make(map[string]*delegationNode, len(r.graphState.Nodes))}
+	for id, node := range r.graphState.Nodes {
+		copyNode := &delegationNode{Done: node.Done}
+		for _, turn := range node.Turns {
+			copyTurn := *turn
+			copyTurn.Local = turn.Local.Clone()
+			if copyTurn.Local != nil {
+				copyTurn.Local.PreviousRunOutcomes = nil
+			}
+			copyNode.Turns = append(copyNode.Turns, &copyTurn)
+		}
+		snapshot.Nodes[id] = copyNode
+	}
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	r.durable.MultiAgentCheckpoint = raw
+	if r.o.checkpoint != nil {
+		return r.o.checkpoint(r.durable.Clone(), "multi-agent")
+	}
+	return nil
+}
 func (r *multiAgentRun) execute(task DelegatedTask, parent AgentID, upstream []DelegationReport) (MultiAgentResult, error) {
+	r.checkpointMu.Lock()
+	node := r.graphState.Nodes[task.TaskID]
+	if node == nil {
+		node = &delegationNode{}
+		r.graphState.Nodes[task.TaskID] = node
+		if r.graphState.NextID == 0 {
+			r.graphState.NextID = 1
+		}
+	}
+	if node.Done != nil {
+		result := *node.Done
+		r.checkpointMu.Unlock()
+		return result, nil
+	}
+	r.checkpointMu.Unlock()
 	var reports []DelegatedTask
 	inherited := slices.Clone(upstream)
-	for {
-		result, err := r.invoke(task, reports, parent, inherited)
+	for turnIndex := 0; ; turnIndex++ {
+		r.checkpointMu.Lock()
+		// 先保存 checkpoint，再执行这一轮
+		// 恢复时不会进入if
+		if turnIndex == len(node.Turns) {
+			local := &state.DurableState{RunId: r.durable.RunId, Goal: task.Goal, CompletionCriteria: slices.Clone(task.CompletionCriteria), ExecutionID: fmt.Sprintf("%s/turn-%d", task.TaskID, turnIndex)}
+			if parent == "" {
+				local.PreviousRunOutcomes = slices.Clone(r.durable.PreviousRunOutcomes)
+			}
+			if parent == "" && turnIndex == 0 {
+				local.ExecutionID = r.durable.ExecutionID
+				if local.ExecutionID == "" {
+					local.ExecutionID = r.durable.RunId
+				}
+				local.ExecutionResult = slices.Clone(r.durable.ExecutionResult)
+				local.ToolExecutions = r.durable.Clone().ToolExecutions
+			}
+			node.Turns = append(node.Turns, &delegationTurn{Local: local})
+			if err := r.saveLocked(); err != nil {
+				r.checkpointMu.Unlock()
+				return MultiAgentResult{}, err
+			}
+		}
+		turn := node.Turns[turnIndex]
+		r.checkpointMu.Unlock()
+		result, err := r.invoke(task, reports, parent, inherited, turn)
 		if err != nil {
 			return MultiAgentResult{}, err
 		}
@@ -136,49 +211,61 @@ func (r *multiAgentRun) execute(task DelegatedTask, parent AgentID, upstream []D
 					return MultiAgentResult{}, fmt.Errorf("multi-agent: entry_completion_criteria contains blank criterion")
 				}
 			}
-			// 在任何子任务启动前保存，后续 entry 调用只读取这份标准。
 			task.CompletionCriteria = slices.Clone(result.EntryCompletionCriteria)
+			r.checkpointMu.Lock()
 			r.durable.CompletionCriteria = slices.Clone(task.CompletionCriteria)
-			if r.o.checkpoint != nil {
-				if err := r.o.checkpoint(r.durable.Clone(), "multi-agent"); err != nil {
-					return MultiAgentResult{}, err
+			err = r.saveLocked()
+			r.checkpointMu.Unlock()
+			if err != nil {
+				return MultiAgentResult{}, err
+			}
+		}
+		if result.Result.Status != FailedReactStatus {
+			cfg := r.cfg.ForAgent(string(task.Worker))
+			for _, next := range result.Next {
+				if !slices.Contains(cfg.NextAgents, string(next.Agent)) {
+					return MultiAgentResult{}, fmt.Errorf("multi-agent: agent %q cannot delegate to %q", task.Worker, next.Agent)
+				}
+				if next.Agent != parent && (strings.TrimSpace(next.Task) == "" || !hasNonEmptyItems(next.CompletionCriteria)) {
+					return MultiAgentResult{}, fmt.Errorf("multi-agent: delegation requires task and completion_criteria")
 				}
 			}
 		}
-		// 业务失败终止当前委派，后续重试或改派由调用方决策。
-		// 保留原始输出供 supervisor 检查，但不执行失败结果中的 Next。
-		if result.Result.Status == FailedReactStatus {
-			return result, nil
-		}
-		cfg := r.cfg.ForAgent(string(task.Worker))
-		// 在启动整批任务前校验所有路由，防止部分无效委派仍产生副作用。
-		for _, next := range result.Next {
-			if !slices.Contains(cfg.NextAgents, string(next.Agent)) {
-				return MultiAgentResult{}, fmt.Errorf("multi-agent: agent %q cannot delegate to %q", task.Worker, next.Agent)
+		if result.Result.Status == FailedReactStatus || len(result.Next) == 0 || (parent != "" && len(result.Next) == 1 && result.Next[0].Agent == parent) {
+			r.checkpointMu.Lock()
+			r.publishTurnLocked(turn, parent, turnIndex)
+			node.Done = &result
+			err = r.saveLocked()
+			r.checkpointMu.Unlock()
+			if err == nil && parent != "" {
+				log.Printf("task %s: [multi-agent] %s -> %s: report %s (status=%s)", r.durable.RunId, task.Worker, parent, task.TaskID, result.Result.Status)
 			}
-			if next.Agent != parent && (strings.TrimSpace(next.Task) == "" || !hasNonEmptyItems(next.CompletionCriteria)) {
-				return MultiAgentResult{}, fmt.Errorf("multi-agent: delegation requires task and completion_criteria")
-			}
-		}
-		if parent != "" && len(result.Next) == 1 && result.Next[0].Agent == parent {
-			log.Printf("task %s: [multi-agent] switching from %s back to %s", task.TaskID, task.Worker, parent)
-			return result, nil
-		}
-		if len(result.Next) == 0 {
-			return result, nil
+			return result, err
 		}
 		for _, next := range result.Next {
 			if next.Agent == parent {
 				return MultiAgentResult{}, fmt.Errorf("multi-agent: return to caller must be the only handoff")
 			}
 		}
-		tasks := make([]DelegatedTask, len(result.Next))
+		r.checkpointMu.Lock()
+		if len(turn.Children) == 0 {
+			r.publishTurnLocked(turn, parent, turnIndex)
+			for _, handoff := range result.Next {
+				r.graphState.NextID++
+				turn.Children = append(turn.Children, DelegatedTask{TaskID: fmt.Sprintf("%s/delegation-%d", r.durable.RunId, r.graphState.NextID), Worker: handoff.Agent, Goal: handoff.Task, CompletionCriteria: slices.Clone(handoff.CompletionCriteria), Context: handoff.Context})
+			}
+			err = r.saveLocked()
+		}
+		tasks := slices.Clone(turn.Children)
+		r.checkpointMu.Unlock()
+		if err != nil {
+			return MultiAgentResult{}, err
+		}
 		errs := make([]error, len(tasks))
 		var wg sync.WaitGroup
-		for i, handoff := range result.Next {
-			tasks[i] = DelegatedTask{TaskID: r.nextID(), Worker: handoff.Agent, Goal: handoff.Task, CompletionCriteria: slices.Clone(handoff.CompletionCriteria), Context: handoff.Context}
-			log.Printf("task %s: [multi-agent] switching from %s to %s (delegation %s)", task.TaskID, task.Worker, handoff.Agent, tasks[i].TaskID)
+		for i := range tasks {//对子agent并发
 			wg.Go(func() {
+				log.Printf("task %s: [multi-agent] %s -> %s: delegate %s", r.durable.RunId, task.Worker, tasks[i].Worker, tasks[i].TaskID)
 				output, err := r.execute(tasks[i], task.Worker, slices.Clone(upstream))
 				if err != nil {
 					errs[i] = err
@@ -191,13 +278,11 @@ func (r *multiAgentRun) execute(task DelegatedTask, parent AgentID, upstream []D
 				}
 			})
 		}
-		// 等待所有委派退出后再返回，结果顺序始终与委派声明顺序相同。
 		wg.Wait()
 		if err := errors.Join(errs...); err != nil {
 			return MultiAgentResult{}, err
 		}
 		reports = append(reports, tasks...)
-		// 同一批并行任务只在全部完成后发布结果，后续委派继承扁平报告。
 		for _, completed := range tasks {
 			if !slices.ContainsFunc(upstream, func(report DelegationReport) bool { return report.TaskID == completed.TaskID }) {
 				upstream = append(upstream, DelegationReport{TaskID: completed.TaskID, Worker: completed.Worker, Goal: completed.Goal, Result: completed.Result.Result})
@@ -207,7 +292,22 @@ func (r *multiAgentRun) execute(task DelegatedTask, parent AgentID, upstream []D
 	}
 }
 
-func (r *multiAgentRun) invoke(task DelegatedTask, reports []DelegatedTask, parent AgentID, upstream []DelegationReport) (MultiAgentResult, error) {
+// 输出和由它生成的委派必须一起发布，任何子任务启动前已完成提交。
+func (r *multiAgentRun) publishTurnLocked(turn *delegationTurn, parent AgentID, index int) {
+	local := r.pending[turn]
+	if local == nil {
+		return
+	}
+	turn.Local = local
+	delete(r.pending, turn)
+	if parent == "" && index == 0 {
+		r.durable.ExecutionID = turn.Local.ExecutionID
+		r.durable.ExecutionResult = slices.Clone(turn.Local.ExecutionResult)
+		r.durable.ToolExecutions = turn.Local.Clone().ToolExecutions
+	}
+}
+
+func (r *multiAgentRun) invoke(task DelegatedTask, reports []DelegatedTask, parent AgentID, upstream []DelegationReport, turn *delegationTurn) (MultiAgentResult, error) {
 	select {
 	case r.slots <- struct{}{}:
 	case <-r.ctx.Done():
@@ -221,19 +321,27 @@ func (r *multiAgentRun) invoke(task DelegatedTask, reports []DelegatedTask, pare
 	if r.turns.Add(1) > int64(r.graph.MaxRounds) {
 		return MultiAgentResult{}, fmt.Errorf("multi-agent: max_rounds (%d) exhausted", r.graph.MaxRounds)
 	}
-	local := &state.DurableState{RunId: task.TaskID, Goal: task.Goal, CompletionCriteria: slices.Clone(task.CompletionCriteria)}
-	// 只有入口读取会话历史；子任务另行继承已完成委派的结果报告。
+	r.checkpointMu.Lock()
+	local := turn.Local.Clone()
+	// Conversation history is reconstructed on each run, never persisted in a turn.
 	if parent == "" {
 		local.PreviousRunOutcomes = slices.Clone(r.durable.PreviousRunOutcomes)
 	}
+	r.checkpointMu.Unlock()
 	save := func() error {
-		if r.o.checkpoint == nil {
-			return nil
-		}
 		r.checkpointMu.Lock()
 		defer r.checkpointMu.Unlock()
-		// 根目标和运行身份不被子任务覆盖；恢复按原目标重新执行 multi-agent。
-		return r.o.checkpoint(r.durable.Clone(), "multi-agent")
+		// 最终输出留待调度决策与子委派一起提交。
+		if len(local.ExecutionResult) > 0 && len(turn.Local.ExecutionResult) == 0 {
+			return nil
+		}
+		turn.Local = local.Clone()
+		if parent == "" && len(reports) == 0 {
+			r.durable.ExecutionID = local.ExecutionID
+			r.durable.ExecutionResult = slices.Clone(local.ExecutionResult)
+			r.durable.ToolExecutions = local.Clone().ToolExecutions
+		}
+		return r.saveLocked()
 	}
 	if err := save(); err != nil {
 		return MultiAgentResult{}, err
@@ -266,5 +374,11 @@ func (r *multiAgentRun) invoke(task DelegatedTask, reports []DelegatedTask, pare
 	if err != nil {
 		return MultiAgentResult{}, fmt.Errorf("multi-agent %s (%s): %w", task.Worker, task.TaskID, err)
 	}
+	r.checkpointMu.Lock()
+	if r.pending == nil {
+		r.pending = make(map[*delegationTurn]*state.DurableState)
+	}
+	r.pending[turn] = local.Clone()
+	r.checkpointMu.Unlock()
 	return output, nil
 }

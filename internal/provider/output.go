@@ -26,6 +26,12 @@ const (
 	OutputTaskInfo    OutputKind = "task_info"
 )
 
+// isDeltaOutput 判断事件是否为流式正文增量。
+// 这类事件量大且属于临时内容，只有 debug 级别才回显到 stderr，避免刷屏。
+func isDeltaOutput(kind OutputKind) bool {
+	return kind == OutputTextDelta || kind == OutputAnswerDelta
+}
+
 // ToolResultOutput 用 call_id 关联工具调用；Result 保存原生 MCP content JSON。
 // 失败事件同时保留能获取到的结果及错误详情。
 type ToolResultOutput struct {

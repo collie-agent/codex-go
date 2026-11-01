@@ -37,7 +37,8 @@ delta: {"text":"hello"}
 | type | delta 示例 |
 | --- | --- |
 | `task_info` | `{"run_id":"8ab8b473adf7df4574a37fa158d4ff59","conv_id":"09db16c71e2c040d0dc32019f2b504b9"}` |
-| `task_completed` | `{}`（仅队列任务整体成功完成后） |
+| `task_completed` | `{}`（队列任务成功或业务失败终止后） |
+| `task_interrupted` | `{}`（仅队列任务主动中断且中断状态保存成功后） |
 | `text_delta` | `{"text":"hello"}` |
 | `answer_delta` | `{"text":"解码后的答案片段"}` |
 | `tool_call` | `{"name":"read_file","call_id":"call-1","arguments":"{\"path\":\"a.txt\"}"}` |
@@ -50,7 +51,9 @@ delta: {"text":"hello"}
 
 工具失败时，`tool_error` 也保留能获取到的 `result`。`result` 是 MCP content 的 JSON 数组，`arguments` 是模型生成的 JSON 字符串。模型校验导致整批调用被拒绝时，每个调用收到一个 `tool_error`，说明该批未执行。结果只在执行完成时写入，不随后续模型历史重放重复写入。
 
-`task_completed` 由 `codex-consumer` 在整个任务执行和最终检查点保存成功后写入一次；模型轮次、执行步骤或子代理完成不会单独产生此事件，失败任务也不会产生。该事件沿用任务消息中的 `TaskId`，支持与普通输出相同的回放和续传；直接运行代理不会产生此队列任务事件。
+`task_completed` 由 `codex-consumer` 在任务成功或业务失败结束且最终状态保存成功后写入一次；模型轮次、执行步骤或子代理完成不会单独产生此事件，执行故障不会产生。该事件沿用任务消息中的 `TaskId`，支持与普通输出相同的回放和续传；直接运行代理不会产生此队列任务事件。
+
+主动中断的队列任务在中断状态保存成功后发送 `task_interrupted`，不发送 `task_completed`；中断状态保存失败不会发送 `task_interrupted`。该事件同样使用任务的 Stream，支持回放和续传。
 
 Stream 不发送 schema 和请求上下文。流式 delta、工具结果和 usage 不受 `log_level` 过滤；`stream: false` 时只发送提取后的 `text`，不发送 `text_delta/answer_delta`。usage 按每次 HTTP 尝试记录，缺失计数使用字符串 `"unknown"`，与 `"0"` 区分。
 
@@ -65,7 +68,8 @@ redis-cli XREAD BLOCK 5000 STREAMS codex-go-resp-stream-your-task-id 0-0
 当 `stream: true` 时，`answer_delta` 在模型生成过程中提取 JSON 的根级
 `answer` / `result.answer`，或 line protocol 根块 / 直接 RESULT 子块的
 `ANSWER` 字符串。字段名、转义和 Unicode 代理对跨 chunk 时会等待足够输入，
-只发送已解码的内容。stderr 同时打印 `LLM answer delta=...`，不受日志级别过滤。
+只发送已解码的内容。stderr 仅在 `log_level: debug` 时打印 `LLM answer delta=...`，
+其他级别只写入 Stream，避免流式内容刷屏。
 同时保留原始 `text_delta`，不发送完整 `text` 事件；同一轮响应中两类片段与 `text` 互斥。
 
 这些片段是当前模型轮次的临时内容，不代表任务已成功：完整响应仍需解析和业务校验，

@@ -302,8 +302,8 @@ func TestMigrationUsesSpecifiedColumnsAndJSONTypes(t *testing.T) {
 	}
 	for table, want := range map[string]map[string]string{
 		"conversation":   {"conv_id": "varchar", "create_at": "datetime", "update_at": "datetime"},
-		"agent_run":      {"run_id": "varchar", "conv_id": "varchar", "goal": "longtext", "status": "varchar", "result": "json", "error": "longtext", "mode": "varchar", "completion_criteria": "json", "planning_context": "longtext", "workspace": "longtext", "create_at": "datetime", "update_at": "datetime"},
-		"step_execution": {"step_id": "varchar", "run_id": "varchar", "status": "varchar", "intent": "longtext", "completion_criteria": "longtext", "completion_evidence": "json", "observation": "json", "position": "bigint", "revision": "bigint", "create_at": "datetime", "update_at": "datetime"},
+		"agent_run":      {"multi_agent_checkpoint": "json", "failure_type": "varchar", "run_id": "varchar", "conv_id": "varchar", "goal": "longtext", "status": "varchar", "result": "json", "error": "longtext", "mode": "varchar", "completion_criteria": "json", "planning_context": "longtext", "workspace": "longtext", "create_at": "datetime", "update_at": "datetime"},
+		"step_execution": {"execution_id": "varchar", "step_id": "varchar", "run_id": "varchar", "status": "varchar", "intent": "longtext", "completion_criteria": "longtext", "completion_evidence": "json", "observation": "json", "position": "bigint", "revision": "bigint", "create_at": "datetime", "update_at": "datetime"},
 	} {
 		// schema 是迁移命令的对外契约，独立列出预期列，防止 ORM 默认命名或软删除字段混入。
 		columns, err := db.Migrator().ColumnTypes(table)

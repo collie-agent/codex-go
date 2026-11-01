@@ -20,12 +20,21 @@ import (
 )
 
 type Options struct {
-	ConfigPath, Task, Workspace, ConvID, RunID, Mode, MCPCommand string
-	Timeout                                                      time.Duration
-	RuntimeDirs                                                  []string
-	Skills                                                       []agent.Skill
-	Stderr                                                       io.Writer
-	Output                                                       provider.Outputer
+	ConfigPath  string
+	Task        string
+	Workspace   string
+	ConvID      string
+	RunID       string
+	Mode        string
+	MCPCommand  string
+	Timeout     time.Duration
+	RuntimeDirs []string
+	Skills      []agent.Skill
+	Stderr      io.Writer
+	Output      provider.Outputer
+	Interrupt   *Interrupt
+	// OnRunLocked registers external interruption while this execution owns the run lock.
+	OnRunLocked func(context.Context, string, *Interrupt) (func(), error)
 }
 
 // Run creates the recovery identity before starting any model or tool execution.
@@ -67,6 +76,19 @@ func Run(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 	}
 	defer database.Close(db)
 	store := database.NewRunStore(db)
+	if opts.ConvID != "" && isContinuation(opts.Task) {
+		prior, err := store.LatestConversationRun(ctx, opts.ConvID)
+		if err != nil {
+			return nil, fmt.Errorf("find interrupted conversation run: %w", err)
+		}
+		if prior.Status != "interrupted" {
+			return nil, fmt.Errorf("conversation latest run %s is %s, not interrupted", prior.RunID, prior.Status)
+		}
+		// Continue is a control request, not a replacement goal. Resume validates
+		// and locks the original run and restores its workspace and mode.
+		opts.RunID, opts.Task, opts.Workspace, opts.Mode = prior.RunID, "", "", ""
+		return Resume(ctx, opts)
+	}
 	run, err := store.Create(ctx, opts.ConvID, opts.Task, workspace, mode)
 	if err != nil {
 		return nil, err
@@ -79,8 +101,21 @@ func Run(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 	}
 	defer runLock.Release(ctx)
 	ctx = runLock.Context()
+	if opts.OnRunLocked != nil {
+		if opts.Interrupt == nil {
+			opts.Interrupt = NewInterrupt()
+		}
+		cleanup, err := opts.OnRunLocked(ctx, run.RunID, opts.Interrupt)
+		if err != nil {
+			return nil, err
+		}
+		defer cleanup()
+		defer opts.Interrupt.Finish()
+	}
 	lockedStore := runLock.Store()
-	orchestrator := newOrchestrator(ctx, workspace, opts)
+	executionCtx, cancelExecution := executionContext(ctx, opts.Interrupt)
+	defer cancelExecution()
+	orchestrator := newOrchestrator(executionCtx, workspace, opts)
 	if err := orchestrator.SetMode(opts.Mode); err != nil {
 		return nil, err
 	}
@@ -93,20 +128,57 @@ func Run(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 		return nil, err
 	}
 	durable := &state.DurableState{RunId: run.RunID, Goal: run.Goal}
-	return executeRun(ctx, lockedStore, &run, durable, orchestrator, loaded)
+	if mode == "react" {
+		durable.ExecutionID = run.RunID
+	}
+	return executeRun(ctx, executionCtx, lockedStore, &run, durable, orchestrator, loaded, opts.Interrupt)
+}
+
+func isContinuation(input string) bool {
+	switch strings.ToLower(strings.TrimSpace(input)) {
+	case "continue", "继续":
+		return true
+	default:
+		return false
+	}
+}
+
+func executionContext(lockCtx context.Context, interrupt *Interrupt) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancelCause(lockCtx)
+	if interrupt != nil {
+		go func() {
+			select {
+			case <-interrupt.done:
+				cancel(ErrInterrupted)
+			case <-ctx.Done():
+			}
+		}()
+	}
+	return ctx, func() { cancel(nil) }
 }
 
 // executeRun serializes snapshots from concurrent processor branches before
 // committing them through the shared run record and lock-holding connection.
-func executeRun(ctx context.Context, store *database.RunStore, run *database.AgentRun, durable *state.DurableState, orchestrator runOrchestrator, loaded *config.AgentConfig) ([]agent.ReactResult, error) {
-	// 新建与恢复共用同一加载入口；仅传递最终结果/错误，不共享模型消息。
+func executeRun(ctx, executionCtx context.Context, store *database.RunStore, run *database.AgentRun, durable *state.DurableState, orchestrator runOrchestrator, loaded *config.AgentConfig, interrupt *Interrupt) ([]agent.ReactResult, error) {
+	// 新建与恢复共用历史加载入口；历史工具消息只供参考，不恢复旧运行调度。
 	previous, err := store.PreviousRuns(ctx, run)
 	if err != nil {
 		return nil, fmt.Errorf("load previous agent runs: %w", err)
 	}
 	durable.PreviousRunOutcomes = nil
 	for _, prior := range previous {
-		durable.PreviousRunOutcomes = append(durable.PreviousRunOutcomes, state.RunOutcome{RunID: prior.RunID, Result: string(prior.Result), Error: prior.Error})
+		switch prior.Status {
+		case "completed":
+			durable.PreviousRunOutcomes = append(durable.PreviousRunOutcomes, state.RunOutcome{RunID: prior.RunID, Result: string(prior.Result), Error: prior.Error})
+		case "failed":
+			durable.PreviousRunOutcomes = append(durable.PreviousRunOutcomes, state.RunOutcome{RunID: prior.RunID, Error: prior.Error})
+		case "interrupted":
+			history, err := interruptedHistory(ctx, store, prior)
+			if err != nil {
+				return nil, fmt.Errorf("load interrupted run %s: %w", prior.RunID, err)
+			}
+			durable.PreviousRunOutcomes = append(durable.PreviousRunOutcomes, history)
+		}
 	}
 	var checkpointMu sync.Mutex
 	orchestrator.SetCheckpoint(func(current *state.DurableState, mode string) error {
@@ -115,6 +187,12 @@ func executeRun(ctx context.Context, store *database.RunStore, run *database.Age
 		return store.SaveDurableCheckpoint(ctx, run, current, mode)
 	})
 	results, runErr := orchestrator.Run(loaded, durable)
+	if interrupt != nil {
+		interrupt.Finish()
+	}
+	if runErr != nil && errors.Is(context.Cause(executionCtx), ErrInterrupted) {
+		runErr = errors.Join(runErr, ErrInterrupted)
+	}
 	return finishRun(ctx, store, run, durable, results, runErr)
 }
 
@@ -125,10 +203,32 @@ func finishRun(ctx context.Context, store *database.RunStore, run *database.Agen
 	run.CompletionCriteria = durable.CompletionCriteria
 	if runErr != nil {
 		run.Status = "failed"
+		if errors.Is(runErr, ErrInterrupted) {
+			run.Status = "interrupted"
+		}
+		run.FailureType = "execution"
+		var businessFailure *agent.BusinessFailureError
+		if errors.As(runErr, &businessFailure) {
+			results = []agent.ReactResult{businessFailure.Result}
+			// A failed plan step supersedes the previous successful step's result.
+			durable.Result = businessFailure.Result
+		}
+		if len(results) > 0 && results[0].Status == agent.FailedReactStatus {
+			run.FailureType = "business"
+		}
+		if durable.Result != nil {
+			encoded, err := json.Marshal(durable.Result)
+			if err != nil {
+				return nil, err
+			}
+			run.Result = encoded
+		} else if len(durable.ExecutionResult) > 0 {
+			run.Result = append(json.RawMessage(nil), durable.ExecutionResult...)
+		}
 		run.Error = runErr.Error()
 	} else {
 		var err error
-		run.Status, run.Error = "completed", ""
+		run.Status, run.Error, run.FailureType = "completed", "", ""
 		// 当前入口为单执行分支；保留全部结构化字段，不能只保存答案。
 		if durable.Result != nil {
 			run.Result, err = json.Marshal(durable.Result)
@@ -142,9 +242,15 @@ func finishRun(ctx context.Context, store *database.RunStore, run *database.Agen
 		}
 	}
 	if err := store.Save(ctx, run); err != nil {
+		if errors.Is(runErr, ErrInterrupted) {
+			return nil, errors.Join(runErr, &InterruptPersistenceError{Err: err})
+		}
 		return nil, errors.Join(runErr, err)
 	}
 	if runErr != nil {
+		if run.FailureType == "business" {
+			return results, runErr
+		}
 		return nil, runErr
 	}
 	return results, nil

@@ -33,6 +33,9 @@ func (m multiAgentAdapter) Run(cfg *config.AgentConfig, durable *state.DurableSt
 	if err != nil {
 		return nil, err
 	}
+	if len(results) > 0 && results[0].Result.Status == agent.FailedReactStatus {
+		return multiAgentAnswers(results), fmt.Errorf("multi-agent reported failure: %s", results[0].Result.Answer)
+	}
 	return multiAgentAnswers(results), nil
 }
 

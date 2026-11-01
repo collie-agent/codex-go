@@ -181,7 +181,7 @@ func TestRunAgentUsesYAMLAllowedToolAndReturnsItsResultToModel(t *testing.T) {
 		}
 		if err := json.Unmarshal(request.Input, &items); err != nil {
 			t.Error(err)
-		} else if len(items) != 4 || items[0].Role != "system" || items[1].Type != "function_call" || items[1].CallID != "call_1" || items[2].Type != "function_call_output" || items[2].CallID != "call_1" || !strings.Contains(items[2].Output, "依赖工具结果") {
+		} else if len(items) != 6 || items[0].Role != "system" || items[3].Type != "function_call" || items[3].CallID != "call_1" || items[4].Type != "function_call_output" || items[4].CallID != "call_1" || !strings.Contains(items[4].Output, "依赖工具结果") {
 			t.Errorf("second model request did not contain native tool result: %s", request.Input)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -460,4 +460,78 @@ func runPersistedTestAgent(t *testing.T, configPath, task, workspace string, tim
 		t.Fatal(err)
 	}
 	return runAgent(configPath, task, workspace, timeout, runtimeDirs...)
+}
+
+func TestResumeAgentRestoresMultiAgentEntry(t *testing.T) {
+	raw := os.Getenv("CODEX_TEST_MYSQL_URL")
+	if raw == "" {
+		t.Skip("set CODEX_TEST_MYSQL_URL")
+	}
+	t.Setenv("CODEX_MYSQL_URL", raw)
+	db, err := database.Open(t.Context(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close(db)
+	if err := database.Migrate(t.Context(), db); err != nil {
+		t.Fatal(err)
+	}
+	store := database.NewRunStore(db)
+	run, err := store.Create(t.Context(), "", "original goal", t.TempDir(), "multi-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	durable := &fileContext.DurableState{RunId: run.RunID, ExecutionID: run.RunID, ExecutionResult: []byte(`{"entry_completion_criteria":["verified"],"result":{"status":"completed","answer":"saved CLI answer"},"next":[]}`)}
+	if err := store.SaveDurableCheckpoint(t.Context(), &run, durable, "multi-agent"); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "agent.yaml")
+	config := "name: multi-agent\nmulti-agent:\n  entry: supervisor\n  max_rounds: 3\n  max_parallel: 1\nbase:\n  llm:\n    base_url: http://127.0.0.1:1\n    api_key: test\n    model: test\nagents:\n  supervisor:\n    instruction: supervise\n"
+	if err := os.WriteFile(path, []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := resumeAgent(path, run.RunID, "", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := store.Get(t.Context(), run.RunID)
+	if err != nil || saved.Status != "completed" || !strings.Contains(string(saved.Result), "saved CLI answer") {
+		t.Fatalf("run=%+v error=%v", saved, err)
+	}
+}
+
+func TestResumeAgentRestoresPlanStep(t *testing.T) {
+	raw := os.Getenv("CODEX_TEST_MYSQL_URL")
+	if raw == "" {
+		t.Skip("set CODEX_TEST_MYSQL_URL")
+	}
+	t.Setenv("CODEX_MYSQL_URL", raw)
+	db, err := database.Open(t.Context(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close(db)
+	if err := database.Migrate(t.Context(), db); err != nil {
+		t.Fatal(err)
+	}
+	store := database.NewRunStore(db)
+	run, err := store.Create(t.Context(), "", "original goal", t.TempDir(), "plan-execute")
+	if err != nil {
+		t.Fatal(err)
+	}
+	durable := &fileContext.DurableState{RunId: run.RunID, ExecutionID: run.RunID + "-cli-step", ExecutionResult: []byte(`{"status":"completed","answer":"saved CLI answer","Observation":["done"],"CompletionEvidence":["verified"]}`), StepExecutions: []fileContext.StepExecution{{StepId: "step", ExecutionID: run.RunID + "-cli-step", Revision: 1, Status: fileContext.RunningExecutionStatus, Intent: "finish", CompletionCriteria: "verified"}}}
+	if err := store.SaveDurableCheckpoint(t.Context(), &run, durable, "plan-execute"); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "agent.yaml")
+	config := "name: react\nbase:\n  llm:\n    base_url: http://127.0.0.1:1\n    api_key: test\n    model: test\n"
+	if err := os.WriteFile(path, []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := resumeAgent(path, run.RunID, "", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := store.Get(t.Context(), run.RunID)
+	if err != nil || saved.Status != "completed" || !strings.Contains(string(saved.Result), "saved CLI answer") {
+		t.Fatalf("run=%+v error=%v", saved, err)
+	}
 }

@@ -10,12 +10,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/collie-agent/codex-go/internal/application"
 	"github.com/collie-agent/codex-go/internal/entity"
 	"github.com/collie-agent/codex-go/internal/rdb"
 	"github.com/collie-agent/codex-go/internal/testutil"
+	"github.com/redis/go-redis/v9"
 )
 
 type fakeBackend struct{ task entity.TaskMessage }
+
+func (*fakeBackend) RequestInterrupt(context.Context, string) (string, error) {
+	return "unavailable", nil
+}
 
 func (f *fakeBackend) RPush(_ context.Context, _, value string) (int64, error) {
 	return 1, json.Unmarshal([]byte(value), &f.task)
@@ -44,14 +50,14 @@ func TestCreateTask(t *testing.T) {
 func TestCreateTaskWithConversation(t *testing.T) {
 	f := &fakeBackend{}
 	w := httptest.NewRecorder()
-	New(f, fakeStore{}, 0).ServeHTTP(w, httptest.NewRequest("POST", "/tasks", strings.NewReader(`{"input":"continue task","ConvId":"existing-conversation"}`)))
+	New(f, fakeStore{}, 0).ServeHTTP(w, httptest.NewRequest("POST", "/tasks", strings.NewReader(`{"input":"continue task","conv_id":"existing-conversation"}`)))
 	if w.Code != http.StatusCreated || f.task.ConvId != "existing-conversation" {
 		t.Fatalf("status=%d body=%s task=%+v", w.Code, w.Body, f.task)
 	}
 }
 
 func TestCreateTaskWithoutConversation(t *testing.T) {
-	for _, body := range []string{`{"input":"new task"}`, `{"input":"new task","ConvId":""}`} {
+	for _, body := range []string{`{"input":"new task"}`, `{"input":"new task","conv_id":""}`} {
 		t.Run(body, func(t *testing.T) {
 			f := &fakeBackend{}
 			w := httptest.NewRecorder()
@@ -64,6 +70,10 @@ func TestCreateTaskWithoutConversation(t *testing.T) {
 }
 
 type streamBackend struct{ ids chan string }
+
+func (*streamBackend) RequestInterrupt(context.Context, string) (string, error) {
+	return "unavailable", nil
+}
 
 func (s *streamBackend) RPush(context.Context, string, string) (int64, error) { return 1, nil }
 func (s *streamBackend) ReadTaskStream(ctx context.Context, _ string, id string) ([]*entity.StreamEvent, error) {
@@ -172,9 +182,17 @@ func TestStreamDeliversAndResumesTaskCompletion(t *testing.T) {
 				if err != nil || !strings.HasPrefix(data, "data: ") {
 					t.Fatalf("SSE data=%q err=%v", data, err)
 				}
-				var event entity.StreamEvent
+				var event struct {
+					ID    string `json:"id"`
+					Type  string `json:"type"`
+					Delta string `json:"delta"`
+				}
 				if err := json.Unmarshal([]byte(strings.TrimPrefix(data, "data: ")), &event); err != nil {
 					t.Fatal(err)
+				}
+				var fields map[string]json.RawMessage
+				if err := json.Unmarshal([]byte(strings.TrimPrefix(data, "data: ")), &fields); err != nil || len(fields) != 3 || fields["id"] == nil || fields["type"] == nil || fields["delta"] == nil {
+					t.Fatalf("unexpected SSE fields: %s", data)
 				}
 				if event.ID != wantID || event.Type != wantType || event.Delta != wantDelta {
 					t.Fatalf("unexpected event: %+v", event)
@@ -188,5 +206,121 @@ func TestStreamDeliversAndResumesTaskCompletion(t *testing.T) {
 			}
 			readEvent(completionID, "task_completed", `{}`)
 		})
+	}
+}
+
+func TestResumeTaskEnqueuesOriginalRun(t *testing.T) {
+	backend := &fakeBackend{}
+	response := httptest.NewRecorder()
+	New(backend, fakeStore{}, 0).ServeHTTP(response, httptest.NewRequest("POST", "/tasks", strings.NewReader(`{"run_id":"original-run"}`)))
+	if response.Code != http.StatusCreated || backend.task.RunId != "original-run" || backend.task.Input != "" || backend.task.TaskId == "" {
+		t.Fatalf("status=%d task=%+v", response.Code, backend.task)
+	}
+}
+
+type interruptBackend struct{ fakeBackend }
+
+func (*interruptBackend) RequestInterrupt(context.Context, string) (string, error) {
+	return "accepted", nil
+}
+
+func TestInterruptRequestAcknowledgesDelivery(t *testing.T) {
+	w := httptest.NewRecorder()
+	New(&interruptBackend{}, fakeStore{}, 0).ServeHTTP(w, httptest.NewRequest("POST", "/runs/run-1/interrupt", nil))
+	if w.Code != http.StatusAccepted || !strings.Contains(w.Body.String(), "accepted") {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body)
+	}
+}
+
+func TestInterruptDeliveryAcrossRedisClients(t *testing.T) {
+	client, addr := testutil.StartRedis(t)
+	other := redis.NewClient(&redis.Options{Addr: addr, ContextTimeoutEnabled: true})
+	defer other.Close()
+	backend := rdb.NewRedisManagerWithClient(client)
+	backend.SetRunStatusLookup(func(context.Context, string) (string, error) { return "running", nil })
+	signal := &testInterrupt{called: make(chan struct{})}
+	stop, err := rdb.ListenInterrupt(t.Context(), other, "run-1", signal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	handler := New(backend, fakeStore{}, 0)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest("POST", "/runs/run-1/interrupt", nil))
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body)
+	}
+	select {
+	case <-signal.called:
+	case <-time.After(time.Second):
+		t.Fatal("signal not delivered")
+	}
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest("POST", "/runs/run-1/interrupt", nil))
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "already_requested") {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body)
+	}
+}
+
+type testInterrupt struct{ called chan struct{} }
+
+func (s *testInterrupt) TryInterrupt() string {
+	select {
+	case <-s.called:
+		return "already_requested"
+	default:
+		close(s.called)
+		return "accepted"
+	}
+}
+
+func TestInterruptDoesNotAcknowledgeFinishedExecution(t *testing.T) {
+	client, _ := testutil.StartRedis(t)
+	backend := rdb.NewRedisManagerWithClient(client)
+	backend.SetRunStatusLookup(func(context.Context, string) (string, error) { return "running", nil })
+	signal := application.NewInterrupt()
+	stop, err := rdb.ListenInterrupt(t.Context(), client, "finished-run", signal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	signal.Finish()
+	response := httptest.NewRecorder()
+	New(backend, fakeStore{}, 0).ServeHTTP(response, httptest.NewRequest("POST", "/runs/finished-run/interrupt", nil))
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "terminal") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body)
+	}
+}
+
+func TestConcurrentInterruptRequestsHaveOneAcceptance(t *testing.T) {
+	client, _ := testutil.StartRedis(t)
+	backend := rdb.NewRedisManagerWithClient(client)
+	backend.SetRunStatusLookup(func(context.Context, string) (string, error) { return "running", nil })
+	stop, err := rdb.ListenInterrupt(t.Context(), client, "concurrent-run", application.NewInterrupt())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	handler := New(backend, fakeStore{}, 0)
+	results := make(chan int, 16)
+	for i := 0; i < cap(results); i++ {
+		go func() {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest("POST", "/runs/concurrent-run/interrupt", nil))
+			results <- response.Code
+		}()
+	}
+	accepted := 0
+	for i := 0; i < cap(results); i++ {
+		switch code := <-results; code {
+		case http.StatusAccepted:
+			accepted++
+		case http.StatusConflict:
+		default:
+			t.Fatalf("unexpected response %d", code)
+		}
+	}
+	if accepted != 1 {
+		t.Fatalf("accepted=%d, want 1", accepted)
 	}
 }

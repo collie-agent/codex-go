@@ -27,18 +27,20 @@ func (Conversation) TableName() string { return "conversation" }
 
 // AgentRun 只保存恢复所需的业务状态；不含凭据和 YAML 配置快照。
 type AgentRun struct {
-	RunID              string          `gorm:"column:run_id;type:varchar(64);primaryKey"`
-	ConvID             string          `gorm:"column:conv_id;type:varchar(64);not null;index"`
-	Goal               string          `gorm:"column:goal;type:longtext;not null"`
-	Status             string          `gorm:"column:status;type:varchar(16);not null"`
-	Result             json.RawMessage `gorm:"column:result;type:json"`
-	Error              string          `gorm:"column:error;type:longtext"`
-	Mode               string          `gorm:"column:mode;type:varchar(32)"`
-	CompletionCriteria []string        `gorm:"column:completion_criteria;serializer:json;type:json"`
-	PlanningContext    string          `gorm:"column:planning_context;type:longtext"`
-	Workspace          string          `gorm:"column:workspace;type:longtext;not null"`
-	CreateAt           time.Time       `gorm:"column:create_at;autoCreateTime"`
-	UpdateAt           time.Time       `gorm:"column:update_at;autoUpdateTime"`
+	RunID                string          `gorm:"column:run_id;type:varchar(64);primaryKey"`
+	ConvID               string          `gorm:"column:conv_id;type:varchar(64);not null;index"`
+	Goal                 string          `gorm:"column:goal;type:longtext;not null"`
+	Status               string          `gorm:"column:status;type:varchar(16);not null"`
+	Result               json.RawMessage `gorm:"column:result;type:json"`
+	Error                string          `gorm:"column:error;type:longtext"`
+	FailureType          string          `gorm:"column:failure_type;type:varchar(32)"`
+	Mode                 string          `gorm:"column:mode;type:varchar(32)"`
+	CompletionCriteria   []string        `gorm:"column:completion_criteria;serializer:json;type:json"`
+	MultiAgentCheckpoint json.RawMessage `gorm:"column:multi_agent_checkpoint;type:json"`
+	PlanningContext      string          `gorm:"column:planning_context;type:longtext"`
+	Workspace            string          `gorm:"column:workspace;type:longtext;not null"`
+	CreateAt             time.Time       `gorm:"column:create_at;autoCreateTime"`
+	UpdateAt             time.Time       `gorm:"column:update_at;autoUpdateTime"`
 }
 
 func (AgentRun) TableName() string { return "agent_run" }
@@ -46,6 +48,7 @@ func (AgentRun) TableName() string { return "agent_run" }
 // StepExecution stores one plan step.  JSON fields retain the structured
 // evidence and observation emitted by the executor.
 type StepExecution struct {
+	ExecutionID        string    `gorm:"column:execution_id;type:varchar(64)"`
 	StepID             string    `gorm:"column:step_id;type:varchar(128);not null;primaryKey"`
 	RunID              string    `gorm:"column:run_id;type:varchar(64);not null;primaryKey;index"`
 	Status             string    `gorm:"column:status;type:varchar(16);not null"`
@@ -77,7 +80,7 @@ func Migrate(ctx context.Context, db *gorm.DB) error {
 			return err
 		}
 	}
-	if err := db.AutoMigrate(&Conversation{}, &AgentRun{}, &StepExecution{}, &SSEStreamEvent{}); err != nil {
+	if err := db.AutoMigrate(&Conversation{}, &AgentRun{}, &StepExecution{}, &SSEStreamEvent{}, &ExecutionInstance{}, &ToolExecution{}); err != nil {
 		return err
 	}
 	// 显式指定外键方向，避免两个模型同名 ConvID 被推断为反向关联。
@@ -262,7 +265,13 @@ func (s *RunStore) Create(ctx context.Context, convID, goal, workspace, mode str
 			}
 		}
 		run = AgentRun{RunID: id, ConvID: convID, Goal: goal, Workspace: workspace, Mode: mode, Status: "pending"}
-		return tx.Omit("Conversation").Create(&run).Error
+		if err := tx.Omit("Conversation").Create(&run).Error; err != nil {
+			return err
+		}
+		if mode == "react" || mode == "" {
+			return tx.Create(&ExecutionInstance{ExecutionID: id, RunID: id}).Error
+		}
+		return nil
 	})
 	if err != nil {
 		return AgentRun{}, fmt.Errorf("create pending run (run the migration command first): %w", err)
@@ -274,6 +283,16 @@ func (s *RunStore) Get(ctx context.Context, runID string) (AgentRun, error) {
 	defer s.lockConnection()()
 	var run AgentRun
 	err := s.db.WithContext(ctx).First(&run, "run_id = ?", runID).Error
+	return run, err
+}
+
+// LatestConversationRun never searches past newer runs: continue must not revive
+// an older interrupted goal after the conversation has moved on.
+func (s *RunStore) LatestConversationRun(ctx context.Context, convID string) (AgentRun, error) {
+	defer s.lockConnection()()
+	var run AgentRun
+	err := s.db.WithContext(ctx).Where("conv_id = ?", convID).
+		Order("create_at DESC").Order("run_id DESC").First(&run).Error
 	return run, err
 }
 
@@ -302,8 +321,8 @@ func (s *RunStore) Save(ctx context.Context, run *AgentRun) error {
 
 func saveRun(db *gorm.DB, run *AgentRun) error {
 	result := db.Model(&AgentRun{}).Where("run_id = ?", run.RunID).Updates(map[string]any{
-		"status": run.Status, "result": run.Result, "error": run.Error, "planning_context": run.PlanningContext,
-		"mode": run.Mode, "completion_criteria": mustCriteriaJSON(run.CompletionCriteria), "update_at": time.Now(),
+		"status": run.Status, "result": run.Result, "error": run.Error, "failure_type": run.FailureType, "planning_context": run.PlanningContext,
+		"multi_agent_checkpoint": run.MultiAgentCheckpoint, "mode": run.Mode, "completion_criteria": mustCriteriaJSON(run.CompletionCriteria), "update_at": time.Now(),
 	})
 	if result.Error != nil {
 		return fmt.Errorf("save run checkpoint: %w", result.Error)
@@ -318,8 +337,16 @@ func saveRun(db *gorm.DB, run *AgentRun) error {
 // A failed step write rolls back the run update, preventing execution from
 // advancing past a checkpoint that was not durably recorded.
 func (s *RunStore) SaveCheckpoint(ctx context.Context, run *AgentRun, steps []StepExecution) error {
+	return s.saveCheckpoint(ctx, run, steps, nil)
+}
+func (s *RunStore) saveCheckpoint(ctx context.Context, run *AgentRun, steps []StepExecution, durable *fileContext.DurableState) error {
 	defer s.lockConnection()()
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if durable != nil {
+			if err := saveExecutions(tx, durable); err != nil {
+				return err
+			}
+		}
 		if err := saveRun(tx, run); err != nil {
 			return err
 		}
@@ -342,7 +369,7 @@ func (s *RunStore) SaveCheckpoint(ctx context.Context, run *AgentRun, steps []St
 			result := tx.Model(&StepExecution{}).Where("run_id = ? AND step_id = ?", step.RunID, step.StepID).Updates(map[string]any{
 				"status": step.Status, "intent": step.Intent, "completion_criteria": step.CompletionCriteria,
 				"completion_evidence": mustListJSON(step.CompletionEvidence), "observation": mustListJSON(step.Observation),
-				"position": step.Position, "revision": step.Revision, "update_at": time.Now(),
+				"position": step.Position, "revision": step.Revision, "execution_id": step.ExecutionID, "update_at": time.Now(),
 			})
 			if result.Error != nil {
 				return fmt.Errorf("save step checkpoint: %w", result.Error)
@@ -396,6 +423,7 @@ func (s *RunStore) SaveDurableCheckpoint(ctx context.Context, run *AgentRun, sta
 	run.Error = state.Error
 	run.CompletionCriteria = state.CompletionCriteria
 	run.PlanningContext = state.PlanningContext
+	run.MultiAgentCheckpoint = append(json.RawMessage(nil), state.MultiAgentCheckpoint...)
 	if state.Result != nil {
 		encoded, err := json.Marshal(state.Result)
 		if err != nil {
@@ -406,12 +434,12 @@ func (s *RunStore) SaveDurableCheckpoint(ctx context.Context, run *AgentRun, sta
 	steps := make([]StepExecution, len(state.StepExecutions))
 	for i, step := range state.StepExecutions {
 		steps[i] = StepExecution{
-			StepID: step.StepId, RunID: run.RunID, Status: string(step.Status), Intent: step.Intent,
+			StepID: step.StepId, ExecutionID: step.ExecutionID, RunID: run.RunID, Status: string(step.Status), Intent: step.Intent,
 			CompletionCriteria: step.CompletionCriteria, CompletionEvidence: step.CompletionEvidence,
 			Observation: step.Observation, Position: i, Revision: step.Revision,
 		}
 	}
-	if err := s.SaveCheckpoint(ctx, run, steps); err != nil {
+	if err := s.saveCheckpoint(ctx, run, steps, state); err != nil {
 		return err
 	}
 	*original = *run

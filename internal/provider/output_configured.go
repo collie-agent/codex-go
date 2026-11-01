@@ -35,11 +35,17 @@ type configuredOutputer struct {
 
 func (o *configuredOutputer) Emit(ctx context.Context, event OutputEvent) error {
 	var logErr error
-	// 工具结果/错误保留 agent 的现有日志路径，避免在 stderr 重复打印。
-	if event.Kind != OutputToolResult && event.Kind != OutputToolError && (event.Kind != OutputTextDelta || o.level == config.DebugLogLevel) {
+	// 工具结果/错误保留 agent 的现有日志路径，避免在 stderr 重复打印；
+	// 正文增量只在 debug 级别回显，但始终写入 Stream 供消费者使用。
+	if event.Kind != OutputToolResult && event.Kind != OutputToolError && !(event.Kind == OutputText && o.level.InfoEnabled()) && o.stderrVisible(event.Kind) {
 		logErr = o.stderr.Emit(ctx, event)
 	}
 	return errors.Join(logErr, o.stream.Emit(ctx, event))
+}
+
+// stderrVisible 与默认输出器保持同一套日志级别规则，避免两条路径行为不一致。
+func (o *configuredOutputer) stderrVisible(kind OutputKind) bool {
+	return !isDeltaOutput(kind) || o.level == config.DebugLogLevel
 }
 
 // NewTaskOutputer directs task metadata to the supplied log writer and configured stream.

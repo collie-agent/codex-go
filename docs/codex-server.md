@@ -1,6 +1,6 @@
 # codex-server 客户端接入
 
-`codex-server` 提供 HTTP 接口创建异步任务，并通过 Server-Sent Events（SSE）读取任务输出。创建成功表示任务已入队，不表示任务已开始或执行成功。
+`codex-server` 提供 HTTP 接口提交新任务、恢复已有运行、请求中断运行，并通过 Server-Sent Events（SSE）读取任务输出。提交成功表示任务已入队，不表示任务已开始或执行成功。
 
 ## 启动
 
@@ -8,6 +8,7 @@
 
 ```sh
 export CODEX_MYSQL_URL='mysql://user:password@127.0.0.1:3306/codex-go'
+go run ./cmd/migrate
 go run ./cmd/codex-server --redis-url redis://127.0.0.1:6379/0
 ```
 
@@ -27,10 +28,13 @@ go run ./cmd/codex-server --redis-url redis://127.0.0.1:6379/0
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `input` | string | 是 | 任务内容；不能为空或只有空白字符。原始字符串会传给消费者。 |
-| `ConvId` | string | 否 | 已有会话 ID，随任务传给消费者以引用前序运行结果和错误；省略或空字符串时创建新会话。 |
+| `input` | string | 二选一 | 新任务内容；与 `run_id` 互斥，不能为空或只有空白字符。原始字符串会传给消费者。 |
+| `run_id` | string | 二选一 | 恢复已有运行，详见下文；与 `input` 互斥，不能为空或只有空白字符。 |
+| `conv_id` | string | 否 | 新任务所属的已有会话 ID；省略或空字符串时创建新会话。恢复时沿用原运行的会话，此字段不改变其归属。 |
 
-继续已有会话时，请求体示例：`{"input":"继续上一任务","ConvId":"已有会话ID"}`。服务端负责入队，会话是否存在由消费者执行任务时校验。
+继续已有会话时，请求体示例：`{"input":"继续上一任务","conv_id":"已有会话ID"}`。这会创建新的运行，并加载该会话较早运行的历史；主动中断运行的已保存进度也可作为参考，详见 [会话历史与恢复](conversation-history.md)。服务端负责入队，会话或运行是否存在由消费者执行任务时校验。
+
+`input` 和 `run_id` 必须恰好提供一个有效值；另一个字段应省略或为 `""`，即使只包含空白字符也不能与有效字段同时提交。
 
 ```sh
 curl -i -X POST 'http://localhost:8080/tasks' \
@@ -50,11 +54,11 @@ curl -i -X POST 'http://localhost:8080/tasks' \
 
 | HTTP 状态 | `error` | 说明 |
 | --- | --- | --- |
-| 400 | `input is required` | JSON 无效、`input` 类型错误或内容为空。 |
+| 400 | `provide either input or run_id` | JSON 无效、字段类型错误、未提供有效的 `input` 或 `run_id`，或两者同时非空。 |
 | 500 | `cannot generate task ID` | 无法生成任务 ID。 |
 | 500 | `cannot enqueue task` | 任务写入队列失败。 |
 
-例如：`{"error":"input is required"}`。
+例如：`{"error":"provide either input or run_id"}`。运行不存在、运行锁被占用或配置不匹配等执行阶段错误不会作为本次 POST 的 HTTP 错误返回。
 
 ## 订阅任务事件
 
@@ -77,25 +81,25 @@ curl -N -H 'Last-Event-ID: EVENT_ID' 'http://localhost:8080/tasks/TASK_ID/events
 
 ```text
 id: 1793261930925-0
-data: {"ID":"1793261930925-0","Type":"text_delta","Delta":"{\"text\":\"hello\"}"}
+data: {"id":"1793261930925-0","type":"text_delta","delta":"{\"text\":\"hello\"}"}
 
 ```
 
 | `data` 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `ID` | string | Redis Stream ID，与 SSE 的 `id` 相同。 |
-| `Type` | string | 输出类型，如 `answer_delta`、`text_delta`、`tool_call`、`tool_result`、`tool_error`、`text`、`usage` 或 `task_completed`。 |
-| `Delta` | string | 对应类型的数据，以 JSON **字符串**编码；需要对该字符串再次解析 JSON。 |
+| `id` | string | Redis Stream ID，与 SSE 的 `id` 相同。 |
+| `type` | string | 输出类型，如 `task_info`、`answer_delta`、`text_delta`、`tool_call`、`tool_result`、`tool_error`、`text`、`usage`、`task_completed` 或 `task_interrupted`。 |
+| `delta` | string | 对应类型的数据，以 JSON **字符串**编码；需要对该字符串再次解析 JSON。 |
 
-字段名大小写如上。各类型的 `Delta` 结构、流式输出配置及保留策略见 [Redis Stream 输出](redis-output.md)。客户端应按 SSE 协议解析事件，再解析 `data` JSON；如果需要读取具体内容，再解析 `Delta`。例如浏览器中可使用：
+HTTP 接口的 JSON 字段使用小写下划线命名；旧版 `ConvId`、`ID`、`Type` 和 `Delta` 字段需要相应更新。各类型的 `delta` 结构、流式输出配置及保留策略见 [Redis Stream 输出](redis-output.md)。客户端应按 SSE 协议解析事件，再解析 `data` JSON；如果需要读取具体内容，再解析 `delta`。例如浏览器中可使用：
 
 ```js
 const source = new EventSource(`/tasks/${encodeURIComponent(taskId)}/events`);
 source.onmessage = (event) => {
   const payload = JSON.parse(event.data);
-  const delta = JSON.parse(payload.Delta);
-  console.log(event.lastEventId, payload.Type, delta);
-  if (payload.Type === 'task_completed') {
+  const delta = JSON.parse(payload.delta);
+  console.log(event.lastEventId, payload.type, delta);
+  if (payload.type === 'task_completed' || payload.type === 'task_interrupted') {
     source.close();
   }
 };
@@ -103,19 +107,81 @@ source.onmessage = (event) => {
 
 未提供续传 ID 时，服务从 `0-0` 开始回放 Redis 中仍保留的事件，然后等待新事件。连接断开后可用最后已处理的事件 ID 续传；浏览器 `EventSource` 自动重连时会发送 `Last-Event-ID`。如客户端自行管理重连，应保存 ID 并在处理事件后更新，必要时按 ID 去重。
 
-整个任务执行成功且最终运行检查点保存成功后，消费者发送一条 `task_completed` 事件，`Delta` 为 JSON 字符串 `"{}"`。该事件使用与普通输出相同的 Redis Stream ID，支持回放和续传。例如：
+任务成功或业务失败结束，且最终运行状态保存成功后，消费者发送一条 `task_completed` 事件，`delta` 为 JSON 字符串 `"{}"`。该事件使用与普通输出相同的 Redis Stream ID，支持回放和续传。例如：
 
 ```text
 id: 1793261930926-0
-data: {"ID":"1793261930926-0","Type":"task_completed","Delta":"{}"}
+data: {"id":"1793261930926-0","type":"task_completed","delta":"{}"}
 
 ```
 
-连接不会因任务结束自动关闭，客户端收到 `task_completed` 后应主动关闭连接。`text` 和 `usage` 可能在一次任务中出现多次，不能单独作为任务结束信号。失败任务不发送 `task_completed`，目前也没有专用失败事件；进程异常退出或完成事件写入 Redis 失败时，客户端也可能收不到完成通知。当前接口不提供任务状态查询或取消接口。未知任务 ID 也会建立连接并等待事件，不能通过 HTTP 200 判断任务是否存在或成功。客户端应根据自身需求关闭连接或设置超时。
+主动中断并保存中断状态后，消费者发送 `task_interrupted` 事件，`delta` 同样为 `"{}"`；保存失败不会发送该事件。连接不会因任务结束自动关闭，客户端收到 `task_completed` 或 `task_interrupted` 后应主动关闭连接。`text` 和 `usage` 可能在一次任务中出现多次，不能单独作为任务结束信号。业务失败也发送 `task_completed`，该事件表示任务结束而不表示业务成功；执行故障目前没有专用失败事件；进程异常退出或终态事件写入 Redis 失败时，客户端也可能收不到通知。当前接口不提供任务状态查询；运行开始后可通过下文的中断接口请求停止。未知任务 ID 也会建立连接并等待事件，不能通过 HTTP 200 判断任务是否存在或成功。客户端应根据自身需求关闭连接或设置超时。
 
 服务按 `--flush-interval` 将该连接已发送的事件批量写入 MySQL，断开时也会尝试写入剩余事件。Redis 读取或数据库写入失败会结束连接；由于响应头已经发送，客户端通常只能观察到连接断开。续传仍从 Redis 读取，并受 Redis Stream 保留时间限制；数据库写入不保证客户端已处理事件，也不作为该接口的回放来源。
 
-模型配置 `stream: false` 时，`text` 的 Delta 为 `{"text":"提取并解码后的 answer"}`；`stream: true` 时发送 `text_delta/answer_delta`，不发送 `text`。互斥规则按模型轮次生效。
+模型配置 `stream: false` 时，`text` 的 `delta` 为 `{"text":"提取并解码后的 answer"}`；`stream: true` 时发送 `text_delta/answer_delta`，不发送 `text`。互斥规则按模型轮次生效。
+
+## 获取运行和会话 ID
+
+新运行的 pending 检查点保存后、执行开始前会发送 `task_info`。解析 `delta` 后可取得运行和会话 ID：
+
+```text
+id: 1793261930924-0
+data: {"id":"1793261930924-0","type":"task_info","delta":"{\"run_id\":\"8ab8b473adf7df4574a37fa158d4ff59\",\"conv_id\":\"09db16c71e2c040d0dc32019f2b504b9\"}"}
+
+```
+
+| ID | 用途 |
+| --- | --- |
+| `task_id` | 一次队列请求的标识，用于订阅 SSE；恢复请求会生成新的值。 |
+| `run_id` | 持久化运行的标识，用于恢复或中断；恢复时保持不变。 |
+| `conv_id` | 会话标识，用于在新任务的 `conv_id` 中引用此前历史。 |
+| SSE `id` / `id` | Redis Stream 事件标识，仅用于事件续传和去重。 |
+
+恢复未完成运行时也会发送原有的 `run_id` 和 `conv_id`；直接读取已完成运行的保存结果时不发送 `task_info`。
+
+## 恢复已有运行
+
+通过 `POST /tasks` 提交 `run_id`，省略 `input`：
+
+```sh
+curl -i -X POST 'http://localhost:8080/tasks' \
+  -H 'Content-Type: application/json' \
+  -d '{"run_id":"已有运行 ID"}'
+```
+
+成功仍返回 HTTP `201` 和新的 `task_id`，客户端应订阅新任务的事件流。持久化 `run_id` 不变，原任务事件不会复制到新流；读取此前输出需使用原 `task_id`，并受 Redis 保留时间限制。
+
+支持 `react`、`plan-execute` 和 `multi-agent`。消费者沿用原运行的目标、工作目录、模式和会话，使用当前消费者的模型及工具配置；多代理运行必须使用多代理配置恢复。恢复按执行实例续接已确认工具历史，计划跳过已完成步骤，多代理恢复委派关系与已完成报告。已登记但结果未知的工具调用会阻止自动恢复，以免重复产生副作用。同一 `run_id` 同时只能由一个执行者持有运行锁，重复提交不会绕过此限制。
+
+`pending`、`running` 和可恢复的 `failed` 运行可继续执行；终态业务失败不会重新执行，主动中断的 `interrupted` 运行不能恢复。已完成运行只读取保存结果，消费者不会将该结果重新发布为答案事件，但成功处理后仍会发送 `task_completed`。恢复已保存的业务失败时也发送 `task_completed`；其他恢复失败只记录消费者错误日志，不发送 `task_completed` 或专用失败事件。
+
+部署前先执行 `go run ./cmd/migrate`，同步运行、步骤、执行实例、工具记录及多代理检查点所需的数据库结构。
+
+## 主动中断运行
+
+`POST /runs/{run_id}/interrupt` 请求停止整个根运行，包括计划步骤及多代理子任务。`run_id` 来自 `task_info` 事件；这不是任务队列的 `task_id`。
+
+无需请求体。例如：
+
+```sh
+curl -i -X POST 'http://localhost:8080/runs/RUN_ID/interrupt'
+```
+
+`task_info` 的 `delta` 解析后包含 `run_id`；事件在运行检查点保存后、执行开始前发送。任务尚在队列中时没有可用于中断的运行 ID，此接口不取消排队中的任务。
+
+- `202`，`{"status":"accepted"}`：持有运行锁的执行者已确认接收请求；此时执行可能尚未停止，中断状态也可能尚未保存，此响应不代表中断已完成。
+- `409`，`{"status":"already_requested"}`：执行者已接收过请求；`{"status":"terminal"}` 表示运行已结束。
+- `404`，`{"status":"not_found"}`：运行不存在。
+- `503`，`{"status":"unavailable"}`：当前无法确认将请求送达执行者；存储或信号通信出错也返回 `503`。
+
+通信或存储出错时，`503` 响应体使用 `{"error":"具体错误"}`；中断服务未配置时为 `{"error":"interrupt service unavailable"}`。`unavailable` 可能表示运行当前没有执行者或执行者未及时确认，不能据此判断运行已结束。
+
+运行持久化为 `interrupted` 后，不能通过原 `run_id` 恢复。后续需通过 `POST /tasks` 提交新 `input` 创建新运行，可同时传入原 `conv_id` 延续会话并参考已保存进度；新运行会获得新的 `run_id`。
+
+客户端收到原任务事件流中的 `task_interrupted` 后，可以确认执行已停止且中断状态已保存。SSE 连接断开、停止输出或未收到 `task_completed` 都不能作为中断完成的依据；`409` 的 `terminal` 也不能单独证明运行已持久化为 `interrupted`。当前没有运行状态查询接口，终态事件写入失败时客户端可能收不到通知。
+
+请求断开或 SSE 连接断开不会主动中断运行。执行中的工具可能已产生副作用，中断不能撤销这些副作用。
 
 ## 查询会话的全部代理运行
 

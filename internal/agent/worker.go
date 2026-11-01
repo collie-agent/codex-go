@@ -129,7 +129,7 @@ func (w *Worker[T]) Run(modelContext fileContext.Contexter) (result T, text stri
 				return result, "", nil, &toolCallError{err: fmt.Errorf("task %s: tool %s arguments (call_id=%q) must be a JSON object, not null; raw arguments: %s", request.RunID, call.Name, call.CallID, call.Arguments)}
 			}
 			toolParams = append(toolParams, &mcpSdk.CallToolParams{
-				Meta:      mcpSdk.Meta{toolCallIDMetaKey: call.CallID},
+				Meta:      mcpSdk.Meta{toolCallIDMetaKey: call.CallID, "raw_arguments": call.Arguments},
 				Name:      call.Name,
 				Arguments: args,
 			})

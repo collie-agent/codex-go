@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,16 +23,6 @@ import (
 
 const toolCallIDMetaKey = "call_id"
 
-var oneTurnResultTools = map[config.McpToolName]struct{}{
-	config.ListDirMCPToolName: struct{}{},
-	config.GlobMCPToolName:    struct{}{},
-}
-
-var reserveForeverResultTool = map[config.McpToolName]struct{}{
-	config.ReadFileMCPToolName: struct{}{},
-	config.GrepMCPToolName:     struct{}{},
-}
-
 // BaseReactProcess 复用 ReAct 执行机制；具体 Process 决定配置、上下文和结果契约。
 // MCP 会话归一次 Run 所有，结束时关闭；Process 不可并发运行或重复使用。
 type BaseReactProcess[T LLMSchema] struct {
@@ -40,6 +32,9 @@ type BaseReactProcess[T LLMSchema] struct {
 	mcpClientSess *mcpSdk.ClientSession
 	serverSess    *mcpSdk.ServerSession
 	checkpoint    func() error
+	executionMu   sync.Mutex
+	executionErr  error
+	checkpointErr error
 	skills        []Skill
 	output        provider.Outputer
 }
@@ -123,33 +118,49 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 	if r.serverSess != nil {
 		defer r.serverSess.Close()
 	}
+	// 未确认的调用可能已经产生副作用，恢复必须在任何模型请求之前停止。
+	for _, call := range durableState.ToolExecutions {
+		if call != nil && call.Status == "" {
+			return zero, nil, fmt.Errorf("unknown tool outcome: call_id=%q name=%q arguments=%s", call.ToolCallId, call.ToolName, call.Arguments)
+		}
+	}
+	if len(durableState.ExecutionResult) > 0 {
+		var saved T
+		if err := json.Unmarshal(durableState.ExecutionResult, &saved); err != nil {
+			return zero, nil, err
+		}
+		return saved, []AgentProcessorType{EndAgentType}, validate(saved)
+	}
+	if durableState.ExecutionID == "" && len(durableState.StepExecutions) == 0 {
+		var id [16]byte
+		if _, err := rand.Read(id[:]); err != nil {
+			return zero, nil, err
+		}
+		durableState.ExecutionID = hex.EncodeToString(id[:])
+		if r.checkpoint != nil {
+			if err := r.checkpoint(); err != nil {
+				return zero, nil, err
+			}
+		}
+	}
 	var cleanup func()
 	r.output, cleanup = provider.NewConfiguredOutputer(agentConfig.RedisConfig(), agentConfig.LogLevel)
 	defer cleanup()
+	for _, call := range durableState.ToolExecutions {
+		copy := *call
+		rc.AppendToolResult(&copy)
+	}
 	worker := NewWorker[T](r.ctx, agentConfig, r.mcpClientSess)
 	worker.output = r.output
 	formatErrors := 0
 	toolCallErrors := 0
-	resultTurns := make(map[*fileContext.ToolResult]int)
+	batchOffset := 0
+	for _, call := range durableState.ToolExecutions {
+		if call.Batch > batchOffset {
+			batchOffset = call.Batch
+		}
+	}
 	for i := 1; i <= r.maxTurn; i++ {
-		// 目录发现结果仅供下一轮决策使用；同批并发调用及轮内纠错不缩短保留期。
-		rc.UpdateToolResults(func(previous []*fileContext.ToolResult) []*fileContext.ToolResult {
-			next := make([]*fileContext.ToolResult, 0, len(previous))
-			for _, result := range previous {
-				if result == nil {
-					continue
-				}
-				if _, limited := oneTurnResultTools[config.McpToolName(result.ToolName)]; limited {
-					resultTurns[result]++
-					if resultTurns[result] > 1 {
-						delete(resultTurns, result)
-						continue
-					}
-				}
-				next = append(next, result)
-			}
-			return next
-		})
 		var result T
 		var toolParams []*mcpSdk.CallToolParams
 		// 格式纠错留在当前轮，避免最后一轮的可恢复错误直接耗尽执行预算。
@@ -185,10 +196,42 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 			worker.corrections = append(worker.corrections, outputFormatCorrection(formatErrors, err, parseErr))
 		}
 		if len(toolParams) == 0 {
-			if err := validate(result); err != nil {
-				return zero, nil, err
+			validationErr := validate(result)
+			terminal := validationErr == nil
+			if value, ok := any(result).(ReactResult); ok && value.Status == FailedReactStatus {
+				terminal = true
+			}
+			if terminal && durableState.ExecutionID != "" {
+				encoded, err := json.Marshal(result)
+				if err != nil {
+					return zero, nil, err
+				}
+				previousResult := durableState.ExecutionResult
+				durableState.ExecutionResult = encoded
+				if r.checkpoint != nil {
+					if err := r.checkpoint(); err != nil {
+						durableState.ExecutionResult = previousResult
+						return zero, nil, err
+					}
+				}
+			}
+			if validationErr != nil {
+				return result, nil, validationErr
 			}
 			return result, []AgentProcessorType{EndAgentType}, nil
+		}
+		if durableState.ExecutionID != "" {
+			for position, param := range toolParams {
+				args, err := json.Marshal(param.Arguments)
+				if err != nil {
+					return zero, nil, err
+				}
+				id, _ := param.Meta[toolCallIDMetaKey].(string)
+				if raw, ok := param.Meta["raw_arguments"].(string); ok {
+					args = []byte(raw)
+				}
+				durableState.ToolExecutions = append(durableState.ToolExecutions, &fileContext.ToolResult{ToolCallId: id, ToolName: param.Name, Arguments: string(args), Batch: batchOffset + i, Position: position})
+			}
 		}
 		// 模型请求期间数据库也可能失效，必须在放行副作用前重新写 checkpoint。
 		if r.checkpoint != nil {
@@ -201,7 +244,26 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 			if err != nil {
 				return zero, nil, err
 			}
+			if r.executionErr != nil {
+				return zero, nil, r.executionErr
+			}
 			if handled {
+				if durableState.ExecutionID != "" {
+					for _, param := range toolParams {
+						id, _ := param.Meta[toolCallIDMetaKey].(string)
+						for _, call := range durableState.ToolExecutions {
+							if call.ToolCallId == id && call.Status == "" {
+								call.Status = filemcp.ToolCallSuceessStatus
+								call.Result = "[]"
+							}
+						}
+					}
+					if r.checkpoint != nil {
+						if err := r.checkpoint(); err != nil {
+							return zero, nil, err
+						}
+					}
+				}
 				if len(next) > 0 {
 					return zero, next, nil
 				}
@@ -209,6 +271,14 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 			}
 		}
 		r.batchToolCallings(toolParams, rc, agentConfig)
+		if r.executionErr != nil {
+			return zero, nil, r.executionErr
+		}
+		if durableState.ExecutionID != "" {
+			rc.UpdateToolResults(func(_ []*fileContext.ToolResult) []*fileContext.ToolResult {
+				return slices.Clone(durableState.ToolExecutions)
+			})
+		}
 		if r.ctx.Err() != nil {
 			return zero, nil, r.ctx.Err()
 		}
@@ -284,6 +354,8 @@ func (r *BaseReactProcess[T]) batchToolCallings(toolParams []*mcpSdk.CallToolPar
 }
 
 func (r *BaseReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, toolParam *mcpSdk.CallToolParams, rc *fileContext.ReactContext, err error, agentConfig *config.AgentConfig) {
+	r.executionMu.Lock()
+	defer r.executionMu.Unlock()
 	if rc == nil || toolParam == nil {
 		return
 	}
@@ -291,26 +363,29 @@ func (r *BaseReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, t
 	callID, _ := toolParam.Meta[toolCallIDMetaKey].(string)
 	result := &fileContext.ToolResult{ToolCallId: callID, ToolName: toolParam.Name}
 	callDescription := fmt.Sprintf("tool %q (call_id=%q)", toolParam.Name, callID)
-	var errors []string
+	var executionErrors []string
 	if err != nil {
-		errors = append(errors, fmt.Sprintf("%s: MCP call failed: %v", callDescription, err))
+		executionErrors = append(executionErrors, fmt.Sprintf("%s: MCP call failed: %v", callDescription, err))
 	}
 	if toolParam.Arguments != nil {
 		arguments, marshalErr := json.Marshal(toolParam.Arguments)
 		if marshalErr != nil {
-			errors = append(errors, fmt.Sprintf("%s: failed to encode arguments as JSON (type %T): %v", callDescription, toolParam.Arguments, marshalErr))
+			executionErrors = append(executionErrors, fmt.Sprintf("%s: failed to encode arguments as JSON (type %T): %v", callDescription, toolParam.Arguments, marshalErr))
 		} else {
 			result.Arguments = string(arguments)
+			if raw, ok := toolParam.Meta["raw_arguments"].(string); ok {
+				result.Arguments = raw
+			}
 		}
 	}
 	if callResult == nil && err == nil {
-		errors = append(errors, fmt.Sprintf("%s: MCP returned no result and no error; execution outcome is unknown; verify side effects before retrying", callDescription))
+		executionErrors = append(executionErrors, fmt.Sprintf("%s: MCP returned no result and no error; execution outcome is unknown; verify side effects before retrying", callDescription))
 	}
 	if callResult != nil {
 		// 只保存 content，避免 structuredContent 的重复数据占用模型上下文。
 		encoded, marshalErr := json.Marshal(callResult.Content)
 		if marshalErr != nil {
-			errors = append(errors, fmt.Sprintf("%s: failed to encode MCP result as JSON; result cannot be added to context: %v", callDescription, marshalErr))
+			executionErrors = append(executionErrors, fmt.Sprintf("%s: failed to encode MCP result as JSON; result cannot be added to context: %v", callDescription, marshalErr))
 		} else {
 			result.Result = string(encoded)
 		}
@@ -333,22 +408,47 @@ func (r *BaseReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, t
 			if len(messages) == 0 {
 				messages = append(messages, "MCP returned isError=true without a non-empty text error message; inspect the result for details")
 			}
-			errors = append(errors, fmt.Sprintf("%s: tool execution failed (MCP isError=true): %s", callDescription, strings.Join(messages, "\n")))
+			executionErrors = append(executionErrors, fmt.Sprintf("%s: tool execution failed (MCP isError=true): %s", callDescription, strings.Join(messages, "\n")))
 		}
 	}
-	if len(errors) > 0 && result.Arguments != "" {
-		errors = append(errors, "Tool arguments: "+result.Arguments)
+	if len(executionErrors) > 0 && result.Arguments != "" {
+		executionErrors = append(executionErrors, "Tool arguments: "+result.Arguments)
 	}
-	result.Error = strings.Join(errors, "\n")
+	result.Error = strings.Join(executionErrors, "\n")
 	result.Status = filemcp.ToolCallSuceessStatus
-	if len(errors) > 0 {
+	if len(executionErrors) > 0 {
 		result.Status = filemcp.ToolCallFailedStatus
 	}
 
-	// 并发工具只追加结果，统一在下一轮决策前处理过期历史。
+	// 逐个提交已确认结果；写入失败保留数据库中的未知状态并停止后续模型调度。
+	if rc.DurableState != nil && rc.DurableState.ExecutionID != "" {
+		for i := len(rc.DurableState.ToolExecutions) - 1; i >= 0; i-- {
+			call := rc.DurableState.ToolExecutions[i]
+			if call.ToolCallId == callID && call.Status == "" {
+				result.Batch = call.Batch
+				result.Position = call.Position
+				rc.DurableState.ToolExecutions[i] = result
+				break
+			}
+		}
+		if callResult == nil {
+			result.Status = ""
+			r.executionErr = errors.Join(r.executionErr, fmt.Errorf("unknown tool outcome: call_id=%q name=%q arguments=%s", callID, toolParam.Name, result.Arguments))
+		}
+		// Unknown outcomes stop scheduling, but must not suppress confirmed sibling
+		// results. A persistence failure, however, must never be retried here.
+		if callResult != nil && r.checkpoint != nil && r.checkpointErr == nil {
+			r.checkpointErr = r.checkpoint()
+			r.executionErr = errors.Join(r.executionErr, r.checkpointErr)
+		}
+	}
+	if r.executionErr != nil {
+		return
+	}
+	// 并发完成时先追加，整批结束后按登记顺序重建模型历史。
 	rc.AppendToolResult(result)
 	// 工具实际执行完成后发布一次结果，不能在模型历史重放时重复发送。
-	if rc.DurableState != nil {
+	if rc.DurableState != nil && toolParam.Name != string(config.UpdateCompletionCriteriaMCPToolName) && toolParam.Name != string(config.SwitchToPlanExecuteMCPToolName) {
 		r.publishToolResult(rc.DurableState.RunId, result)
 	}
 

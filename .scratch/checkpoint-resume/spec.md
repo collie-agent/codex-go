@@ -1,109 +1,139 @@
 # Checkpoint / Resume
 
-Status: ready-for-agent
+Status: needs-info
 
-## 已确认约束
+设计问题已完成逐轮确认，待用户最终确认共同理解后进入实现。本规格取代历史版本；[历史规格与访谈](design-history.md) 仅供追溯。术语见根 GLOSSARY.md，架构决策见 ADR-0004。
 
-- 持久化包含 `conversation`、`agent_run` 和 `step_execution` 三张表。
-- `conversation` 包含 `conv_id`。
-- `agent_run` 包含 `run_id`、`conv_id`、`goal`、`status`、`result`、`error`。
-- `step_execution` 包含 `step_id`、`run_id`、`status`、`intent`、`completion_criteria`、`completion_evidence`、`observation`。
-- 每张表均包含 `create_at`、`update_at`。
-- 普通 ReAct 模式不产生 `step_execution` 记录。
+## 目标与范围
 
-## 当前代码事实
+普通 ReAct、plan-execute executor 和 multi-agent 共用 ReAct 工具记录及上下文恢复机制。恢复保留原 run_id、目标、工作目录、执行模式和已确定的完成标准，延续已确认进度。多代理同时恢复委派和调度状态，不能仅保存工具历史后重新调度整棵任务。
 
-- `internal/database/database.go` 提供 GORM / MySQL 连接；尚未定义业务表与迁移。
-- `internal/context/context.go` 的 `DurableState` 仅驻留内存，包含运行目标、步骤列表及当前步骤索引。
-- Plan 模式执行前设置步骤为 running，成功后设置 completed 并记录观察与完成证据；执行失败设置 failed。
-- Planner 保留 completed 步骤并选择 pending 步骤，目前拒绝 running、failed、interrupted 步骤。
-- 普通 ReAct 的模型与工具上下文仅驻留内存。
+用户主动 interrupt 结束整个根运行及其子任务，后续输入创建新运行，并把中断历史作为参考。主动中断不等于暂停。
 
-## 设计状态
+## 明确不在本次范围内
 
-用户已确认完整规格，包括保留 position 作为步骤的业务顺序。当前进入任务拆分，任务拆分方案确认后发布到本地 issue tracker。
+- 历史数据兼容、旧记录补齐或迁移旧执行历史；不增加旧运行专用拒绝或回退机制。
+- 恢复时配置变化的兼容性设计；继续使用现有配置加载入口。
+- 执行预算、ReAct 轮数、纠错次数的持久化与恢复策略。
+- 自动摘要、历史截断、未知工具结果自动核实或重试。
+- 人工标记工具成功、强制重试接口，以及单独中断 worker。
+- 数据库租约、续租，或覆盖外部工具执行的分布式事务。
 
-## 第一轮已确认决策
+## 身份与持久化内容
 
-- 首版支持进程崩溃后恢复及执行失败后手动重试；暂不提供主动暂停。
-- 恢复通过显式操作触发，服务启动不自动执行遗留任务。
-- 一个 conversation 包含多个 run；新任务创建新 run，resume 保留 run_id 和 goal。
-- conversation 首版仅表示归属，不默认共享历史消息。
-- 计划执行恢复时跳过 completed 步骤，未完成步骤从头执行。
-- 普通 ReAct 恢复原 run，从原 goal 重新开始，不要求还原模型每轮消息。
-- 外部操作与 checkpoint 之间存在结果不确定窗口；工具自行保证幂等，恢复流程不增加人工确认。
+### 运行和执行实例
 
-## 第二轮已确认决策
+- conversation 关联多个 agent_run。新任务创建新 run；resume 不创建新 run。
+- agent_run 保存 run_id、conv_id、原 goal、completion_criteria、mode、workspace、status、完整结构化 result、error 及失败类型。
+- 每个独立 ReAct 上下文具有稳定 execution_id；恢复延续原实例，新上下文创建新实例。
+- 执行实例关联根 run_id，保存自身任务、完成标准、所属步骤或委派、状态及完整结构化结果。多代理局部任务 ID 不能代替根 run_id。
+- 普通 ReAct 不产生 step_execution。计划步骤继续保留 step_id、revision、position、intent、完成标准、观察和证据，并关联执行实例。
+- 同一多代理节点在收到子报告后再次调用，是新的执行实例；worker 名称或委派 ID 不能单独标识实例。
+- 多代理持久化稳定的委派身份、父子关系、声明顺序、节点输入、等待批次、已确认报告、执行实例关联和调度位置。
 
-- run 状态采用 pending / running / completed / failed。允许显式恢复崩溃遗留的 running 及 failed；completed 的 resume 直接返回保存的 Result。
-- 恢复未完成步骤时重置为 pending；保留 completed 步骤及其证据。
-- 执行工具前保存 run 和完整计划，每步开始前保存 running，每步结束后保存结果，运行结束保存 Result 或 error。
-- checkpoint 写入失败时停止继续执行；同一 checkpoint 的运行状态与步骤变更通过事务提交。
-- CLI 和 agent-server 均提供按 run_id 恢复的入口，新任务返回 run_id 和 conv_id。
-- 新任务可指定已有 conv_id；未指定时创建新会话。
-- resume 使用原 goal，拒绝通过恢复请求修改目标。
-- 同一 run 在多个进程间也只允许一个执行者；通过数据库保证互斥，崩溃后可以重新取得执行权。
+### 工具记录
 
-## 第三轮已确认决策
+使用共享 tool_execution 表，不按 run 动态建物理表。记录至少包含根 run_id、execution_id、模型调用 ID、工具名称、原始参数、批次顺序、批内顺序、执行状态、结果与错误。调用 ID 用于对应请求和结果，显式序号用于排序，不以时间戳或完成顺序代替。
 
-- `agent_run` 补充 mode、运行级 completion_criteria、workspace。
-- `step_execution` 补充 position、revision；以 (run_id, step_id) 唯一标识步骤，不要求 StepId 全局唯一。
-- position 明确保留，不以 create_at 代替计划顺序；批量创建的步骤可能具有相同时间戳。
-- 恢复使用调用时提供的当前 YAML、模型和工具配置，不保存凭据或整份配置快照。
-- 恢复必须使用原 workspace，不能改变已确定的执行模式；已有计划和验收标准保持不变。
-- 两个命令的 agent 运行默认持久化，必须配置 CODEX_MYSQL_URL；数据库不可用则报错。纯 MCP 服务入口保持原行为。
-- 通过独立的显式迁移命令建表，不在 agent 运行时自动迁移。
-- 数据库列名统一 snake_case，时间字段明确使用 create_at、update_at；不额外引入软删除字段。
-- stdout 保留最终答案输出；run 创建成功、执行开始前向 stderr 输出 run_id 和 conv_id。
-- 用户明确拒绝数据库租约方案：不采用 lease_owner / lease_expires_at / lease_version 及租期、续租机制。跨进程互斥要求仍保留，由第四轮确认的连接锁实现。
+执行实例及多代理调度记录的物理表拆分由实现决定，必须满足上述关系、独立上下文及原子性要求。沿用 snake_case 列名和 create_at / update_at 时间字段；完整结果保留结构化 JSON，不只存答案文本。
 
-## 第四轮已确认决策
+每个运行只保存自身产生的内容，不把继承的会话历史重复复制进自身记录。
 
-- 使用按 run_id 命名的 MySQL GET_LOCK，由专用连接持有至运行结束；锁已占用时立即拒绝另一执行请求。
-- checkpoint 使用持锁连接写入；连接失效时停止执行。正常结束显式释放锁，崩溃后由数据库在连接断开时释放锁。
-- 每步完成时，将步骤结果和完整结构化执行结果放入同一事务保存。
-- agent_run.result 保存 JSON，保留 Answer、Observation、CompletionEvidence，而非只保存答案文本。
-- 计划步骤全部 completed、run 尚未 completed 时，恢复直接使用保存的执行结果完成 run，不再调用模型或工具。
+## 执行边界
 
-## 最终表结构
+1. 新任务先持久化 pending run，输出 run_id / conv_id，再执行模型或工具。
+2. 模型返回工具调用后，原子登记整批调用，再开始执行；任何登记失败都不得启动工具。
+3. 同批工具可并发执行，每个工具完成后分别保存结果。已保存结果不能因其他工具未结束而丢失。
+4. 下一轮模型请求使用已确认结果；工具记录持久化失败时停止继续调度。
+5. 执行实例结束时保存完整结果。计划步骤状态及证据与对应实例结果原子提交。
+6. 多代理节点输出与对应子委派安排原子提交后才启动子任务；调度重入不得重复创建已经登记的委派或父节点后续实例。
+7. 运行最终答案和终态持久化成功后才对调用方确认完成。
 
-以下为数据库列名；JSON 列保存结构化结果或列表。运行级与步骤级 completion_criteria 分别对应现有代码的字符串列表与单个字符串。
+控制工具产生的完成标准、模式切换及交接状态，需要与对应工具结果保持一致，避免已生效控制变更在恢复时重复执行。
 
-| 表 | 字段 | 约束及说明 |
-| --- | --- | --- |
-| conversation | conv_id, create_at, update_at | conv_id 为主键 |
-| agent_run | run_id, conv_id, goal, status, result, error, mode, completion_criteria, workspace, create_at, update_at | run_id 为主键；conv_id 引用 conversation；result 和 completion_criteria 为 JSON |
-| step_execution | step_id, run_id, status, intent, completion_criteria, completion_evidence, observation, position, revision, create_at, update_at | (run_id, step_id) 唯一；run_id 引用 agent_run；按 position 恢复顺序；completion_evidence 和 observation 为 JSON |
+## 恢复规则
 
-不额外创建消息历史表、租约表或租约字段；普通 ReAct 不写 step_execution。
+| 保存状态 | 恢复行为 |
+| --- | --- |
+| 模型请求期间，尚未保存调用或最终结果 | 重新请求模型 |
+| 工具调用及结果已保存 | 恢复所属实例的原生工具消息，继续决策 |
+| 工具调用已登记但缺少结果 | 视为执行结果未知，停止自动执行并返回错误 |
+| 实例结果已保存，调度尚未收尾 | 复用实例结果，继续持久化的调度，不重复调用模型或工具 |
+| 根最终结果已保存 | 直接返回保存结果；必要时完成根状态收尾 |
+| 根运行主动 interrupted | 拒绝 resume；后续输入创建新任务 |
 
-## 执行与恢复不变量
+没有工具结果不代表工具没有执行。即使工具可能尚未启动，首版也保守处理缺失结果，不自动重放。错误明确包含未知调用 ID、名称和参数；用户可新建任务核实。首版没有消除未知状态的人工接口。
 
-- 新任务先创建 conversation（未指定时）及 pending run，输出 ID，再开始执行。
-- 运行开始进入 running；成功进入 completed，失败进入 failed。崩溃可能保留 pending 或 running，显式恢复继续这些尚未完成的运行。
-- TaskAnalyzer 已产生的验收标准和已确定模式需要持久化；计划生成后完整保存，执行工具不能早于对应 checkpoint 成功。
-- 已有计划恢复时不重新规划；根据 position 重建步骤顺序，由第一个 pending 步骤继续，当前步骤索引无需单独保存。
-- running / failed / interrupted 步骤恢复为 pending；completed 步骤及其观察、证据保留。
-- 普通 ReAct 不恢复逐轮模型消息和工具结果，直接围绕原目标重新执行。
-- 完成步骤与对应完整执行结果原子保存；全步骤完成后的最终收尾不再次执行模型或工具。
-- run 已 completed 时直接返回持久化结果，不启动模型或工具。
-- 数据库连接故障或 checkpoint 失败后不能继续调度新工具；外部副作用重复执行的幂等由工具负责。
-- resume 不能修改原 goal、workspace、已确定的 mode、已有计划或验收标准；当前 YAML 和工具设置由恢复调用提供。
+### 计划执行
+
+- 保留原计划、顺序、完成标准及 completed 步骤。
+- 未完成步骤恢复自己的执行实例和工具历史，不从原目标重做。
+- 所有步骤结果已保存但根运行未收尾时，使用保存结果完成运行，不重新调用 planner 或 executor。
+- 普通 ReAct 升级为计划执行后，升级前历史作为交接背景，不作为每个步骤的原生工具消息重复注入。
+
+### 多代理
+
+- 恢复已保存的委派图和等待关系，复用已完成兄弟任务的结果，只续接未完成实例。
+- 子任务全部就绪后，父节点创建一个新的执行实例处理报告；若该实例已登记，则复用其身份。
+- 子节点业务失败作为报告交父节点处理；基础设施故障停止整棵运行，并保留已确认结果。
+- 原有子报告声明顺序及各实例上下文隔离保持不变。
+
+## 运行状态和主动中断
+
+运行状态为 pending / running / completed / failed / interrupted。崩溃可能保留 pending 或 running；服务启动不自动恢复。
+
+- completed 表示目标成功完成，resume 返回保存结果。
+- failed 区分终态业务失败和可恢复的执行故障。根业务失败保存 failed 及完整业务结果，resume 直接返回该结果；重新尝试需新任务。
+- 没有终态业务结果的执行故障允许 resume，但仍受未知工具结果规则限制。
+- CLI Ctrl-C 和服务端按根 run_id 的显式中断，停止新调度、取消正在执行的工具，尽力保存已有结果并把根运行置为 interrupted。
+- 中断覆盖全部计划步骤及多代理子任务。取消不保证撤销已经产生的副作用；无法确认的结果仍标记未知。
+- 请求断开、超时和服务退出不自动视为主动中断。
+- 中断后的收尾不能因执行 context 已取消而直接跳过可完成的持久化；运行锁已失效时仍不得绕过锁写入。
+
+## LLM 上下文
+
+新任务和 resume 使用相同的历史选择规则：按会话中此前运行的顺序加载，当前 run 不重复作为历史加入。
+
+| 此前运行状态 | 加载内容 |
+| --- | --- |
+| completed | result / error |
+| failed | error；未知工具结果错误包含调用 ID、名称、参数 |
+| interrupted | 原目标、完成标准，以及按步骤或委派关系组织的实例归属、子任务目标、标准、已保存结果和完整工具交互 |
+
+此前运行内容作为历史参考，明确旧目标已结束或中断，当前输入决定新目标。interrupted 的已确认工具交互从 execution.tool_interactions 转为配对的 function_call / function_call_output，按前序运行及实例内调用顺序拼接在 role:system 消息之后、当前实例工具消息之前；system 历史仅保留 tool_call_ids 关联归属，不重复工具输出。缺少工具结果时保留 tool_interactions 文本并标注未知，不伪造返回值。pending / running 的其他运行不作为已结束历史加载。
+
+resume 另加载当前运行的持久化状态；当前运行仅恢复当前执行实例的工具交互，不混入当前运行其他步骤或 worker 的原生工具消息。此前 interrupted 运行的原生工具消息只作为会话历史参考，不写入当前实例的工具执行记录。
+
+每个实例在正常运行和恢复时均保留完整工具历史，统一按模型调用顺序组装；移除现有自动移出部分工具结果的行为。首版不自动摘要或截断，超过模型上下文限制时明确报错。
+
+## 保留的运行保障
+
+- 沿用按根 run_id 命名的 MySQL GET_LOCK，由专用连接持有至执行结束；锁已占用时立即拒绝另一执行请求。
+- 执行检查点使用持锁连接；锁或连接失效后停止调度，不使用另一连接绕过互斥。
+- 正常结束释放锁，崩溃后连接断开释放锁；不同 run 可以独立执行。
+- 沿用显式迁移命令，不在 agent 启动时自动建表；纯 MCP 服务保持原行为。
+- resume 不修改原 goal、workspace、已确定 mode、计划及完成标准。
 
 ## 验收场景
 
-- 新任务关联已有会话或创建新会话；运行前输出可用于恢复的 ID。
-- 计划按顺序持久化，恢复跳过 completed 步骤，仅重新执行未完成步骤。
-- failed run 可手动重试；崩溃留下的 pending / running run 可显式恢复。
-- 普通 ReAct 始终不产生步骤记录，恢复后保留原 run_id 和 goal。
-- 最后一步完成后、run 最终完成前中断，恢复不调用模型或工具，返回已保存的完整结果。
-- completed run 重复恢复返回原结果。
-- 同一 run 跨进程竞争时仅一方获得执行权；持锁连接断开后可重新获得锁；不同 run 可独立执行。
-- 模拟 checkpoint 写入失败，确认不再调度后续工具；事务不能部分保存运行和步骤变更。
-- 恢复请求修改 goal / workspace / 已确定 mode 被拒绝；允许使用更新后的配置。
-- 迁移命令独立运行且可重复执行；缺少数据库配置、数据库不可用或未迁移时 agent 运行明确报错。
-- 验证原有 agent 流程及纯 MCP 服务入口未受回归影响。
+1. 三种模式恢复保留 run 和实例身份，不混合不同步骤或 worker 的工具历史。
+2. 模型返回前崩溃，恢复重新请求；整批登记失败时没有工具执行。
+3. 并发工具乱序结束，结果分别落库，恢复仍按模型顺序构建消息。
+4. 工具产生副作用但结果未保存时，恢复不调用该工具、不调用模型绕过未知状态，返回明确未知调用信息。
+5. 工具结果全部保存后崩溃，恢复继续下一轮，不重复已确认调用。
+6. 完成标准更新或模式切换后恢复，控制状态与结果一致，不重复应用。
+7. 计划中间步骤恢复其原实例；完成步骤、证据和最终结果保持不变。
+8. 多代理节点输出/委派登记、子结果提交、父节点后续实例创建各边界崩溃后，不重复委派、不重跑成功兄弟、不丢报告。
+9. 子业务失败交父节点；根业务失败保存 failed，重复 resume 只返回结果；基础设施故障保留可恢复进度。
+10. 根成功结果已保存但尚未收尾，恢复不调用模型或工具；completed 重复恢复结果一致。
+11. CLI 和服务端显式中断整棵运行，停止新调度并保存可确认结果；interrupted 不可 resume，新输入创建新 run。
+12. 新任务按状态加载会话历史，中断多代理历史可识别归属；当前实例原生消息不混入其他实例；历史不递归复制。
+13. 正常执行和恢复均保留完整工具记录；上下文超限报错，不静默截断。
+14. 锁竞争、锁连接断开、数据库写入失败时不继续调度；原子检查点不能部分生效。
+15. 迁移命令、CLI/服务执行入口和纯 MCP 路径完成相应回归验证。
 
-## 访谈约定
+## 实现任务划分
 
-先逐轮确认设计；在设计树收敛并由用户确认共同理解后开始实现。确定的术语及时进入根 GLOSSARY.md，满足条件的架构取舍进入 docs/adr/。
+在最终确认后新增任务单，覆盖：持久化模型与存储；共享 ReAct 执行边界与上下文；计划恢复；多代理调度恢复；主动中断及会话历史；故障窗口与端到端验收。
+
+既有 issues/01–04 属于旧版工作记录，不作为本次修订的实现契约。

@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -253,6 +255,19 @@ func (o *ProcessorOrchestrator) runProcessor(agentType AgentProcessorType, agent
 			step = state.CurrentStep()
 			if step == nil || step.Status != PendingExecutionStatus {
 				return processorResult{}, fmt.Errorf("plan executor: no pending step at index %d", state.CurrentStepIndex)
+			}
+			// Each step owns a stable ReAct instance; histories never cross steps.
+			if step.ExecutionID == "" {
+				var id [16]byte
+				if _, err := rand.Read(id[:]); err != nil {
+					return processorResult{}, err
+				}
+				step.ExecutionID = hex.EncodeToString(id[:])
+			}
+			if state.ExecutionID != step.ExecutionID {
+				state.ExecutionID = step.ExecutionID
+				state.ExecutionResult = nil
+				state.ToolExecutions = nil
 			}
 			step.Status = RunningExecutionStatus
 			state.Error = ""

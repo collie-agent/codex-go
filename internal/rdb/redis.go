@@ -16,7 +16,8 @@ const (
 )
 
 type RedisManager struct {
-	client redis.UniversalClient
+	client    redis.UniversalClient
+	runStatus func(context.Context, string) (string, error)
 }
 
 // NewRedisManagerWithClient 复用调用方配置的连接；连接生命周期由调用方管理。

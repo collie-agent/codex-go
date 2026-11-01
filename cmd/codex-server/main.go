@@ -11,10 +11,12 @@ import (
 	"syscall"
 	"time"
 
+	"errors"
 	"github.com/collie-agent/codex-go/internal/database"
 	"github.com/collie-agent/codex-go/internal/rdb"
 	"github.com/collie-agent/codex-go/internal/server"
 	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
 )
 
 func main() {
@@ -38,7 +40,20 @@ func main() {
 		log.Fatal(err)
 	}
 	defer database.Close(db)
-	srv := &http.Server{Addr: *addr, Handler: server.New(rdb.NewRedisManagerWithClient(client), database.NewSSEEventStore(db), *interval), ReadHeaderTimeout: 10 * time.Second}
+	backend := rdb.NewRedisManagerWithClient(client)
+	runs := database.NewRunStore(db)
+	backend.SetRunStatusLookup(func(ctx context.Context, runID string) (string, error) {
+		run, err := runs.Get(ctx, runID)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", nil
+		}
+		// A recoverable failed run may currently be held by a resumed executor.
+		if err == nil && run.Status == "failed" && run.FailureType != "business" {
+			return "running", nil
+		}
+		return run.Status, err
+	})
+	srv := &http.Server{Addr: *addr, Handler: server.New(backend, database.NewSSEEventStore(db), *interval), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shutdown, done := context.WithTimeout(context.Background(), 10*time.Second)

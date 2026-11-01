@@ -52,8 +52,8 @@ func TestReactCompletionCriteriaToolLifecycle(t *testing.T) {
 						criteriaResponse(w, "", map[string]any{"type": "function_call", "id": "fc_criteria", "call_id": "criteria", "name": "update_completion_criteria", "arguments": args})
 						return
 					}
-					if hasTool || strings.Contains(string(req.Input), "update_completion_criteria") || strings.Contains(string(req.Input), "GenerateCompletionCriteria") {
-						t.Error("successful update must remove tool, history and generation instructions")
+					if hasTool || strings.Contains(string(req.Input), "GenerateCompletionCriteria") {
+						t.Error("successful update must remove tool and generation instructions")
 					}
 					if !strings.Contains(string(req.Input), "Answer with verified evidence") || !reflect.DeepEqual(durable.CompletionCriteria, []string{"Answer with verified evidence"}) || saves == 0 {
 						t.Error("criteria not saved in context before next request")

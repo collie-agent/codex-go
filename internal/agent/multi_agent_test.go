@@ -656,3 +656,208 @@ func TestMultiAgentRecoversMisplacedEntryCriteria(t *testing.T) {
 		t.Fatalf("retried=%v criteria=%v", retried.Load(), durable.CompletionCriteria)
 	}
 }
+
+func TestMultiAgentResumesSavedEntryResult(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		http.Error(w, "unexpected", http.StatusBadRequest)
+	}))
+	defer server.Close()
+	durable := &state.DurableState{RunId: "root", Goal: "inspect", ExecutionID: "root", ExecutionResult: []byte(`{"entry_completion_criteria":["checked"],"result":{"status":"completed","answer":"saved"},"next":[]}`)}
+	o := NewMultiAgentProcessorOrchestrator(context.Background(), filemcp.Config{Workspace: t.TempDir()})
+	results, err := o.Run(multiConfig(t, server.URL), durable)
+	if err != nil || len(results) != 1 || results[0].Result.Answer != "saved" || calls.Load() != 0 {
+		t.Fatalf("results=%v error=%v calls=%d", results, err, calls.Load())
+	}
+}
+
+func TestMultiAgentResumeStopsAtUnknownEntryToolOutcome(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		http.Error(w, "unexpected", http.StatusBadRequest)
+	}))
+	defer server.Close()
+	durable := &state.DurableState{RunId: "root", Goal: "inspect", ExecutionID: "root", ToolExecutions: []*state.ToolResult{{ToolCallId: "write", ToolName: "apply_patch"}}}
+	o := NewMultiAgentProcessorOrchestrator(context.Background(), filemcp.Config{Workspace: t.TempDir()})
+	_, err := o.Run(multiConfig(t, server.URL), durable)
+	if err == nil || !strings.Contains(err.Error(), "unknown tool outcome") || calls.Load() != 0 {
+		t.Fatalf("error=%v calls=%d", err, calls.Load())
+	}
+}
+
+func TestMultiAgentResumeReusesConfirmedEntryToolHistory(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if !strings.Contains(string(body), "previously verified") {
+			t.Error("confirmed tool result missing from resumed context")
+		}
+		multiResponse(w, `{"result":{"status":"completed","answer":"done"},"next":[]}`)
+	}))
+	defer server.Close()
+	durable := &state.DurableState{RunId: "root", Goal: "inspect", CompletionCriteria: []string{"checked"}, ExecutionID: "root", ToolExecutions: []*state.ToolResult{{ToolCallId: "read", ToolName: "read_file", Arguments: `{"path":"file"}`, Status: "success", Result: `[{"type":"text","text":"previously verified"}]`}}}
+	o := NewMultiAgentProcessorOrchestrator(context.Background(), filemcp.Config{Workspace: t.TempDir()})
+	var saved *state.DurableState
+	o.SetCheckpoint(func(s *state.DurableState, _ string) error { saved = s.Clone(); return nil })
+	results, err := o.Run(multiConfig(t, server.URL), durable)
+	if err != nil || len(results) != 1 || results[0].Result.Answer != "done" || calls.Load() != 1 {
+		t.Fatalf("results=%v error=%v calls=%d", results, err, calls.Load())
+	}
+	if saved == nil || saved.RunId != "root" || saved.ExecutionID != "root" || len(saved.ExecutionResult) == 0 {
+		t.Fatalf("entry checkpoint=%+v", saved)
+	}
+}
+
+func TestMultiAgentResumeKeepsCompletedDelegation(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch calls.Add(1) {
+		case 1:
+			multiResponse(w, `{"result":{"status":"completed","answer":"delegate"},"next":[{"agent":"worker","task":"inspect","completion_criteria":["done"]}]}`)
+		case 2:
+			multiResponse(w, `{"result":{"status":"completed","answer":"worker report"},"next":[]}`)
+		case 3:
+			multiResponse(w, `{"result":{"status":"completed","answer":"final"},"next":[]}`)
+		default:
+			t.Error("completed task was repeated")
+			w.WriteHeader(500)
+		}
+	}))
+	defer server.Close()
+	cfg := multiConfig(t, server.URL)
+	initial := &state.DurableState{RunId: "run", Goal: "inspect", CompletionCriteria: []string{"done"}}
+	var saved *state.DurableState
+	o := NewMultiAgentProcessorOrchestrator(context.Background(), filemcp.Config{Workspace: t.TempDir()})
+	o.SetCheckpoint(func(s *state.DurableState, _ string) error {
+		if saved != nil && strings.Contains(string(saved.MultiAgentCheckpoint), "worker report") {
+			return errors.New("simulated crash")
+		}
+		saved = s.Clone()
+		return nil
+	})
+	_, err := o.Run(cfg, initial)
+	if err == nil || saved == nil {
+		t.Fatalf("expected crash, got %v", err)
+	}
+	o.SetCheckpoint(func(s *state.DurableState, _ string) error { saved = s.Clone(); return nil })
+	result, err := o.Run(cfg, saved)
+	if err != nil || len(result) != 1 || result[0].Result.Answer != "final" || calls.Load() != 3 {
+		t.Fatalf("result=%+v calls=%d err=%v", result, calls.Load(), err)
+	}
+}
+
+func TestMultiAgentRecoveryAtDelegationBoundaries(t *testing.T) {
+	for _, scenario := range []struct {
+		name, marker                     string
+		calls                            int32
+		wantEntry, wantWorker, wantFinal int32
+	}{
+		{"before delegation registration", `"Children":[{`, 1, 2, 1, 1},
+		{"after delegation registration", `/delegation-2/turn-0`, 1, 1, 1, 1},
+		{"parent continuation registration", `/delegation-1/turn-1`, 2, 1, 1, 1},
+		{"parent result commit", `"answer":"final"`, 3, 1, 1, 2},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			var total, entry, worker, final atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				var request struct{ Input string }
+				if err := decodeModelRequest(req.Body, &request); err != nil {
+					t.Error(err)
+					return
+				}
+				total.Add(1)
+				switch {
+				case strings.Contains(request.Input, `"worker":"worker"`) && strings.Contains(request.Input, `"caller":"supervisor"`):
+					worker.Add(1)
+					multiResponse(w, `{"result":{"status":"completed","answer":"worker report"},"next":[]}`)
+				case strings.Contains(request.Input, `"reports":[{`):
+					final.Add(1)
+					multiResponse(w, `{"result":{"status":"completed","answer":"final"},"next":[]}`)
+				default:
+					entry.Add(1)
+					multiResponse(w, `{"result":{"status":"completed","answer":"delegate"},"next":[{"agent":"worker","task":"inspect","completion_criteria":["done"]}]}`)
+				}
+			}))
+			defer server.Close()
+			cfg := multiConfig(t, server.URL)
+			o := NewMultiAgentProcessorOrchestrator(context.Background(), filemcp.Config{Workspace: t.TempDir()})
+			var saved *state.DurableState
+			var injected bool
+			o.SetCheckpoint(func(s *state.DurableState, _ string) error {
+				if total.Load() == scenario.calls && strings.Contains(string(s.MultiAgentCheckpoint), scenario.marker) && !injected {
+					injected = true
+					return errors.New("injected checkpoint failure")
+				}
+				saved = s.Clone()
+				return nil
+			})
+			_, err := o.Run(cfg, &state.DurableState{RunId: "run", Goal: "inspect", CompletionCriteria: []string{"done"}})
+			if err == nil || !injected || saved == nil {
+				t.Fatalf("failure not injected: %v", err)
+			}
+			o.SetCheckpoint(func(s *state.DurableState, _ string) error { saved = s.Clone(); return nil })
+			result, err := o.Run(cfg, saved)
+			if err != nil || len(result) != 1 || result[0].Result.Answer != "final" || entry.Load() != scenario.wantEntry || worker.Load() != scenario.wantWorker || final.Load() != scenario.wantFinal {
+				t.Fatalf("result=%+v entry=%d worker=%d final=%d err=%v", result, entry.Load(), worker.Load(), final.Load(), err)
+			}
+		})
+	}
+}
+
+func TestMultiAgentResumeStopsAtUnknownChildToolOutcome(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch calls.Add(1) {
+		case 1:
+			multiResponse(w, `{"result":{"status":"completed","answer":"delegate"},"next":[{"agent":"worker","task":"inspect","completion_criteria":["done"]}]}`)
+		case 2:
+			writeObservationResponse(w, []any{map[string]any{"type": "function_call", "id": "fc_read", "call_id": "child-read", "name": "read_file", "arguments": `{"path":"evidence.txt"}`}})
+		default:
+			t.Error("unexpected model call")
+			w.WriteHeader(500)
+		}
+	}))
+	defer server.Close()
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "evidence.txt"), []byte("evidence"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	o := NewMultiAgentProcessorOrchestrator(context.Background(), filemcp.Config{Workspace: workspace})
+	var saved *state.DurableState
+	pending := false
+	o.SetCheckpoint(func(s *state.DurableState, _ string) error {
+		if pending {
+			return errors.New("injected failure saving tool result")
+		}
+		saved = s.Clone()
+		if strings.Contains(string(s.MultiAgentCheckpoint), `"ToolCallId":"child-read"`) {
+			pending = true
+		}
+		return nil
+	})
+	path := filepath.Join(t.TempDir(), "multi.yaml")
+	data := "name: multi-agent\nlog_level: error\nmulti-agent:\n  entry: supervisor\n  max_rounds: 10\n  max_parallel: 2\nbase:\n  allow_tools: [read_file]\n  llm:\n    base_url: " + server.URL + "\n    api_key: test\n    model: test\nagents:\n  supervisor:\n    next_agents: [worker]\n  worker:\n    next_agents: [supervisor]\n"
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadAgentConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = o.Run(cfg, &state.DurableState{RunId: "run", Goal: "inspect", CompletionCriteria: []string{"done"}})
+	if err == nil || !pending {
+		t.Fatalf("pending tool was not captured: %v", err)
+	}
+	o.SetCheckpoint(func(s *state.DurableState, _ string) error { return nil })
+	_, err = o.Run(cfg, saved)
+	if err == nil || !strings.Contains(err.Error(), "child-read") || calls.Load() != 2 {
+		t.Fatalf("expected unknown child tool outcome, calls=%d err=%v", calls.Load(), err)
+	}
+}

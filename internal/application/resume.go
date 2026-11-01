@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	state "github.com/collie-agent/codex-go/internal/context"
 	"github.com/collie-agent/codex-go/internal/database"
 	filemcp "github.com/collie-agent/codex-go/internal/mcp"
+	"gorm.io/gorm"
 )
 
 // Resume continues an existing run. It accepts current YAML and MCP settings
@@ -79,8 +81,26 @@ func Resume(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 	if run.Status == "completed" {
 		return decodeSavedResults(run.Result)
 	}
-	if run.Status != "pending" && run.Status != "running" && run.Status != "failed" {
+	if opts.ConvID != "" && opts.ConvID != run.ConvID {
+		return nil, fmt.Errorf("resume cannot change the original conversation")
+	}
+	if run.Status == "failed" && run.FailureType == "business" {
+		results, err := decodeSavedResults(run.Result)
+		return results, errors.Join(errors.New(run.Error), err)
+	}
+	if run.Status != "pending" && run.Status != "running" && run.Status != "failed" && run.Status != "interrupted" {
 		return nil, fmt.Errorf("run %s has unsupported status %q", run.RunID, run.Status)
+	}
+	if opts.OnRunLocked != nil {
+		if opts.Interrupt == nil {
+			opts.Interrupt = NewInterrupt()
+		}
+		cleanup, err := opts.OnRunLocked(ctx, run.RunID, opts.Interrupt)
+		if err != nil {
+			return nil, err
+		}
+		defer cleanup()
+		defer opts.Interrupt.Finish()
 	}
 	if err := emitTaskInfo(ctx, opts, loaded, run); err != nil {
 		return nil, err
@@ -93,19 +113,42 @@ func Resume(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 	if mode == "plan-execute" {
 		for _, step := range steps {
 			durableSteps = append(durableSteps, state.StepExecution{
-				StepId: step.StepID, Revision: step.Revision, Status: state.ExecutionStatus(step.Status),
+				StepId: step.StepID, ExecutionID: step.ExecutionID, Revision: step.Revision, Status: state.ExecutionStatus(step.Status),
 				Position: step.Position,
 				Intent:   step.Intent, CompletionCriteria: step.CompletionCriteria,
 				CompletionEvidence: step.CompletionEvidence, Observation: step.Observation,
 			})
 		}
 	}
-	orchestrator := newOrchestrator(ctx, workspace, opts)
+	executionCtx, cancelExecution := executionContext(ctx, opts.Interrupt)
+	defer cancelExecution()
+	orchestrator := newOrchestrator(executionCtx, workspace, opts)
 	// 恢复始终沿用已保存的模式，尚未生成计划时直接进入 planner。
 	if err := orchestrator.SetMode(mode); err != nil {
 		return nil, err
 	}
 	durable := &state.DurableState{RunId: run.RunID, Goal: run.Goal, PlanningContext: run.PlanningContext, CompletionCriteria: run.CompletionCriteria, StepExecutions: durableSteps, CurrentStepIndex: -1}
+	if mode == "react" {
+		saved, err := lockedStore.Execution(ctx, run.RunID)
+		if err != nil {
+			return nil, fmt.Errorf("load execution instance: %w", err)
+		}
+		durable.ExecutionID = saved.ExecutionID
+		durable.ExecutionResult = saved.ExecutionResult
+		durable.ToolExecutions = saved.ToolExecutions
+	}
+	if mode == "multi-agent" {
+		durable.MultiAgentCheckpoint = append([]byte(nil), run.MultiAgentCheckpoint...)
+		saved, err := lockedStore.Execution(ctx, run.RunID)
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("load entry execution instance: %w", err)
+		}
+		if err == nil {
+			durable.ExecutionID = saved.ExecutionID
+			durable.ExecutionResult = saved.ExecutionResult
+			durable.ToolExecutions = saved.ToolExecutions
+		}
+	}
 	if mode == "plan-execute" {
 		allComplete := len(durable.StepExecutions) > 0
 		for i := range durable.StepExecutions {
@@ -117,6 +160,20 @@ func Resume(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 				step.Status = state.PendingExecutionStatus
 			default:
 				return nil, fmt.Errorf("run %s has step %q with unsupported status %q", run.RunID, step.StepId, step.Status)
+			}
+		}
+		// Restore the first unfinished step's instance before the planner selects it.
+		for _, step := range durable.StepExecutions {
+			if step.Status == state.PendingExecutionStatus && step.ExecutionID != "" {
+				saved, err := lockedStore.ExecutionByID(ctx, run.RunID, step.ExecutionID)
+				if err != nil {
+					return nil, fmt.Errorf("load step execution instance: %w", err)
+				}
+				durable.ExecutionID, durable.ExecutionResult, durable.ToolExecutions = saved.ExecutionID, saved.ExecutionResult, saved.ToolExecutions
+				break
+			}
+			if step.Status == state.PendingExecutionStatus {
+				break
 			}
 		}
 		if allComplete {
@@ -132,7 +189,7 @@ func Resume(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 		}
 	}
 	run.Status, run.Error = "running", ""
-	return executeRun(ctx, lockedStore, &run, durable, orchestrator, loaded)
+	return executeRun(ctx, executionCtx, lockedStore, &run, durable, orchestrator, loaded, opts.Interrupt)
 }
 
 func newOrchestrator(ctx context.Context, workspace string, opts Options) runOrchestrator {

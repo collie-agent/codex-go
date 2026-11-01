@@ -3,9 +3,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
 	"time"
 
@@ -42,6 +44,17 @@ func main() {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	interrupt := application.NewInterrupt()
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt)
+	defer signal.Stop(signals)
+	go func() {
+		select {
+		case <-signals:
+			interrupt.Interrupt()
+		case <-ctx.Done():
+		}
+	}()
 	// 启动时扫描一次；新建和恢复运行共用索引，不在每轮模型请求时读取磁盘。
 	skills, err := agent.LoadSkills()
 	if err != nil {
@@ -50,11 +63,19 @@ func main() {
 	}
 	var results []agent.ReactResult
 	if *runID != "" {
-		results, err = application.Resume(ctx, application.Options{ConfigPath: *configPath, RunID: *runID, Workspace: *workspace, Mode: *mode, MCPCommand: *mcpCommand, Timeout: *timeout, RuntimeDirs: runtimeDirs, Skills: skills, Stderr: os.Stderr})
+		results, err = application.Resume(ctx, application.Options{ConfigPath: *configPath, RunID: *runID, Workspace: *workspace, Mode: *mode, MCPCommand: *mcpCommand, Timeout: *timeout, RuntimeDirs: runtimeDirs, Skills: skills, Stderr: os.Stderr, Interrupt: interrupt})
 	} else {
-		results, err = application.Run(ctx, application.Options{ConfigPath: *configPath, Task: *task, Workspace: *workspace, ConvID: *convID, Mode: *mode, MCPCommand: *mcpCommand, Timeout: *timeout, RuntimeDirs: runtimeDirs, Skills: skills, Stderr: os.Stderr})
+		results, err = application.Run(ctx, application.Options{ConfigPath: *configPath, Task: *task, Workspace: *workspace, ConvID: *convID, Mode: *mode, MCPCommand: *mcpCommand, Timeout: *timeout, RuntimeDirs: runtimeDirs, Skills: skills, Stderr: os.Stderr, Interrupt: interrupt})
 	}
 	if err != nil {
+		if errors.Is(err, application.ErrInterrupted) {
+			var saveErr *application.InterruptPersistenceError
+			if errors.As(err, &saveErr) {
+				fmt.Fprintln(os.Stderr, "interrupted state could not be saved")
+			} else {
+				fmt.Fprintln(os.Stderr, "interrupted state saved")
+			}
+		}
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

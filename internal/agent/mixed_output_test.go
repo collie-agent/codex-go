@@ -77,7 +77,7 @@ func TestReactRejectsFinalResultWithToolCalls(t *testing.T) {
 				t.Fatalf("result=%+v err=%v requests=%d", got, err, calls)
 			}
 			contents, err := os.ReadFile(path)
-			if err != nil || string(contents) != "original\n" || checkpoints != 0 {
+			if err != nil || string(contents) != "original\n" || checkpoints != 2 {
 				t.Fatalf("rejected batch changed workspace or passed execution checkpoint: contents=%q err=%v checkpoints=%d", contents, err, checkpoints)
 			}
 		})
@@ -113,7 +113,7 @@ func TestReactMixedOutputSharesFormatRetryLimit(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "output format errors exceeded limit (3)") || !strings.Contains(err.Error(), "both a final result and tool calls") || calls != 4 {
 				t.Fatalf("expected shared format retry limit: requests=%d err=%v", calls, err)
 			}
-			if checkpoints != 0 || len(durable.CompletionCriteria) != 0 {
+			if checkpoints != 1 || len(durable.CompletionCriteria) != 0 {
 				t.Fatalf("rejected control tool executed: checkpoints=%d criteria=%v", checkpoints, durable.CompletionCriteria)
 			}
 		})

@@ -1,17 +1,18 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/collie-agent/codex-go/internal/database"
 	"gorm.io/gorm"
-	"fmt"
+	"io"
 	"log"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/collie-agent/codex-go/internal/entity"
@@ -22,6 +23,7 @@ import (
 type Backend interface {
 	RPush(context.Context, string, string) (int64, error)
 	ReadTaskStream(context.Context, string, string) ([]*entity.StreamEvent, error)
+	RequestInterrupt(context.Context, string) (string, error)
 }
 type Store interface {
 	WriteSSEEvent(context.Context, string, []*entity.StreamEvent) error
@@ -32,6 +34,26 @@ func New(backend Backend, store Store, interval time.Duration) http.Handler {
 		interval = time.Second
 	}
 	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		start := time.Now()
+		// SSE 请求可能长时间保持连接，因此先记录请求到达，再记录结束状态。
+		if c.Request.Method == http.MethodPost && c.Request.Body != nil {
+			body, err := io.ReadAll(c.Request.Body)
+			// 恢复请求体，供后续处理器读取；读取失败时保留已读取的数据。
+			if err == nil {
+				c.Request.Body = io.NopCloser(bytes.NewReader(body))
+			} else {
+				c.Request.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), c.Request.Body))
+			}
+			log.Printf("HTTP request started: method=%s path=%s body=%q read_error=%v", c.Request.Method, c.Request.URL.Path, body, err)
+		} else {
+			log.Printf("HTTP request started: method=%s path=%s", c.Request.Method, c.Request.URL.Path)
+		}
+		defer func() {
+			log.Printf("HTTP request finished: method=%s path=%s status=%d duration=%s", c.Request.Method, c.Request.URL.Path, c.Writer.Status(), time.Since(start))
+		}()
+		c.Next()
+	})
 	router.GET("/conversations/:conv_id/runs", func(c *gin.Context) {
 		reader, ok := store.(interface {
 			ConversationRuns(context.Context, string) ([]database.ConversationRun, error)
@@ -52,13 +74,31 @@ func New(backend Backend, store Store, interval time.Duration) http.Handler {
 		}
 		c.JSON(http.StatusOK, gin.H{"conv_id": c.Param("conv_id"), "runs": runs})
 	})
+	router.POST("/runs/:run_id/interrupt", func(c *gin.Context) {
+		result, err := backend.RequestInterrupt(c.Request.Context(), c.Param("run_id"))
+		if err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+			return
+		}
+		status := http.StatusAccepted
+		switch result {
+		case "not_found":
+			status = http.StatusNotFound
+		case "terminal", "already_requested":
+			status = http.StatusConflict
+		case "unavailable":
+			status = http.StatusServiceUnavailable
+		}
+		c.JSON(status, gin.H{"status": result})
+	})
 	router.POST("/tasks", func(c *gin.Context) {
 		var req struct {
 			Input  string `json:"input"`
-			ConvId string
+			RunId  string `json:"run_id"`
+			ConvId string `json:"conv_id"`
 		}
-		if c.ShouldBindJSON(&req) != nil || strings.TrimSpace(req.Input) == "" {
-			c.JSON(400, gin.H{"error": "input is required"})
+		if c.ShouldBindJSON(&req) != nil || !(entity.TaskMessage{Input: req.Input, RunId: req.RunId}).ValidInput() {
+			c.JSON(400, gin.H{"error": "provide either input or run_id"})
 			return
 		}
 		b := make([]byte, 16)
@@ -68,7 +108,7 @@ func New(backend Backend, store Store, interval time.Duration) http.Handler {
 		}
 		id := hex.EncodeToString(b)
 		// 可选会话 ID 随任务入队，由消费者传给 application.Run。
-		data, _ := json.Marshal(entity.TaskMessage{Input: req.Input, TaskId: id, ConvId: req.ConvId})
+		data, _ := json.Marshal(entity.TaskMessage{Input: req.Input, TaskId: id, ConvId: req.ConvId, RunId: req.RunId})
 		if _, err := backend.RPush(c.Request.Context(), rdb.TASK_QUEUE_NAME, string(data)); err != nil {
 			c.JSON(500, gin.H{"error": "cannot enqueue task"})
 			return
@@ -146,7 +186,12 @@ func stream(c *gin.Context, backend Backend, store Store, interval time.Duration
 				return
 			}
 			for _, event := range r.events {
-				data, _ := json.Marshal(event)
+				// HTTP 事件使用独立的 JSON 协议，不改变内部事件或队列格式。
+				data, _ := json.Marshal(struct {
+					ID    string `json:"id"`
+					Type  string `json:"type"`
+					Delta string `json:"delta"`
+				}{ID: event.ID, Type: event.Type, Delta: event.Delta})
 				if _, err := fmt.Fprintf(c.Writer, "id: %s\ndata: %s\n\n", event.ID, data); err != nil {
 					return
 				}

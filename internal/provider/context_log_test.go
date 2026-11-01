@@ -11,7 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestFormatLLMContextOmitsToolsAndPreservesInput(t *testing.T) {
+func TestFormatLLMContextListsToolsAndPreservesInput(t *testing.T) {
 	prompt := "# DurableState\n\n## Goal\n\n> 检查文件\n> C:\\notes.txt\n"
 	output := responses.ResponseInputItemParamOfFunctionCallOutput("first line\nsecond line\n\n")
 	output.OfFunctionCallOutput.CallID = openai.String("call_read")
@@ -62,13 +62,14 @@ func TestFormatLLMContextOmitsToolsAndPreservesInput(t *testing.T) {
 			if err := json.Unmarshal(requestJSON, &want); err != nil {
 				t.Fatal(err)
 			}
-			if _, exists := got["tools"]; exists {
-				t.Fatalf("tool definitions leaked into context log: %s", loggedJSON)
+			if !reflect.DeepEqual(got["tools"], []any{"read_file"}) {
+				t.Fatalf("unexpected tool list in context log: %s", loggedJSON)
 			}
 			if _, exists := want["tools"]; !exists {
 				t.Fatal("formatting removed tools from the API request")
 			}
 			delete(want, "tools")
+			delete(got, "tools")
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("log differs from API request:\nlog: %s\nrequest: %s", loggedJSON, requestJSON)
 			}

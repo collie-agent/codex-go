@@ -1,9 +1,19 @@
 package entity
 
+import "strings"
+
 type TaskMessage struct {
+	RunId  string
 	Input  string
 	TaskId string
 	ConvId string
+}
+
+// ValidInput keeps HTTP admission and queue consumption on the same task contract.
+// Whitespace-only values cannot select a mode or accompany the other mode.
+func (m TaskMessage) ValidInput() bool {
+	return (strings.TrimSpace(m.Input) != "" && m.RunId == "") ||
+		(strings.TrimSpace(m.RunId) != "" && m.Input == "")
 }
 
 type LLMResponse struct {

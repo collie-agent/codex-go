@@ -14,7 +14,7 @@ import (
 	filemcp "github.com/collie-agent/codex-go/internal/mcp"
 )
 
-func TestReactRetainsDiscoveryResultsForOneTurn(t *testing.T) {
+func TestReactRetainsCompleteToolHistory(t *testing.T) {
 	workspace := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workspace, "sample.txt"), []byte("sample"), 0600); err != nil {
 		t.Fatal(err)
@@ -48,14 +48,14 @@ func TestReactRetainsDiscoveryResultsForOneTurn(t *testing.T) {
 				}
 			}
 			want := 0
-			if turn == 2 {
+			if turn >= 2 {
 				want = 1
 			}
 			if calls != want || outputs != want {
 				t.Errorf("turn %d: %s call/result counts = %d/%d, want %d/%d", turn, id, calls, outputs, want, want)
 			}
 		}
-		// 目录发现结果过期后，文件读取历史仍须保留。
+		// 所有调用及结果在完整执行实例中持续保留。
 		for readTurn := 2; readTurn < turn; readTurn++ {
 			id := fmt.Sprintf("read_%d", readTurn)
 			calls, outputs := 0, 0
@@ -97,7 +97,18 @@ func TestReactRetainsDiscoveryResultsForOneTurn(t *testing.T) {
 		LLMConfig:  &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema},
 		AllowTools: map[config.McpToolName]struct{}{config.GlobMCPToolName: {}, config.ListDirMCPToolName: {}, config.ReadFileMCPToolName: {}},
 	}
-	result, _, err := process.Run(cfg, &fileContext.DurableState{CompletionCriteria: []string{"original task verified"}, RunId: "retention", Goal: "inspect workspace"})
+	durable := &fileContext.DurableState{CompletionCriteria: []string{"original task verified"}, RunId: "retention", Goal: "inspect workspace"}
+	registered := false
+	process.SetCheckpoint(func() error {
+		if len(durable.ToolExecutions) == 2 && durable.ToolExecutions[0].Status == "" && durable.ToolExecutions[1].Status == "" {
+			registered = true
+		}
+		return nil
+	})
+	result, _, err := process.Run(cfg, durable)
+	if !registered {
+		t.Error("batch not registered before execution")
+	}
 	if err != nil || result.Answer != "done" || turn != 5 {
 		t.Fatalf("Run = %+v, %v; requests = %d", result, err, turn)
 	}
