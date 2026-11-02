@@ -40,6 +40,31 @@ p=pathlib.Path('example.txt'); p.write_text('workspace data'); print(p.read_text
 	}
 }
 
+func TestCommandExecutorSharesHostTmpReadWrite(t *testing.T) {
+	executor, err := mcp.NewCommandExecutor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp("/tmp", "codex-exec-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	file := filepath.Join(dir, "shared")
+	if err := os.WriteFile(file, []byte("host"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := executor.Execute(context.Background(), t.TempDir(), "python3", []string{"-c", `import pathlib,sys
+p=pathlib.Path(sys.argv[1]); assert p.read_text() == 'host'; p.write_text('sandbox')`, file})
+	if err != nil || result.ExitCode != 0 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	data, err := os.ReadFile(file)
+	if err != nil || string(data) != "sandbox" {
+		t.Fatalf("data=%q err=%v", data, err)
+	}
+}
+
 func TestCommandExecutorTreatsCommandStderrAsOutput(t *testing.T) {
 	executor, err := mcp.NewCommandExecutor()
 	if err != nil {
@@ -74,7 +99,16 @@ func TestCommandExecutorIsolatesHostResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	workspace := t.TempDir()
-	secret := filepath.Join(t.TempDir(), "secret")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretDir, err := os.MkdirTemp(home, ".codex-exec-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(secretDir)
+	secret := filepath.Join(secretDir, "secret")
 	if err := os.WriteFile(secret, []byte("host secret"), 0600); err != nil {
 		t.Fatal(err)
 	}

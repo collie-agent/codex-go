@@ -313,7 +313,7 @@ stdout 只输出保存成功后的最终答案；stderr 输出运行 ID、错误
 
 迁移创建 `conversation`、`agent_run` 与 `step_execution`。主键分别为 `conv_id`、`run_id` 和 `(run_id, step_id)`；运行及步骤外键分别引用其归属记录。时间列严格使用 `create_at`、`update_at`，不包含软删除字段。
 
-新任务先保存 pending run，再通过 Outputer 向 stderr 输出 `run_id=<id> conv_id=<id>`，并在配置 Redis 时发送包含两个 ID 的 `task_info` Stream 事件，随后进入 running。恢复未完成的运行时也会输出原有 ID；事件格式及写入行为见 [Redis 输出](docs/redis-output.md)。成功保存 completed 和完整 JSON 结果（包含 Answer、Observation、CompletionEvidence）；失败保存 failed 和错误。运行目标、绝对工作目录、已确定模式和运行级验收标准也会保存。checkpoint 写入失败立即停止后续调度，不输出未保存的最终答案。
+新任务先保存 pending run，再通过 Outputer 向 stderr 输出 `run_id=<id> conv_id=<id>`，并在配置 Redis 时发送包含两个 ID 和当前模型名称 `model_name` 的 `task_info` Stream 事件，随后进入 running。恢复未完成的运行时也会输出原有 ID；事件格式及写入行为见 [Redis 输出](docs/redis-output.md)。成功保存 completed 和完整 JSON 结果（包含 Answer、Observation、CompletionEvidence）；失败保存 failed 和错误。运行目标、绝对工作目录、已确定模式和运行级验收标准也会保存。checkpoint 写入失败立即停止后续调度，不输出未保存的最终答案。
 
 普通 ReAct 为每个运行保存稳定的 `execution_id`，执行工具前在同一事务中登记整批调用，随后分别保存结果。恢复延续原执行实例，按模型调用顺序重放全部已确认工具交互，不重复执行已保存的调用，也不自动移出目录发现结果。已登记但结果缺失时，恢复停止并报告调用 ID、工具名称及原始参数：该工具可能已经产生副作用，不能自动重试。模型请求尚未登记调用时可重新请求。完整实例结果先于运行收尾保存；已有成功或终态业务失败结果直接复用，可恢复的执行故障则继续原实例。
 

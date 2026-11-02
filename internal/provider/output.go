@@ -42,8 +42,9 @@ type ToolResultOutput struct {
 }
 
 type TaskInfoOutput struct {
-	RunID  string `json:"run_id"`
-	ConvID string `json:"conv_id"`
+	ModelName string `json:"model_name"`
+	RunID     string `json:"run_id"`
+	ConvID    string `json:"conv_id"`
 }
 
 type OutputEvent struct {

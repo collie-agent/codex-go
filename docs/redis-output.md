@@ -36,7 +36,7 @@ delta: {"text":"hello"}
 
 | type | delta 示例 |
 | --- | --- |
-| `task_info` | `{"run_id":"8ab8b473adf7df4574a37fa158d4ff59","conv_id":"09db16c71e2c040d0dc32019f2b504b9"}` |
+| `task_info` | `{"run_id":"8ab8b473adf7df4574a37fa158d4ff59","conv_id":"09db16c71e2c040d0dc32019f2b504b9","model_name":"your-model"}` |
 | `task_completed` | `{}`（队列任务成功或业务失败终止后） |
 | `task_interrupted` | `{}`（仅队列任务主动中断且中断状态保存成功后） |
 | `text_delta` | `{"text":"hello"}` |
@@ -47,7 +47,7 @@ delta: {"text":"hello"}
 | `text` | `{"text":"提取并解码后的 answer"}` |
 | `usage` | `{"model":"your-model","response_id":"resp-1","status":"completed","input_tokens":"20","output_tokens":"5","cached_input_tokens":"4","uncached_input_tokens":"16"}` |
 
-`task_info` 在新运行的 pending 检查点保存后、开始执行前发送；恢复未完成的运行时也会发送原有 ID。直接重放已完成的运行不会发送该事件。队列任务通过 `TaskId` 对应的 Stream 接收事件；其中的 `run_id` 和 `conv_id` 是数据库中的运行和会话 ID。该事件写入失败会使启动或恢复返回错误。
+`task_info` 在新运行的 pending 检查点保存后、开始执行前发送；恢复未完成的运行时也会发送原有 ID。直接重放已完成的运行不会发送该事件。队列任务通过 `TaskId` 对应的 Stream 接收事件；其中的 `run_id` 和 `conv_id` 是数据库中的运行和会话 ID。`model_name` 为当前加载配置中的模型名称（`LLMConfig.Model`）；未配置运行级模型时为空字符串。该事件写入失败会使启动或恢复返回错误。
 
 工具失败时，`tool_error` 也保留能获取到的 `result`。`result` 是 MCP content 的 JSON 数组，`arguments` 是模型生成的 JSON 字符串。模型校验导致整批调用被拒绝时，每个调用收到一个 `tool_error`，说明该批未执行。结果只在执行完成时写入，不随后续模型历史重放重复写入。
 

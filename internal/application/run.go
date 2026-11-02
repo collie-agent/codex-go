@@ -240,7 +240,12 @@ func emitTaskInfo(ctx context.Context, opts Options, loaded *config.AgentConfig,
 		output, cleanup = provider.NewTaskOutputer(loaded.RedisConfig(), loaded.LogLevel, opts.Stderr)
 		defer cleanup()
 	}
-	data, err := json.Marshal(provider.TaskInfoOutput{RunID: run.RunID, ConvID: run.ConvID})
+	modelName := ""
+	// Multi-agent configurations may not define a single shared model.
+	if loaded.LLMConfig != nil {
+		modelName = loaded.LLMConfig.Model
+	}
+	data, err := json.Marshal(provider.TaskInfoOutput{RunID: run.RunID, ConvID: run.ConvID, ModelName: modelName})
 	if err != nil {
 		return err
 	}

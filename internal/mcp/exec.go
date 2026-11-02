@@ -129,9 +129,8 @@ func (e *CommandExecutor) Execute(ctx context.Context, workspace, name string, a
 			sandboxArgs = append(sandboxArgs, "--ro-bind", dir, dir)
 		}
 	}
-	sandboxArgs = append(sandboxArgs, "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/run", "--dir", "/run/home", "--dir", "/run/cache", "--dir", "/etc")
-	// Mount runtime directories after isolated /tmp and /run are created;
-	// otherwise a tmpfs would hide an explicitly authorized runtime there.
+	sandboxArgs = append(sandboxArgs, "--proc", "/proc", "--dev", "/dev", "--bind", "/tmp", "/tmp", "--tmpfs", "/run", "--dir", "/run/home", "--dir", "/run/cache", "--dir", "/etc")
+	// Mount runtime directories last so they remain read-only even under /tmp.
 	// Each host supplied directory remains read-only at its canonical path.
 	for _, dir := range e.runtime {
 		sandboxArgs = append(sandboxArgs, "--ro-bind", dir, dir)

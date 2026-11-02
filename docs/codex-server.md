@@ -123,11 +123,11 @@ data: {"id":"1793261930926-0","type":"task_completed","delta":"{}"}
 
 ## 获取运行和会话 ID
 
-新运行的 pending 检查点保存后、执行开始前会发送 `task_info`。解析 `delta` 后可取得运行和会话 ID：
+新运行的 pending 检查点保存后、执行开始前会发送 `task_info`。解析 `delta` 后可取得运行和会话 ID，以及当前使用的模型名称 `model_name`：
 
 ```text
 id: 1793261930924-0
-data: {"id":"1793261930924-0","type":"task_info","delta":"{\"run_id\":\"8ab8b473adf7df4574a37fa158d4ff59\",\"conv_id\":\"09db16c71e2c040d0dc32019f2b504b9\"}"}
+data: {"id":"1793261930924-0","type":"task_info","delta":"{\"run_id\":\"8ab8b473adf7df4574a37fa158d4ff59\",\"conv_id\":\"09db16c71e2c040d0dc32019f2b504b9\",\"model_name\":\"your-model\"}"}
 
 ```
 
@@ -137,6 +137,8 @@ data: {"id":"1793261930924-0","type":"task_info","delta":"{\"run_id\":\"8ab8b473
 | `run_id` | 持久化运行的标识，用于恢复或中断；恢复时保持不变。 |
 | `conv_id` | 会话标识，用于在新任务的 `conv_id` 中引用此前历史。 |
 | SSE `id` / `id` | Redis Stream 事件标识，仅用于事件续传和去重。 |
+
+`model_name` 取自当前加载配置的 `LLMConfig.Model`；未配置运行级模型时为空字符串。
 
 恢复未完成运行时也会发送原有的 `run_id` 和 `conv_id`；直接读取已完成运行的保存结果时不发送 `task_info`。
 

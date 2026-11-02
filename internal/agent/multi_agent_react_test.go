@@ -124,7 +124,9 @@ func TestMultiAgentReactExecutesToolsThroughMCPCommand(t *testing.T) {
 	cfg.LLMConfig.OutputSchema = config.JsonLLMOutputSchema
 	cfg.AllowTools[config.ReadFileMCPToolName] = struct{}{}
 	result, _, err := process.Run(cfg, &state.DurableState{RunId: "worker-tools", Goal: "read evidence.txt"})
-	if err != nil || result.Result.Answer != "source verified" || checkpoints != 1 {
+	// Persist the execution identity, pending tool call, confirmed tool result,
+	// and final execution result so each recovery boundary is durable.
+	if err != nil || result.Result.Answer != "source verified" || checkpoints != 4 {
 		t.Fatalf("Run() = %+v, %v; checkpoints=%d", result, err, checkpoints)
 	}
 }
