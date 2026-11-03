@@ -1,17 +1,68 @@
 # codex-go
 
+[效果](https://theviper.world/posts/codex-go/)
+
 Go 实现的coding agent，通过 OpenAI Responses API 进行模型决策，通过 MCP 读取、搜索和修改工作目录中的文件，并执行受隔离的项目命令。默认从 ReAct 开始，支持显式规划执行以及运行中升级为计划执行。
 
-## 项目特性
+## 已实现的功能与原理
 
-- **ReAct 循环**：模型在每轮选择调用工具或返回结果，执行器回填工具结果，直到任务完成、失败或达到轮数上限。
-- **计划执行**：planner 生成有序步骤，ReAct 逐步执行，并记录步骤状态、观察结果和完成证据。
-- **多代理协作**：根据 YAML 配置图调度 supervisor 与 ReAct worker，每次委派独立上下文，业务失败回交 supervisor 决策。
-- **异步观察**：对 `apply_patch` 和 `exec` 的结果提取新增事实与错误，供后续决策使用。
-- **内置 MCP 工具**：提供文件读取、目录浏览、文件匹配、内容搜索、补丁写入和命令执行，可独立作为 stdio 服务使用。
-- **按代理类型配置**：共享基础代理配置，可为 ReAct、观察器和 planner 设置独立模型与提示词；工具权限仅授予 ReAct。
-- **结构化输出**：支持 JSON 和 Line Protocol，结合输出解析、业务校验和工具参数 schema 校验控制执行流程。
-- **工作目录边界**：文件工具限制路径范围；`exec` 使用 Linux bwrap 与 seccomp 隔离整个命令进程树。
+### Agent Loop / Orchestrator（核心调度器）
+
+核心采用“模型决策 → 执行工具 → 回填结果 → 再次决策”的 ReAct 循环。模型只提出动作，执行器负责校验、执行和状态推进；无工具调用时解析结构化结果，以 `completed` 或 `failed` 收尾。每个 ReAct 执行实例最多运行 100 轮。
+
+`ProcessorOrchestrator` 按处理器返回的后继类型调度，支持直接 ReAct、planner 生成有序计划后由 ReAct 逐步执行，以及运行中通过 `switch_to_plan_execute` 升级为计划执行。同批分支可并发执行，结束后按调度顺序合并；计划步骤顺序推进，保存观察和完成证据。多代理编排按 YAML 配置图委派 supervisor/worker，限制委派目标、总调用轮数和并发数，收集子任务报告后交回调用者决策。各委派隔离模型历史，但共享工作目录。
+
+实现入口：[`internal/agent/orchestrator.go`](internal/agent/orchestrator.go)、[`react.go`](internal/agent/react.go)、[`planner.go`](internal/agent/planner.go)、[`multi_agent.go`](internal/agent/multi_agent.go)。
+
+### Model Runtime / LLM Adapter（模型层）
+
+模型层通过 OpenAI Go SDK 对接 Responses API 及兼容接口，将与 provider 无关的 `ModelRequest` 转换为模型请求，并将 MCP 工具定义转换为原生函数工具。工具调用与返回按调用 ID 配对，供后续请求重放。流式与非流式请求共享输出处理逻辑；流式正文可实时输出，工具调用在响应完成后统一处理。
+
+模型输出支持 JSON 和 Line Protocol，分别进行协议解析及业务校验。ReAct 和观察器的格式解析错误可累计纠正 3 次，第 4 次终止；模型请求错误和业务校验失败直接返回。基础代理配置和代理独立配置决定模型、接口地址、提示词及输出格式，目前没有多厂商专用适配层。
+
+实现入口：[`internal/provider/responses.go`](internal/provider/responses.go)、[`parser.go`](internal/provider/parser.go)、[`internal/config/agent.go`](internal/config/agent.go)。
+
+### Context & State（上下文与状态）
+
+`ReactContext` 组装系统提示词、会话历史、目标、完成标准、观察、原生工具消息与持久状态；`ModelRequest` 提供请求快照。`DurableState` 表达运行身份、计划步骤和当前进度；计划步骤使用 `pending → running → completed/failed` 状态流转。不同步骤和独立委派拥有各自的执行实例，恢复时延续原实例。
+
+观察区分已确认事实 `ConfirmedFacts`、已报告错误 `ReportedErrors` 和待验证推断 `ModelInferences`。`apply_patch` 与 `exec` 的结果异步交给观察器分析，不阻塞下一轮；原始工具结果仍直接返回模型。运行级完成标准可通过一次性的 `update_completion_criteria` 设置，计划步骤另有自己的验收标准。
+
+实现入口：[`internal/context/context.go`](internal/context/context.go)、[`observation.go`](internal/context/observation.go)、[`internal/agent/observe.go`](internal/agent/observe.go)。
+
+### Tool Runtime（工具执行层）
+
+ReAct 通过 MCP stdio 连接独立工具进程，从服务获取工具定义，并根据 `allow_tools` 筛选模型可用能力。执行前再次检查权限和输入 schema，同轮独立调用并发执行；参数或工具错误作为工具结果回填，让模型根据实际错误调整操作。
+
+内置 `read_file`、`list_dir`、`glob`、`grep`、`apply_patch` 和 `exec`，分别负责读取、浏览、匹配、搜索、补丁修改及命令执行。另有技能加载工具 `load_skill`，以及由执行流程开放的完成标准和模式切换控制工具。启动时扫描 `~/.agents/skills` 的技能名称与描述，正文按需加载到工具历史中。文件工具的路径边界与命令沙箱分别实施。
+
+实现入口：[`internal/agent/base_react.go`](internal/agent/base_react.go)、[`tool_validation.go`](internal/agent/tool_validation.go)、[`skills.go`](internal/agent/skills.go)、[`internal/mcp/`](internal/mcp/)。
+
+### Memory（记忆系统）
+
+当前记忆由执行实例内的工具交互、结构化观察、计划步骤记录和同一会话的历史运行组成。新建或恢复运行时，应用层按运行顺序加载此前记录：已完成运行提供目标与结果，失败或主动中断的运行还提供执行进度、工具交互及错误。历史仅作为当前任务的参考，不恢复旧任务的调度状态，也不代表当前任务已经完成。
+
+工具历史保留调用参数、结果及错误；普通执行过程中，后续工具结果写入时会清理旧的 `list_dir`、`glob` 发现结果。检查点恢复则重放已确认交互，保留恢复依据。当前没有独立的向量数据库、语义检索或自动提炼跨会话长期记忆；技能文件提供显式知识和流程复用。
+
+实现入口：[`internal/application/history.go`](internal/application/history.go)、[`run.go`](internal/application/run.go)、[`internal/context/history.go`](internal/context/history.go)。
+
+### Execution Environment / Sandbox（执行环境）
+
+文件工具以 Workspace 为路径边界，校验相对路径和符号链接，拒绝越界访问。`exec` 在 Linux 上使用 bwrap 与 seccomp 隔离整个命令进程树：工作目录可读写，必要运行时目录只读挂载，临时目录独立，默认禁网，不继承宿主 HOME 或凭据环境。入口命令受白名单约束，允许的构建工具仍可启动项目脚本及子进程。
+
+seccomp 进一步限制命名 Unix socket、io_uring 和非本机 ABI；隔离不可用时拒绝执行，不回退宿主。命令退出、超时或取消时清理整个沙箱。当前限制执行时间和输出量，`exec` 最长 30 秒、两路输出合计最多 1 MiB；没有 CPU、内存、进程数或磁盘配额，也不会自动撤销工作目录中的文件修改。
+
+实现入口：[`internal/mcp/exec_runtime.go`](internal/mcp/exec_runtime.go)、[`exec_seccomp_linux.go`](internal/mcp/exec_seccomp_linux.go)、[命令隔离 ADR](docs/adr/0002-command-sandbox-boundary.md)。
+
+### Persistence & Recovery（持久化与恢复）
+
+MySQL 保存会话、代理运行、计划步骤、执行实例及工具执行记录，迁移由 `codex-migrate` 显式执行。工具执行前先事务登记整批调用，再逐项保存结果；运行检查点保存目标、模式、完成标准、计划和委派进度。保存失败或运行锁失效会停止后续调度，最终答案在保存成功后才输出。
+
+通过 `--run-id` 显式恢复原运行，重放已确认的工具历史、跳过已完成步骤、恢复委派进度；已完成运行直接返回保存结果。若调用已登记但结果缺失，则标记为工具执行结果未知并停止自动恢复，避免重复副作用。这是检查点与确认记录机制，不保证外部工具副作用恰好执行一次。
+
+同一运行通过 MySQL 专用连接锁保证单进程执行，并检查连接与锁归属。进程崩溃后可显式接管；用户主动中断会保存终态，后续输入创建新运行并参考旧历史。凭据和完整 YAML 配置不写入运行记录，恢复使用当前模型与工具配置。
+
+实现入口：[`internal/application/resume.go`](internal/application/resume.go)、[`internal/database/runs.go`](internal/database/runs.go)、[`executions.go`](internal/database/executions.go)、[恢复边界 ADR](docs/adr/0003-resume-at-execution-boundaries.md)。
 
 ## 快速开始
 
@@ -166,7 +217,7 @@ flowchart TD
 
 普通 single-agent ReAct 在缺少运行级标准时，自动获得一次性的 `update_completion_criteria` MCP 工具，无需在 `allow_tools` 中配置。模型可以先调用工具收集必要上下文，再结合原始 `Goal` 生成可验证的标准，单独调用该工具，例如 `{"completion_criteria":["根据实际源码说明入口与调用关系"]}`；工具调用无需附带文本元数据。执行器验证非空列表及非空白条目，将标准写入 context 并保存 checkpoint。参数无效时保留工具及错误结果，供下一轮重试；保存失败则停止运行，不发布新标准。
 
-更新成功后，后续模型请求移除该工具及生成提示词，保留完整调用历史和 context 中的 `CompletionCriteria`。已有标准的运行、恢复运行和计划步骤不提供此工具；升级到计划执行沿用运行级标准，步骤标准仍由 planner 生成。运行级标准只能通过该工具生成并更新；最终结果及工具调用附带的响应文本均不能写入标准。执行器允许在提交标准前调用其他工具收集上下文，但未成功提交标准时拒绝返回最终结果。
+更新成功后，后续模型请求移除该工具及生成提示词，保留完整调用历史和 context 中的 `CompletionCriteria`。已有标准的运行、恢复运行和计划步骤不提供此工具；升级到计划执行沿用运行级标准，步骤标准仍由 planner 生成。运行级标准只能通过该工具生成并更新；最终结果及工具调用附带的响应文本均不能写入标准。运行级标准是可选的，未设置时也可直接返回最终结果。
 
 1. 从目标、完成标准、已确认事实、已报告错误和已有工具结果组装上下文；计划执行时增加整体计划、当前步骤与步骤验收标准。
 2. 从 MCP 获取工具定义，仅把 `allow_tools` 允许的工具传给模型，通过 Responses API 请求下一次决策。
@@ -319,7 +370,7 @@ stdout 只输出保存成功后的最终答案；stderr 输出运行 ID、错误
 
 已有数据库须先运行 `codex-migrate`，建立 `execution_instance` 和 `tool_execution` 表。普通运行不会自动迁移；本次不提供旧运行数据兼容。所有执行检查点沿用持有运行锁的数据库连接，写入失败或锁连接失效立即停止调度。
 
-`codex-cli` 可以用 `--conv-id <已有 conv_id>` 关联会话。会话仅表示归属，不共享消息历史。普通 ReAct 不创建执行步骤记录。使用 `--run-id` 可显式恢复 pending、running 或 failed 运行；进程启动不会自动恢复遗留运行。运行锁由 MySQL 专用连接持有，崩溃后连接断开即可重新接管。
+`codex-cli` 可以用 `--conv-id <已有 conv_id>` 关联会话。同一会话按运行顺序继承此前已完成、失败或中断运行的历史参考，不直接共享旧运行的调度状态。普通 ReAct 不创建执行步骤记录。使用 `--run-id` 可显式恢复 pending、running 或 failed 运行；进程启动不会自动恢复遗留运行。运行锁由 MySQL 专用连接持有，崩溃后连接断开即可重新接管。
 
 计划模式会在首个执行步骤前保存完整有序计划；步骤按 `position` 恢复，而非按时间戳或 `step_id` 排序。每步进入模型前保存 `running`，完成或失败时将步骤状态、运行检查点和结构化结果在同一事务中提交。检查点写入失败会中止调度；恢复时跳过 completed 步骤，续接未完成步骤的独立执行实例及已确认工具历史。已有数据库需要运行迁移以增加步骤执行实例关联。
 
