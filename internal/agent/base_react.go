@@ -459,12 +459,38 @@ func (r *BaseReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, t
 	if agentConfig == nil || agentConfig.LogLevel.InfoEnabled() {
 		log.Printf("[react] tool calling result: %+v", result)
 	}
-	if config.McpToolName(toolParam.Name) == config.ApplyPatchMCPToolName || config.McpToolName(toolParam.Name) == config.ExecMCPToolName {
+	if shouldObserveTool(toolParam) {
 		// exec 的参数和原始结果随快照交给观察器，由 LLM 筛选影响后续决策的新增信息。
 		// Observation is a separate processor and must use its own resolved
 		// settings rather than inheriting ReAct's model or custom prompt.
 		observerConfig := agentConfig.ForAgent("observe")
 		r.observe(result, rc, observerConfig)
+	}
+}
+
+// shouldObserveTool 按入口命令筛选，避免搜索参数中出现 npm 等词时误触发观察器。
+func shouldObserveTool(params *mcpSdk.CallToolParams) bool {
+	if config.McpToolName(params.Name) == config.ApplyPatchMCPToolName {
+		return true
+	}
+	if config.McpToolName(params.Name) != config.ExecMCPToolName {
+		return false
+	}
+	arguments, err := json.Marshal(params.Arguments)
+	if err != nil {
+		return false
+	}
+	var input struct {
+		Command string `json:"command"`
+	}
+	if json.Unmarshal(arguments, &input) != nil {
+		return false
+	}
+	switch input.Command {
+	case "git", "npm", "poetry", "python", "python3", "ts-node", "tsx":
+		return true
+	default:
+		return false
 	}
 }
 

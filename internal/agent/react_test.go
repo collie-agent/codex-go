@@ -85,6 +85,12 @@ func TestReactObserveAsync(t *testing.T) {
 }
 
 func TestReactExecObservation(t *testing.T) {
+	for _, command := range []string{"git", "npm", "poetry", "python", "python3", "ts-node", "tsx"} {
+		t.Run(command, func(t *testing.T) { testReactExecObservation(t, command) })
+	}
+}
+
+func testReactExecObservation(t *testing.T, command string) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -96,7 +102,7 @@ func TestReactExecObservation(t *testing.T) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		for _, want := range []string{"verify tests", "exec", "call_exec", `{"args":["test"],"command":"npm"}`, "FAIL: TestExample", "exit_code", "影响后续决策"} {
+		for _, want := range []string{"verify tests", "exec", "call_exec", `"command":"` + command + `"`, "FAIL: TestExample", "exit_code", "影响后续决策"} {
 			if !strings.Contains(request.Input, want) {
 				t.Errorf("exec observation input missing %q: %s", want, request.Input)
 			}
@@ -107,11 +113,30 @@ func TestReactExecObservation(t *testing.T) {
 	r := &ReactProcess[ReactResult]{BaseReactProcess: BaseReactProcess[ReactResult]{ctx: ctx}}
 	rc := fileContext.NewReactContext(&fileContext.DurableState{RunId: "exec-task", Goal: "verify tests"})
 	r.updateContext(&mcpSdk.CallToolResult{Content: []mcpSdk.Content{&mcpSdk.TextContent{Text: `{"stdout":"FAIL: TestExample","exit_code":1}`}}},
-		&mcpSdk.CallToolParams{Name: "exec", Meta: mcpSdk.Meta{toolCallIDMetaKey: "call_exec"}, Arguments: map[string]any{"command": "npm", "args": []string{"test"}}},
+		&mcpSdk.CallToolParams{Name: "exec", Meta: mcpSdk.Meta{toolCallIDMetaKey: "call_exec"}, Arguments: map[string]any{"command": command, "args": []string{"test"}}},
 		rc, nil, &config.AgentConfig{LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema}})
 	waitForReactObservation(t, ctx, rc, "exec call_exec: tests exited with code 1")
 	if !strings.Contains(rc.Format(), "exec call_exec: TestExample failed") {
 		t.Fatal("exec observation facts were not merged into ReAct context")
+	}
+}
+
+func TestReactSkipsObservationForSearchCommand(t *testing.T) {
+	requested := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		requested <- struct{}{}
+		writeObservationResponse(w, []any{observationMessage(`{"ConfirmedFacts":[],"ReportedErrors":[]}`)})
+	}))
+	defer server.Close()
+	r := &ReactProcess[ReactResult]{BaseReactProcess: BaseReactProcess[ReactResult]{ctx: t.Context()}}
+	rc := fileContext.NewReactContext(&fileContext.DurableState{RunId: "search"})
+	r.updateContext(&mcpSdk.CallToolResult{Content: []mcpSdk.Content{&mcpSdk.TextContent{Text: `{"stdout":"match","exit_code":0}`}}},
+		&mcpSdk.CallToolParams{Name: "exec", Arguments: map[string]any{"command": "rg", "args": []string{"npm"}}},
+		rc, nil, &config.AgentConfig{LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema}})
+	select {
+	case <-requested:
+		t.Fatal("search command triggered observation")
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 
