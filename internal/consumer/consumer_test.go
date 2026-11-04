@@ -142,6 +142,26 @@ func TestConsumerCompletesTerminalTasksAfterOutputButNotExecutionFailure(t *test
 				sawAnswer = true
 			}
 			if event.Type == "task_completed" {
+				if event.ID == "" {
+					t.Fatal("completion missing Redis stream ID")
+				}
+				replay, err := manager.ReadTaskStream(ctx, "queued-task", "0-0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				found := false
+				for _, saved := range replay {
+					if saved.ID == event.ID {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatal("completion unavailable in Redis replay")
+				}
+
+				if event.RunID == "" || event.RunID == "queued-task" || event.AgentInstanceID != "" || event.ParentAgentInstanceID != "" || event.AgentName != "" {
+					t.Fatalf("wrong run summary attribution: %+v", event)
+				}
 				if !sawAnswer || event.Delta != "{}" {
 					t.Fatalf("completion must follow task output with empty JSON payload: sawAnswer=%v event=%+v", sawAnswer, event)
 				}
@@ -534,7 +554,7 @@ func TestHTTPInterruptStopsConsumerRun(t *testing.T) {
 		run, err := store.Get(ctx, id)
 		return run.Status, err
 	})
-	handler := server.New(manager, database.NewSSEEventStore(db), time.Second)
+	handler := server.New(manager, database.NewRunStore(db))
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/runs/"+runID+"/interrupt", nil))
 	if response.Code != http.StatusAccepted {
@@ -735,7 +755,7 @@ func TestHTTPInterruptExecutionModes(t *testing.T) {
 				return run.Status, err
 			})
 			response := httptest.NewRecorder()
-			server.New(manager, database.NewSSEEventStore(db), time.Second).ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/runs/"+runID+"/interrupt", nil))
+			server.New(manager, database.NewRunStore(db)).ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/runs/"+runID+"/interrupt", nil))
 			if response.Code != http.StatusAccepted {
 				t.Fatalf("interrupt: %d %s", response.Code, response.Body)
 			}

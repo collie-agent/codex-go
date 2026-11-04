@@ -144,8 +144,9 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 		}
 	}
 	var cleanup func()
-	r.output, cleanup = provider.NewConfiguredOutputer(agentConfig.RedisConfig(), agentConfig.LogLevel)
+	r.output, cleanup = agentOutput(r.ctx, agentConfig)
 	defer cleanup()
+	r.output = provider.AttributeOutput(r.ctx, r.output, durableState.RunId, agentConfig.Name)
 	for _, call := range durableState.ToolExecutions {
 		copy := *call
 		rc.AppendToolResult(&copy)

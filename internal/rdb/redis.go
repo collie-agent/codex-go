@@ -30,8 +30,9 @@ func (r *RedisManager) WriteTaskStream(ctx context.Context, taskId string, resp 
 	id, err := r.client.XAdd(ctx, &redis.XAddArgs{
 		Stream: stream,
 		Values: map[string]interface{}{
-			"type":  resp.Type,
-			"delta": resp.Delta,
+			"type":   resp.Type,
+			"delta":  resp.Delta,
+			"run_id": resp.RunID, "agent_instance_id": resp.AgentInstanceID, "parent_agent_instance_id": resp.ParentAgentInstanceID, "agent_name": resp.AgentName,
 		},
 	}).Result()
 	if err != nil {
@@ -77,6 +78,10 @@ func (r *RedisManager) ReadTaskStream(ctx context.Context, taskID, lastID string
 			if value, ok := message.Values["delta"].(string); ok {
 				event.Delta = value
 			}
+			event.RunID, _ = message.Values["run_id"].(string)
+			event.AgentInstanceID, _ = message.Values["agent_instance_id"].(string)
+			event.ParentAgentInstanceID, _ = message.Values["parent_agent_instance_id"].(string)
+			event.AgentName, _ = message.Values["agent_name"].(string)
 			events = append(events, event)
 		}
 	}

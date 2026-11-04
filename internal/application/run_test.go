@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -462,4 +463,24 @@ func TestRunAndResumeEmitTaskInfo(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRunStopsWhenOutputDeliveryFails(t *testing.T) {
+	runStore(t)
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		writeResult(w, `{"status":"completed","answer":"done"}`)
+	}))
+	defer server.Close()
+	_, err := application.Run(t.Context(), application.Options{ConfigPath: agentConfig(t, server.URL), Task: "fail output", Workspace: t.TempDir(), Timeout: time.Second, Stderr: io.Discard, Output: failingDelivery{}})
+	if err == nil || !strings.Contains(err.Error(), "delivery unavailable") || requests.Load() != 0 {
+		t.Fatalf("err=%v model requests=%d", err, requests.Load())
+	}
+}
+
+type failingDelivery struct{}
+
+func (failingDelivery) Emit(context.Context, provider.OutputEvent) error {
+	return fmt.Errorf("delivery unavailable")
 }

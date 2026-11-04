@@ -17,6 +17,7 @@ import (
 	state "github.com/collie-agent/codex-go/internal/context"
 	"github.com/collie-agent/codex-go/internal/database"
 	"github.com/collie-agent/codex-go/internal/provider"
+	"gorm.io/gorm"
 )
 
 type Options struct {
@@ -101,14 +102,16 @@ func Run(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 		defer opts.Interrupt.Finish()
 	}
 	lockedStore := runLock.Store()
-	executionCtx, cancelExecution := executionContext(ctx, opts.Interrupt)
+	ctx, outputCtx, opts, cleanupOutput := prepareOutput(ctx, opts, loaded, db)
+	defer cleanupOutput()
+	executionCtx, cancelExecution := executionContext(outputCtx, opts.Interrupt)
 	defer cancelExecution()
 	orchestrator := newOrchestrator(executionCtx, workspace, opts)
 	if err := orchestrator.SetMode(opts.Mode); err != nil {
 		return nil, err
 	}
 	// ID 只在 pending checkpoint 提交后输出，stdout 留给最终答案。
-	if err := emitTaskInfo(ctx, opts, loaded, run); err != nil {
+	if err := emitTaskInfo(outputCtx, opts, loaded, run); err != nil {
 		return nil, err
 	}
 	run.Status = "running"
@@ -120,6 +123,43 @@ func Run(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 		durable.ExecutionID = run.RunID
 	}
 	return executeRun(ctx, executionCtx, lockedStore, &run, durable, orchestrator, loaded, opts.Interrupt)
+}
+
+func prepareOutput(ctx context.Context, opts Options, loaded *config.AgentConfig, db *gorm.DB) (context.Context, context.Context, Options, func()) {
+	live := opts.Output
+	cleanup := func() {}
+	if live == nil {
+		live, cleanup = provider.NewTaskOutputer(loaded.RedisConfig(), loaded.LogLevel, opts.Stderr)
+	}
+	outputCtx, cancel := context.WithCancelCause(ctx)
+	opts.Output = &cancelOnOutputFailure{next: live, cancel: cancel}
+	return ctx, provider.WithOutputer(outputCtx, opts.Output), opts, func() { cancel(nil); cleanup() }
+}
+
+// Stop execution after output delivery fails to avoid silently losing later events.
+type cancelOnOutputFailure struct {
+	mu     sync.Mutex
+	next   provider.Outputer
+	cancel context.CancelCauseFunc
+	err    error
+}
+
+func (o *cancelOnOutputFailure) Emit(ctx context.Context, event provider.OutputEvent) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.err != nil {
+		return o.err
+	}
+	if err := o.next.Emit(ctx, event); err != nil {
+		// Expected execution cancellation must not poison terminal-state reporting.
+		if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+			return err
+		}
+		o.err = err
+		o.cancel(err)
+		return err
+	}
+	return nil
 }
 
 func executionContext(lockCtx context.Context, interrupt *Interrupt) (context.Context, context.CancelFunc) {
@@ -164,6 +204,7 @@ func executeRun(ctx, executionCtx context.Context, store *database.RunStore, run
 		return store.SaveDurableCheckpoint(ctx, run, current, mode)
 	})
 	results, runErr := orchestrator.Run(loaded, durable)
+	runErr = errors.Join(runErr, context.Cause(executionCtx))
 	if interrupt != nil {
 		interrupt.Finish()
 	}
@@ -249,5 +290,5 @@ func emitTaskInfo(ctx context.Context, opts Options, loaded *config.AgentConfig,
 	if err != nil {
 		return err
 	}
-	return output.Emit(ctx, provider.OutputEvent{TaskID: run.RunID, Kind: provider.OutputTaskInfo, Data: data})
+	return output.Emit(ctx, provider.OutputEvent{TaskID: run.RunID, RunID: run.RunID, Kind: provider.OutputTaskInfo, Data: data})
 }

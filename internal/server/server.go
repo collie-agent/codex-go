@@ -26,13 +26,10 @@ type Backend interface {
 	RequestInterrupt(context.Context, string) (string, error)
 }
 type Store interface {
-	WriteSSEEvent(context.Context, string, []*entity.StreamEvent) error
+	ConversationRuns(context.Context, string) ([]database.ConversationRun, error)
 }
 
-func New(backend Backend, store Store, interval time.Duration) http.Handler {
-	if interval <= 0 {
-		interval = time.Second
-	}
+func New(backend Backend, store Store) http.Handler {
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
 		start := time.Now()
@@ -55,14 +52,11 @@ func New(backend Backend, store Store, interval time.Duration) http.Handler {
 		c.Next()
 	})
 	router.GET("/conversations/:conv_id/runs", func(c *gin.Context) {
-		reader, ok := store.(interface {
-			ConversationRuns(context.Context, string) ([]database.ConversationRun, error)
-		})
-		if !ok {
+		if store == nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "conversation history unavailable"})
 			return
 		}
-		runs, err := reader.ConversationRuns(c.Request.Context(), c.Param("conv_id"))
+		runs, err := store.ConversationRuns(c.Request.Context(), c.Param("conv_id"))
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "conversation not found"})
 			return
@@ -115,11 +109,11 @@ func New(backend Backend, store Store, interval time.Duration) http.Handler {
 		}
 		c.JSON(201, gin.H{"task_id": id})
 	})
-	router.GET("/tasks/:task_id/events", func(c *gin.Context) { stream(c, backend, store, interval) })
+	router.GET("/tasks/:task_id/events", func(c *gin.Context) { stream(c, backend) })
 	return router
 }
 
-func stream(c *gin.Context, backend Backend, store Store, interval time.Duration) {
+func stream(c *gin.Context, backend Backend) {
 	ctx, cancel := context.WithCancel(c.Request.Context())
 	defer cancel()
 	id := c.Query("last_event_id")
@@ -156,31 +150,10 @@ func stream(c *gin.Context, backend Backend, store Store, interval time.Duration
 			}
 		}
 	}()
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	var pending []*entity.StreamEvent
-	flush := func() bool {
-		if len(pending) == 0 {
-			return true
-		}
-		writeCtx, done := context.WithTimeout(context.Background(), 5*time.Second)
-		defer done()
-		if err := store.WriteSSEEvent(writeCtx, task, pending); err != nil {
-			log.Printf("persist SSE events for task %s: %v", task, err)
-			return false
-		}
-		pending = nil
-		return true
-	}
-	defer flush()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			if !flush() {
-				return
-			}
 		case r := <-results:
 			if r.err != nil {
 				return
@@ -188,14 +161,17 @@ func stream(c *gin.Context, backend Backend, store Store, interval time.Duration
 			for _, event := range r.events {
 				// HTTP 事件使用独立的 JSON 协议，不改变内部事件或队列格式。
 				data, _ := json.Marshal(struct {
-					ID    string `json:"id"`
-					Type  string `json:"type"`
-					Delta string `json:"delta"`
-				}{ID: event.ID, Type: event.Type, Delta: event.Delta})
+					RunID                 string `json:"run_id"`
+					AgentInstanceID       string `json:"agent_instance_id"`
+					ParentAgentInstanceID string `json:"parent_agent_instance_id"`
+					AgentName             string `json:"agent_name"`
+					ID                    string `json:"id"`
+					Type                  string `json:"type"`
+					Delta                 string `json:"delta"`
+				}{ID: event.ID, Type: event.Type, Delta: event.Delta, RunID: event.RunID, AgentInstanceID: event.AgentInstanceID, ParentAgentInstanceID: event.ParentAgentInstanceID, AgentName: event.AgentName})
 				if _, err := fmt.Fprintf(c.Writer, "id: %s\ndata: %s\n\n", event.ID, data); err != nil {
 					return
 				}
-				pending = append(pending, event)
 			}
 			c.Writer.Flush()
 		}

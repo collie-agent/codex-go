@@ -17,3 +17,4 @@ This is a single-context repo with a root `GLOSSARY.md` and `docs/adr/`. See `do
 - 关键的地方加上注释
 - 能使用设计模式的地方,尽量使用设计模式
 - 坚持软件设计里的solid原则
+- 不要过度设计

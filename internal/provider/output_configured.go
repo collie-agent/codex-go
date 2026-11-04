@@ -45,6 +45,9 @@ func (o *configuredOutputer) Emit(ctx context.Context, event OutputEvent) error 
 
 // stderrVisible 与默认输出器保持同一套日志级别规则，避免两条路径行为不一致。
 func (o *configuredOutputer) stderrVisible(kind OutputKind) bool {
+	if kind == OutputAgentSwitch || kind == OutputKind("agent_lifecycle") || kind == OutputKind("task_completed") || kind == OutputKind("task_interrupted") {
+		return false
+	}
 	return !isDeltaOutput(kind) || o.level == config.DebugLogLevel
 }
 

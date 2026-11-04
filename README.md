@@ -166,7 +166,6 @@ flowchart TD
     STORE --> DB[("MySQL")]
     APP --> OUTPUT["Outputer 运行事件输出"]
     MODEL --> OUTPUT
-    OUTPUT -->|先持久化运行事件| DB
     OUTPUT --> STDERR["stderr 诊断信息"]
     OUTPUT -. "可选" .-> REDIS[("Redis Stream")]
     APP --> ANSWER["stdout 已保存的最终答案"]
@@ -181,7 +180,7 @@ flowchart TD
 | 执行文件 | 作用 | 与其他组件的关系 |
 | --- | --- | --- |
 | `codex-cli` | 从命令行执行或恢复 Agent 任务，输出最终答案 | 调用共享 Application 运行层，访问模型接口和 MySQL，默认启动 `codex-mcp` 子进程；可选 Redis 输出 |
-| `codex-server` | 提供 HTTP 任务提交、恢复、中断及 SSE 事件接口 | 将任务写入 Redis List，由 Consumer 执行；读取 Redis Stream 推送事件，并访问 MySQL 保存事件、查询运行与读取持久历史 |
+| `codex-server` | 提供 HTTP 任务提交、恢复、中断及 SSE 事件接口 | 将任务写入 Redis List，由 Consumer 执行；读取 Redis Stream 推送事件，并访问 MySQL 查询运行与工具调用快照 |
 | `codex-consumer` | 消费 Redis List 中的任务，执行或恢复 Agent 运行 | 与 CLI 复用 Application 运行层，访问模型接口和 MySQL，向 Redis Stream 写入事件；默认使用进程内工具，可通过 `--mcp-command` 启动独立 MCP 子进程 |
 | `codex-mcp` | 提供文件读写、搜索与命令执行等 MCP stdio 工具 | 由 CLI、配置了 `--mcp-command` 的 Consumer 或其他 MCP 客户端连接；工具作用于指定 Workspace，独立运行无需 MySQL |
 | `codex-migrate` | 显式创建或升级 MySQL 表结构 | 在首次运行或数据库结构升级时单独执行，为 CLI、Consumer 和 Server 准备持久化表 |
@@ -201,7 +200,7 @@ flowchart TD
     CONSUMER --> API
     CLI -->|"运行、检查点与运行事件"| DB[("MySQL")]
     CONSUMER -->|"运行、检查点与运行事件"| DB
-    SERVER -->|事件持久化与历史查询| DB
+    SERVER -->|运行与工具调用快照查询| DB
     MIGRATE["codex-migrate"] -->|创建 / 升级表结构| DB
     CONSUMER -->|输出事件| STREAM[("Redis Stream")]
     CLI -. "可选输出" .-> STREAM
@@ -242,7 +241,7 @@ flowchart TD
 - **命令行入口**：直接执行或恢复任务，输出最终答案。
 - **HTTP 与任务队列**：通过 HTTP 提交任务，由 Redis 队列交给 Consumer 执行，支持配置消费并发数。详见 [HTTP / SSE 服务](docs/codex-server.md) 和 [Redis 任务消费](docs/redis-consumer.md)。
 - **实时事件**：通过 Redis Stream 和任务级 SSE 订阅正文、工具交互、用量与生命周期事件。详见 [Redis 输出协议](docs/redis-output.md)。
-- **持久历史与回放**：保存运行输出，支持历史快照、运行级 SSE 回放和游标接续，可连续查看恢复前后的输出。详见 [恢复代理视图与接续输出](docs/output-replay.md)。
+- **持久历史与回放**：保存运行与工具调用快照，任务级 SSE 支持 Redis 保留期内的游标接续。详见 [恢复代理视图与接续输出](docs/output-replay.md)。
 - **会话查询**：查询会话内各次运行的状态、结果、错误及工具调用快照。详见 [会话运行查询](docs/codex-server.md#查询会话的全部代理运行)。
 
 ## 代码结构
@@ -257,7 +256,7 @@ cmd/migrate/          显式创建/升级持久化表
 internal/config/      YAML 校验、基础配置与独立配置解析
 internal/database/    MySQL 连接、显式迁移与运行存取
 internal/application/ CLI 与 Consumer 共享的持久化运行生命周期
-internal/server/      HTTP 路由、任务事件流与持久输出回放
+internal/server/      HTTP 路由、任务事件流与运行快照查询
 internal/consumer/    队列任务消费、并发控制与终态通知
 internal/rdb/         Redis 连接、队列与中断信号
 internal/agent/       编排器、ReAct、planner、观察器与 worker

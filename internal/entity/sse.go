@@ -17,6 +17,11 @@ func (m TaskMessage) ValidInput() bool {
 }
 
 type LLMResponse struct {
+	RunID                 string `json:"run_id"`
+	AgentInstanceID       string `json:"agent_instance_id"`
+	ParentAgentInstanceID string `json:"parent_agent_instance_id"`
+	AgentName             string `json:"agent_name"`
+
 	Type  string
 	Delta string
 	Err   error
@@ -24,6 +29,11 @@ type LLMResponse struct {
 
 // StreamEvent is one event read from a task response stream.
 type StreamEvent struct {
+	RunID                 string `json:"run_id"`
+	AgentInstanceID       string `json:"agent_instance_id"`
+	ParentAgentInstanceID string `json:"parent_agent_instance_id"`
+	AgentName             string `json:"agent_name"`
+
 	ID    string
 	Type  string
 	Delta string

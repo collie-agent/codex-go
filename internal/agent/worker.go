@@ -57,9 +57,10 @@ func (w *Worker[T]) Run(modelContext fileContext.Contexter) (result T, text stri
 	output := w.output
 	if output == nil {
 		var cleanup func()
-		output, cleanup = provider.NewConfiguredOutputer(w.agentConfig.RedisConfig(), w.agentConfig.LogLevel)
+		output, cleanup = agentOutput(w.ctx, w.agentConfig)
 		defer cleanup()
 	}
+	output = provider.AttributeOutput(w.ctx, output, request.RunID, w.agentConfig.Name)
 	if output != nil {
 		client.SetOutputer(output)
 	}

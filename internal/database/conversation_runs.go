@@ -35,10 +35,10 @@ type ConversationToolCall struct {
 	BatchPosition int    `json:"batch_position"`
 }
 
-func (s *SSEEventStore) ConversationRuns(ctx context.Context, convID string) ([]ConversationRun, error) {
+func (s *RunStore) ConversationRuns(ctx context.Context, convID string) ([]ConversationRun, error) {
 	runs := make([]ConversationRun, 0)
 	// One transaction keeps conversation membership and tool history in one snapshot.
-	err := s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var conv Conversation
 		if err := tx.First(&conv, "conv_id = ?", convID).Error; err != nil {
 			return err

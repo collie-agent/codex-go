@@ -19,13 +19,12 @@ base:
 
 `addr` 必填，格式为 `host:port`；`db` 默认为 0。密码可以使用 `password` 或 `password_env`，两者互斥。省略 `redis` 时不建立 Redis 连接。Redis 是全局配置，只能在 YAML 顶层声明，不能放在 `base` 或 `agents.<name>` 中。规划器和各代理共享同一份全局设置；观察器的输出仅打印到 stderr，不写入 Stream。
 
-每个 task 写入 `codex-go-resp-stream-{task_id}`。通过 `codex-consumer` 消费时，该消息及其所有代理的输出统一使用消息中的 `TaskId`，数据库中的运行 ID 独立生成。运行事件先写 MySQL 历史，再推送 Redis；持久化失败时返回错误，不推送该事件。每条记录包含 Redis 自动生成的 entry ID，以及以下字段：
+每个 task 写入 `codex-go-resp-stream-{task_id}`。通过 `codex-consumer` 消费时，该消息及其所有代理的输出统一使用消息中的 `TaskId`，数据库中的运行 ID 独立生成。输出事件只写入 Redis Stream，不写入 MySQL；Redis 写入失败时返回错误。每条记录包含 Redis 自动生成的 entry ID，以及以下字段：
 
 | 字段 | 内容 |
 | --- | --- |
 | `type` | 下表中的事件类型 |
 | `delta` | 对应数据结构的 JSON 字符串 |
-| `event_id`、`sequence` | 稳定事件 ID 和运行内递增序号，用于历史去重及排序 |
 | `run_id` | 所属运行 ID |
 | `agent_instance_id`、`parent_agent_instance_id`、`agent_name` | 代理参与实例、父实例及名称；运行汇总可为空 |
 
@@ -60,9 +59,9 @@ delta: {"text":"hello"}
 
 主动中断的队列任务在中断状态保存成功后发送 `task_interrupted`，不发送 `task_completed`；中断状态保存失败不会发送 `task_interrupted`。该事件同样使用任务的 Stream，支持回放和续传。
 
-Stream 不发送 schema、请求上下文和原始响应；这些事件产生时仍会保存到持久历史。流式 delta、工具结果和 usage 不受 `log_level` 过滤；`stream: false` 时只发送提取后的 `text`，不发送 `text_delta/answer_delta`。usage 按每次 HTTP 尝试记录，缺失计数使用字符串 `"unknown"`，与 `"0"` 区分。
+Stream 不发送 schema、请求上下文和原始响应；这些事件仅按日志配置输出。流式 delta、工具结果和 usage 不受 `log_level` 过滤；`stream: false` 时只发送提取后的 `text`，不发送 `text_delta/answer_delta`。usage 按每次 HTTP 尝试记录，缺失计数使用字符串 `"unknown"`，与 `"0"` 区分。
 
-消费者可以用 `XRANGE` 或 `XREAD` 读取临时 Stream；每次写入将过期时间刷新为 24 小时。持久历史接口 `GET /conversations/{conv_id}/runs/{run_id}/events?after_sequence=N` 返回该运行中序号大于 N 的事件，按序号升序排列；省略游标从头读取。历史中的 `kind` 和 `data` 分别对应实时协议的 `type` 和 `delta`（后者是 JSON 字符串）。SSE 的 `id` 仍是 Redis 游标，`event_id` 则与持久历史一致。实时推送失败或 Stream 过期后可按序号补读，并按 `event_id` 去重。历史还包括未推送 Stream 的 schema 和上下文事件。
+消费者可以用 `XRANGE` 或 `XREAD` 读取临时 Stream；每次写入将过期时间刷新为 24 小时。SSE 的 `id` 是 Redis Stream 事件标识，用于该任务流内的去重和续传。服务端不提供运行事件历史查询接口，Stream 过期后无法通过任务级 SSE 补读。
 
 ```sh
 redis-cli XRANGE codex-go-resp-stream-your-task-id - +
@@ -88,6 +87,6 @@ Line protocol 也支持空格或 Tab 分隔的单行格式，例如
 流式提取和最终解析使用相同的分隔规则，字符串内的空格、协议关键字和转义保持原样；
 原有逐行格式仍然支持。
 
-完整视图回放可使用运行级 SSE `/conversations/{conv_id}/runs/{run_id}/events/stream`，从持久历史补齐并跟随新增事件，不依赖临时 Redis 流。该接口的 SSE `id` 使用运行内序号，消息使用历史的 `kind/data` 格式；接续及去重示例见[恢复代理视图与接续输出](output-replay.md)。
+实时输出使用 `/tasks/{task_id}/events`；接续说明见[任务输出接续](output-replay.md)。
 
-多代理模式在委派前发送 `agent_switch`（父代理 → 子代理），子代理产生最终结果并交回父代理时发送反向事件，包括显式返回、无后续委派和业务失败。主代理最终结束、模型多轮执行及执行错误不产生额外切换事件。事件归属于发起切换的代理参与实例，消息体中的名称只用于展示；并发分支分别发出事件，不表示全局只有一个代理在运行。切换事件沿用统一的持久化、Redis 和 SSE 链路；写入错误向上传播，并停止后续调度。恢复跳过的已完成子代理不重新发送切换事件。
+多代理模式在委派前发送 `agent_switch`（父代理 → 子代理），子代理产生最终结果并交回父代理时发送反向事件，包括显式返回、无后续委派和业务失败。主代理最终结束、模型多轮执行及执行错误不产生额外切换事件。事件归属于发起切换的代理参与实例，消息体中的名称只用于展示；并发分支分别发出事件，不表示全局只有一个代理在运行。切换事件沿用统一的 Redis 和 SSE 链路；写入错误向上传播，并停止后续调度。恢复跳过的已完成子代理不重新发送切换事件。

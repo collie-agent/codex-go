@@ -2,11 +2,9 @@
 
 `codex-server` 提供 HTTP 接口提交新任务、恢复已有运行、请求中断运行，并通过 Server-Sent Events（SSE）读取任务输出。提交成功表示任务已入队，不表示任务已开始或执行成功。
 
-代理状态事件详见[代理生命周期协议](agent-lifecycle.md)；持久历史和游标补读详见 [Redis Stream 输出](redis-output.md)。完整视图回放及运行级 SSE 接续示例见[恢复代理视图与接续输出](output-replay.md)。
+代理状态事件详见[代理生命周期协议](agent-lifecycle.md)；Redis 输出协议详见 [Redis Stream 输出](redis-output.md)。任务输出接续说明见[恢复代理视图与接续输出](output-replay.md)。
 
-`GET /conversations/{conv_id}/runs/{run_id}/events?after_sequence=N` 读取持久历史；省略游标从头读取，返回 `events` 数组，按运行内 `sequence` 升序排列。游标是排他的，下一次传入最后收到的序号。任务级 SSE 的 `event_id` 和历史的 `event_id` 相同，可用于去重；任务级 SSE 的 `id` 是独立的 Redis Stream 游标。运行不属于指定会话时返回 404，游标不是非负整数时返回 400。
 
-`GET /conversations/{conv_id}/runs/{run_id}/events/stream` 以 SSE 回放并持续读取同一运行的持久历史。它接受排他的 `after_sequence` 查询参数，未提供时可通过 `Last-Event-ID` 请求头续传；两者同时提供时查询参数优先。此接口的 SSE `id` 是运行内序号，`data` 是历史事件对象。历史读取失败返回 500，存储不支持历史读取时返回 503；流建立后的读取错误会断开连接。
 
 ## 启动
 
@@ -18,7 +16,7 @@ go run ./cmd/migrate
 go run ./cmd/codex-server --redis-url redis://127.0.0.1:6379/0
 ```
 
-`--addr` 默认为 `:8080`，`--redis-url` 默认为 `redis://localhost:6379/0`，`--flush-interval`（事件持久化间隔）默认为 `1s`。以下示例以 `http://localhost:8080` 为服务地址。
+`--addr` 默认为 `:8080`，`--redis-url` 默认为 `redis://localhost:6379/0`。以下示例以 `http://localhost:8080` 为服务地址。
 
 ## 创建任务
 
@@ -94,8 +92,6 @@ data: {"id":"1793261930925-0","type":"text_delta","delta":"{\"text\":\"hello\"}"
 | `data` 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `id` | string | Redis Stream ID，与 SSE 的 `id` 相同。 |
-| `event_id` | string | 与持久历史一致的稳定事件 ID，用于补读去重；无值时省略。 |
-| `sequence` | number | 运行内递增序号，用于排序及历史游标；无值时省略。 |
 | `run_id` | string | 所属代理运行 ID，与任务流 ID 分开。 |
 | `agent_instance_id`、`parent_agent_instance_id`、`agent_name` | string | 代理参与实例归属；主代理父身份为空，运行汇总可无代理身份。 |
 | `type` | string | 输出类型，如 `task_info`、`agent_lifecycle`、`answer_delta`、`text_delta`、`tool_call`、`tool_result`、`tool_error`、`text`、`usage`、`task_completed` 或 `task_interrupted`。 |
@@ -127,7 +123,7 @@ data: {"id":"1793261930926-0","type":"task_completed","delta":"{}"}
 
 主动中断并保存中断状态后，消费者发送 `task_interrupted` 事件，`delta` 同样为 `"{}"`；保存失败不会发送该事件。连接不会因任务结束自动关闭，客户端收到 `task_completed` 或 `task_interrupted` 后应主动关闭连接。`text` 和 `usage` 可能在一次任务中出现多次，不能单独作为任务结束信号。业务失败也发送 `task_completed`，该事件表示任务结束而不表示业务成功；执行故障目前没有专用失败事件；进程异常退出或终态事件写入 Redis 失败时，客户端也可能收不到通知。当前接口不提供任务状态查询；运行开始后可通过下文的中断接口请求停止。未知任务 ID 也会建立连接并等待事件，不能通过 HTTP 200 判断任务是否存在或成功。客户端应根据自身需求关闭连接或设置超时。
 
-服务按 `--flush-interval` 将该连接已发送的事件批量写入 MySQL，断开时也会尝试写入剩余事件。Redis 读取或数据库写入失败会结束连接；由于响应头已经发送，客户端通常只能观察到连接断开。续传仍从 Redis 读取，并受 Redis Stream 保留时间限制；数据库写入不保证客户端已处理事件，也不作为该接口的回放来源。
+SSE 接口只从 Redis Stream 读取并推送事件，不写入 MySQL。Redis 读取失败会结束连接；由于响应头已经发送，客户端通常只能观察到连接断开。续传仍从 Redis 读取，并受 Redis Stream 保留时间限制。
 
 模型配置 `stream: false` 时，`text` 的 `delta` 为 `{"text":"提取并解码后的 answer"}`；`stream: true` 时发送 `text_delta/answer_delta`，不发送 `text`。互斥规则按模型轮次生效。
 
@@ -147,8 +143,6 @@ data: {"id":"1793261930924-0","type":"task_info","delta":"{\"run_id\":\"8ab8b473
 | `run_id` | 持久化运行的标识，用于恢复或中断；恢复时保持不变。 |
 | `conv_id` | 会话标识，用于在新任务的 `conv_id` 中引用此前历史。 |
 | 任务级 SSE `id` / `id` | Redis Stream 事件标识，用于该任务流续传。 |
-| 运行级 SSE `id` | 运行内 `sequence`，用于持久历史接续。 |
-| `event_id` | 持久事件身份，跨历史和两种 SSE 协议去重。 |
 
 `model_name` 取自当前加载配置的 `LLMConfig.Model`；未配置运行级模型时为空字符串。
 
@@ -164,7 +158,7 @@ curl -i -X POST 'http://localhost:8080/tasks' \
   -d '{"run_id":"已有运行 ID"}'
 ```
 
-成功仍返回 HTTP `201` 和新的 `task_id`。持久化 `run_id` 不变，原任务事件不会复制到新任务流。客户端可通过会话运行的持久历史及 `/conversations/{conv_id}/runs/{run_id}/events/stream` 连续回放和订阅恢复前后的全部输出；任务级 SSE 只覆盖对应任务，受 Redis 保留时间限制。
+成功仍返回 HTTP `201` 和新的 `task_id`。持久化 `run_id` 不变，原任务事件不会复制到新任务流。客户端需使用新的 `task_id` 订阅任务级 SSE；任务级 SSE 只覆盖对应任务，受 Redis 保留时间限制。
 
 支持 `react`、`plan-execute` 和 `multi-agent`。消费者沿用原运行的目标、工作目录、模式和会话，使用当前消费者的模型及工具配置；多代理运行必须使用多代理配置恢复。恢复按执行实例续接已确认工具历史，计划跳过已完成步骤，多代理恢复委派关系与已完成报告。已登记但结果未知的工具调用会阻止自动恢复，以免重复产生副作用。同一 `run_id` 同时只能由一个执行者持有运行锁，重复提交不会绕过此限制。
 

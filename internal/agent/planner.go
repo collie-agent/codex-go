@@ -74,8 +74,9 @@ func (p *PlannerProcess) Run(agentConfig *config.AgentConfig, durableState *file
 		return PlannerResult{}, nil, fmt.Errorf("task %s: planner: %w", taskID, err)
 	}
 	client.SetLogLevel(agentConfig.LogLevel)
-	output, cleanup := provider.NewConfiguredOutputer(agentConfig.RedisConfig(), agentConfig.LogLevel)
+	output, cleanup := agentOutput(p.ctx, agentConfig)
 	defer cleanup()
+	output = provider.AttributeOutput(p.ctx, output, taskID, agentConfig.Name)
 	if output != nil {
 		client.SetOutputer(output)
 	}

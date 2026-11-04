@@ -1,13 +1,14 @@
 package application
 
 import (
-	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/collie-agent/codex-go/internal/provider"
 )
 
 // ErrInterrupted identifies an explicit request to stop the whole run.
-var ErrInterrupted = errors.New("agent run interrupted")
+var ErrInterrupted = provider.ErrInterrupted
 
 // InterruptPersistenceError reports that the interrupted state was not saved.
 type InterruptPersistenceError struct{ Err error }

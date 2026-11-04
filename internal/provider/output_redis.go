@@ -35,9 +35,9 @@ func (o *RedisOutputer) Emit(ctx context.Context, event OutputEvent) error {
 		event.TaskID = taskID
 	}
 	switch event.Kind {
-	case OutputSchema, OutputContext:
+	case OutputSchema, OutputContext, OutputRawResponse:
 		return nil
-	case OutputTaskInfo, OutputAnswerDelta, OutputText, OutputTextDelta, OutputToolCall, OutputToolResult, OutputToolError, OutputUsage:
+	case OutputTaskInfo, OutputAnswerDelta, OutputText, OutputTextDelta, OutputToolCall, OutputToolResult, OutputToolError, OutputUsage, OutputAgentSwitch, OutputKind("agent_lifecycle"), OutputKind("task_completed"), OutputKind("task_interrupted"):
 	default:
 		return fmt.Errorf("redis output: unsupported event type %q", event.Kind)
 	}
@@ -50,6 +50,7 @@ func (o *RedisOutputer) Emit(ctx context.Context, event OutputEvent) error {
 	// JSON 作为 delta 原样传递，供 ReadTaskStream 和 SSE 消费者统一读取。
 	_, err := o.writer.WriteTaskStream(ctx, event.TaskID, &entity.LLMResponse{
 		Type: string(event.Kind), Delta: string(event.Data),
+		RunID: event.RunID, AgentInstanceID: event.AgentInstanceID, ParentAgentInstanceID: event.ParentAgentInstanceID, AgentName: event.AgentName,
 	})
 	return err
 }

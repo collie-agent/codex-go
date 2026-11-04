@@ -31,41 +31,31 @@ func (f *fakeBackend) ReadTaskStream(ctx context.Context, _, _ string) ([]*entit
 	return nil, ctx.Err()
 }
 
-type fakeStore struct{}
-
-func (fakeStore) WriteSSEEvent(context.Context, string, []*entity.StreamEvent) error { return nil }
 func TestCreateTask(t *testing.T) {
-	f := &fakeBackend{}
-	w := httptest.NewRecorder()
-	New(f, fakeStore{}, 0).ServeHTTP(w, httptest.NewRequest("POST", "/tasks", strings.NewReader(`{"input":"hello"}`)))
-	var result struct {
-		TaskID string `json:"task_id"`
-	}
-	_ = json.Unmarshal(w.Body.Bytes(), &result)
-	if w.Code != 201 || result.TaskID == "" || f.task.TaskId != result.TaskID || f.task.Input != "hello" {
-		t.Fatalf("status=%d body=%s task=%+v", w.Code, w.Body, f.task)
+	for _, body := range []string{`{"input":"hello"}`, `{"input":"hello","conv_id":""}`} {
+		t.Run(body, func(t *testing.T) {
+			f := &fakeBackend{}
+			w := httptest.NewRecorder()
+			New(f, nil).ServeHTTP(w, httptest.NewRequest("POST", "/tasks", strings.NewReader(body)))
+			var result struct {
+				TaskID string `json:"task_id"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if w.Code != http.StatusCreated || result.TaskID == "" || f.task.TaskId != result.TaskID || f.task.Input != "hello" || f.task.ConvId != "" {
+				t.Fatalf("status=%d body=%s task=%+v", w.Code, w.Body, f.task)
+			}
+		})
 	}
 }
 
 func TestCreateTaskWithConversation(t *testing.T) {
 	f := &fakeBackend{}
 	w := httptest.NewRecorder()
-	New(f, fakeStore{}, 0).ServeHTTP(w, httptest.NewRequest("POST", "/tasks", strings.NewReader(`{"input":"continue task","conv_id":"existing-conversation"}`)))
+	New(f, nil).ServeHTTP(w, httptest.NewRequest("POST", "/tasks", strings.NewReader(`{"input":"continue task","conv_id":"existing-conversation"}`)))
 	if w.Code != http.StatusCreated || f.task.ConvId != "existing-conversation" {
 		t.Fatalf("status=%d body=%s task=%+v", w.Code, w.Body, f.task)
-	}
-}
-
-func TestCreateTaskWithoutConversation(t *testing.T) {
-	for _, body := range []string{`{"input":"new task"}`, `{"input":"new task","conv_id":""}`} {
-		t.Run(body, func(t *testing.T) {
-			f := &fakeBackend{}
-			w := httptest.NewRecorder()
-			New(f, fakeStore{}, 0).ServeHTTP(w, httptest.NewRequest("POST", "/tasks", strings.NewReader(body)))
-			if w.Code != http.StatusCreated || f.task.ConvId != "" || f.task.Input != "new task" || f.task.TaskId == "" {
-				t.Fatalf("status=%d body=%s task=%+v", w.Code, w.Body, f.task)
-			}
-		})
 	}
 }
 
@@ -85,16 +75,9 @@ func (s *streamBackend) ReadTaskStream(ctx context.Context, _ string, id string)
 	return nil, ctx.Err()
 }
 
-type recordingStore struct{ writes chan []*entity.StreamEvent }
-
-func (s recordingStore) WriteSSEEvent(_ context.Context, _ string, events []*entity.StreamEvent) error {
-	s.writes <- events
-	return nil
-}
-func TestStreamReplaysAndPersists(t *testing.T) {
+func TestStreamReplays(t *testing.T) {
 	backend := &streamBackend{ids: make(chan string, 2)}
-	store := recordingStore{writes: make(chan []*entity.StreamEvent, 2)}
-	srv := httptest.NewServer(New(backend, store, 10*time.Millisecond))
+	srv := httptest.NewServer(New(backend, nil))
 	defer srv.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -112,14 +95,6 @@ func TestStreamReplaysAndPersists(t *testing.T) {
 	if id := <-backend.ids; id != "0-0" {
 		t.Fatalf("initial id %q", id)
 	}
-	select {
-	case events := <-store.writes:
-		if len(events) != 1 || events[0].ID != "1-0" {
-			t.Fatalf("events=%v", events)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("events not persisted")
-	}
 	cancel()
 }
 
@@ -131,7 +106,7 @@ func TestStreamDeliversAndResumesTaskCompletion(t *testing.T) {
 			backend := rdb.NewRedisManagerWithClient(client)
 			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 			defer cancel()
-			textID, err := backend.WriteTaskStream(ctx, "task", &entity.LLMResponse{Type: "text", Delta: `{"text":"done"}`})
+			textID, err := backend.WriteTaskStream(ctx, "task", &entity.LLMResponse{RunID: "run", AgentInstanceID: "worker-2", ParentAgentInstanceID: "worker-1", AgentName: "worker", Type: "text", Delta: `{"text":"done"}`})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -147,7 +122,7 @@ func TestStreamDeliversAndResumesTaskCompletion(t *testing.T) {
 			if mode != "live" {
 				completionID = publish()
 			}
-			srv := httptest.NewServer(New(backend, fakeStore{}, time.Second))
+			srv := httptest.NewServer(New(backend, nil))
 			defer srv.Close()
 			url := srv.URL + "/tasks/task/events"
 			if mode == "query" {
@@ -191,8 +166,11 @@ func TestStreamDeliversAndResumesTaskCompletion(t *testing.T) {
 					t.Fatal(err)
 				}
 				var fields map[string]json.RawMessage
-				if err := json.Unmarshal([]byte(strings.TrimPrefix(data, "data: ")), &fields); err != nil || len(fields) != 3 || fields["id"] == nil || fields["type"] == nil || fields["delta"] == nil {
+				if err := json.Unmarshal([]byte(strings.TrimPrefix(data, "data: ")), &fields); err != nil || len(fields) != 7 || fields["id"] == nil || fields["type"] == nil || fields["delta"] == nil {
 					t.Fatalf("unexpected SSE fields: %s", data)
+				}
+				if wantType == "text" && (string(fields["run_id"]) != `"run"` || string(fields["agent_instance_id"]) != `"worker-2"` || string(fields["parent_agent_instance_id"]) != `"worker-1"` || string(fields["agent_name"]) != `"worker"`) {
+					t.Fatalf("attribution: %s", data)
 				}
 				if event.ID != wantID || event.Type != wantType || event.Delta != wantDelta {
 					t.Fatalf("unexpected event: %+v", event)
@@ -212,7 +190,7 @@ func TestStreamDeliversAndResumesTaskCompletion(t *testing.T) {
 func TestResumeTaskEnqueuesOriginalRun(t *testing.T) {
 	backend := &fakeBackend{}
 	response := httptest.NewRecorder()
-	New(backend, fakeStore{}, 0).ServeHTTP(response, httptest.NewRequest("POST", "/tasks", strings.NewReader(`{"run_id":"original-run"}`)))
+	New(backend, nil).ServeHTTP(response, httptest.NewRequest("POST", "/tasks", strings.NewReader(`{"run_id":"original-run"}`)))
 	if response.Code != http.StatusCreated || backend.task.RunId != "original-run" || backend.task.Input != "" || backend.task.TaskId == "" {
 		t.Fatalf("status=%d task=%+v", response.Code, backend.task)
 	}
@@ -226,7 +204,7 @@ func (*interruptBackend) RequestInterrupt(context.Context, string) (string, erro
 
 func TestInterruptRequestAcknowledgesDelivery(t *testing.T) {
 	w := httptest.NewRecorder()
-	New(&interruptBackend{}, fakeStore{}, 0).ServeHTTP(w, httptest.NewRequest("POST", "/runs/run-1/interrupt", nil))
+	New(&interruptBackend{}, nil).ServeHTTP(w, httptest.NewRequest("POST", "/runs/run-1/interrupt", nil))
 	if w.Code != http.StatusAccepted || !strings.Contains(w.Body.String(), "accepted") {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body)
 	}
@@ -244,7 +222,7 @@ func TestInterruptDeliveryAcrossRedisClients(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer stop()
-	handler := New(backend, fakeStore{}, 0)
+	handler := New(backend, nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, httptest.NewRequest("POST", "/runs/run-1/interrupt", nil))
 	if w.Code != http.StatusAccepted {
@@ -286,7 +264,7 @@ func TestInterruptDoesNotAcknowledgeFinishedExecution(t *testing.T) {
 	defer stop()
 	signal.Finish()
 	response := httptest.NewRecorder()
-	New(backend, fakeStore{}, 0).ServeHTTP(response, httptest.NewRequest("POST", "/runs/finished-run/interrupt", nil))
+	New(backend, nil).ServeHTTP(response, httptest.NewRequest("POST", "/runs/finished-run/interrupt", nil))
 	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "terminal") {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body)
 	}
@@ -301,7 +279,7 @@ func TestConcurrentInterruptRequestsHaveOneAcceptance(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer stop()
-	handler := New(backend, fakeStore{}, 0)
+	handler := New(backend, nil)
 	results := make(chan int, 16)
 	for i := 0; i < cap(results); i++ {
 		go func() {

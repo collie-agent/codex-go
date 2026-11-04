@@ -204,7 +204,7 @@ func TestRedisOutputerWritesTextStream(t *testing.T) {
 		t.Fatalf("entries=%v", entries)
 	}
 	entry := entries[0]
-	if !regexp.MustCompile(`^\d+-\d+$`).MatchString(entry.ID) || entry.Values["type"] != "text" || entry.Values["delta"] != `{"text":"hello"}` || len(entry.Values) != 2 {
+	if !regexp.MustCompile(`^\d+-\d+$`).MatchString(entry.ID) || entry.Values["type"] != "text" || entry.Values["delta"] != `{"text":"hello"}` {
 		t.Fatalf("unexpected stream entry: %+v", entry)
 	}
 }
@@ -343,5 +343,24 @@ func TestRedisOutputerWritesTaskInfo(t *testing.T) {
 	entries, err := manager.ReadTaskStream(t.Context(), "run-1", "")
 	if err != nil || len(entries) != 1 || entries[0].Type != "task_info" || entries[0].Delta != string(data) {
 		t.Fatalf("entries=%v err=%v", entries, err)
+	}
+}
+
+func TestRedisOutputPreservesAgentAttribution(t *testing.T) {
+	client, _ := testutil.StartRedis(t)
+	manager := rdb.NewRedisManagerWithClient(client)
+	output := provider.NewRedisOutputer(manager)
+	ctx := provider.WithTaskStreamID(t.Context(), "queue-task")
+	err := output.Emit(ctx, provider.OutputEvent{TaskID: "run", RunID: "run", AgentInstanceID: "child-2", ParentAgentInstanceID: "child-1", AgentName: "reviewer", Kind: provider.OutputText, Data: json.RawMessage(`{"text":"hello"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := manager.ReadTaskStream(ctx, "queue-task", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := events[0]
+	if e.RunID != "run" || e.AgentInstanceID != "child-2" || e.ParentAgentInstanceID != "child-1" || e.AgentName != "reviewer" || e.Type != "text" || e.Delta != `{"text":"hello"}` {
+		t.Fatalf("event=%+v", e)
 	}
 }

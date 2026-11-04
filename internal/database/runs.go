@@ -80,7 +80,7 @@ func Migrate(ctx context.Context, db *gorm.DB) error {
 			return err
 		}
 	}
-	if err := db.AutoMigrate(&Conversation{}, &AgentRun{}, &StepExecution{}, &SSEStreamEvent{}, &ExecutionInstance{}, &ToolExecution{}); err != nil {
+	if err := db.AutoMigrate(&Conversation{}, &AgentRun{}, &StepExecution{}, &ExecutionInstance{}, &ToolExecution{}); err != nil {
 		return err
 	}
 	// 显式指定外键方向，避免两个模型同名 ConvID 被推断为反向关联。

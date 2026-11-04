@@ -67,15 +67,3 @@ CREATE TABLE IF NOT EXISTS tool_execution (
     PRIMARY KEY (execution_id, position),
     INDEX idx_tool_execution_run_id (run_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
--- Persisted SSE events emitted for an LLM chat task.
-CREATE TABLE IF NOT EXISTS `sse_stream_events` (
-    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'surrogate primary key',
-    `task_id` CHAR(36) NOT NULL COMMENT 'chat task UUID',
-    `last_event_id` VARCHAR(64) NOT NULL COMMENT 'source event ID, for example a Redis Stream ID',
-    `data` MEDIUMTEXT NOT NULL COMMENT 'SSE data payload or model delta',
-    `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT 'event creation time',
-    PRIMARY KEY (`id`),
-    UNIQUE KEY `uk_sse_stream_events_task_event` (`task_id`, `last_event_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
-  COMMENT='SSE streaming response event records';

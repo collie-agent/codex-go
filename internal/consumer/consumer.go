@@ -122,10 +122,12 @@ func consume(ctx context.Context, client *redis.Client, opts application.Options
 			fmt.Fprintln(opts.Stderr, "consumer: invalid task message: TaskId and either Input or RunId are required")
 			continue
 		}
+		runID := message.RunId
 		taskOpts := opts
 		taskOpts.Interrupt = application.NewInterrupt()
-		taskOpts.OnRunLocked = func(ctx context.Context, runID string, interrupt *application.Interrupt) (func(), error) {
-			return rdb.ListenInterrupt(ctx, client, runID, interrupt)
+		taskOpts.OnRunLocked = func(ctx context.Context, lockedRunID string, interrupt *application.Interrupt) (func(), error) {
+			runID = lockedRunID
+			return rdb.ListenInterrupt(ctx, client, lockedRunID, interrupt)
 		}
 		taskOpts.Task = message.Input
 		// 会话归属按消息指定；省略时由 application 为本任务创建新会话。
@@ -152,7 +154,7 @@ func consume(ctx context.Context, client *redis.Client, opts application.Options
 		}
 		// 应用层仅在业务失败结果成功保存后返回结果；恢复终态失败也遵循此约定。
 		businessFailed := hasBusinessFailure(results)
-		if executeErr == nil || interrupted || businessFailed {
+		if shouldPublishTerminal(executeErr, interrupted, businessFailed) {
 			eventType := "task_completed"
 			if interrupted {
 				eventType = "task_interrupted"
@@ -160,9 +162,9 @@ func consume(ctx context.Context, client *redis.Client, opts application.Options
 			// 只在最终状态保存后发布终态，避免误报任务完成或中断完成。
 			// 使用独立限时上下文，退出信号不应丢弃已领取任务的完成通知。
 			publishCtx, cancel := context.WithTimeout(taskCtx, 5*time.Second)
-			_, err := rdb.NewRedisManagerWithClient(client).WriteTaskStream(publishCtx, message.TaskId, &entity.LLMResponse{
-				Type: eventType, Delta: "{}",
-			})
+			// 终态与正文都直接写入 Redis Stream，回放使用同一条流。
+			output := provider.NewRedisOutputer(rdb.NewRedisManagerWithClient(client))
+			err := output.Emit(publishCtx, provider.OutputEvent{TaskID: message.TaskId, RunID: runID, Kind: provider.OutputKind(eventType), Data: json.RawMessage(`{}`)})
 			cancel()
 			if err != nil {
 				fmt.Fprintf(opts.Stderr, "consumer: task_id=%q publish %s failed: %v\n", message.TaskId, eventType, err)
@@ -178,4 +180,8 @@ func consume(ctx context.Context, client *redis.Client, opts application.Options
 // 仅已保存的业务失败会由 application 返回对应结果。
 func hasBusinessFailure(results []agent.ReactResult) bool {
 	return len(results) > 0 && results[0].Status == agent.FailedReactStatus
+}
+
+func shouldPublishTerminal(err error, interrupted, businessFailed bool) bool {
+	return err == nil || interrupted || businessFailed
 }

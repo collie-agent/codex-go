@@ -59,7 +59,7 @@ func TestConversationRuns(t *testing.T) {
 		}
 	}
 	w := httptest.NewRecorder()
-	New(&fakeBackend{}, database.NewSSEEventStore(db), 0).ServeHTTP(w, httptest.NewRequest("GET", "/conversations/"+first.ConvID+"/runs", nil))
+	New(&fakeBackend{}, database.NewRunStore(db)).ServeHTTP(w, httptest.NewRequest("GET", "/conversations/"+first.ConvID+"/runs", nil))
 	var body struct {
 		ConvID string `json:"conv_id"`
 		Runs   []struct {
@@ -124,7 +124,7 @@ func TestConversationRunsEmptyAndErrors(t *testing.T) {
 	if err := db.Create(&conv).Error; err != nil {
 		t.Fatal(err)
 	}
-	handler := New(&fakeBackend{}, database.NewSSEEventStore(db), 0)
+	handler := New(&fakeBackend{}, database.NewRunStore(db))
 	for _, tc := range []struct {
 		id     string
 		status int

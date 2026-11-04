@@ -58,6 +58,9 @@ func TestReactPublishesToolOutcomesToRedis(t *testing.T) {
 			}
 			var callSeen, outcomeSeen bool
 			for _, entry := range entries {
+				if entry.Values["run_id"] != "tool-task" || entry.Values["agent_instance_id"] != "tool-task/main" || entry.Values["parent_agent_instance_id"] != "" {
+					t.Fatalf("wrong tool attribution: %+v", entry)
+				}
 				if entry.Values["type"] == "tool_call" {
 					callSeen = true
 				}
@@ -88,6 +91,7 @@ func TestPlannerPublishesRedisOutput(t *testing.T) {
 	server := plannerTestServer(t, `{"StepExecutions":[{"StepId":"step-1","Intent":"inspect","Revision":1,"Status":"pending","CompletionCriteria":"verified","Observation":[],"CompletionEvidence":[]}]}`, false)
 	cfg := plannerTestConfig(server.URL, config.JsonLLMOutputSchema)
 	cfg.LogLevel = config.ErrorLogLevel
+	cfg.Name = "plan"
 	cfg.Global = &config.GlobalConfig{Redis: &config.RedisConfig{Addr: addr}}
 	if _, _, err := NewPlannerProcess(t.Context()).Run(cfg, &fileContext.DurableState{RunId: "plan-task", Goal: "inspect"}); err != nil {
 		t.Fatal(err)
@@ -95,6 +99,11 @@ func TestPlannerPublishesRedisOutput(t *testing.T) {
 	entries, err := redisClient.XRange(t.Context(), "codex-go-resp-stream-plan-task", "-", "+").Result()
 	if err != nil || len(entries) != 2 || entries[0].Values["type"] != "usage" || entries[1].Values["type"] != "text" {
 		t.Fatalf("entries=%v err=%v", entries, err)
+	}
+	for _, entry := range entries {
+		if entry.Values["run_id"] != "plan-task" || entry.Values["agent_instance_id"] != "plan-task/main" || entry.Values["agent_name"] != "plan" {
+			t.Fatalf("planner attribution: %+v", entry)
+		}
 	}
 }
 
@@ -255,6 +264,9 @@ func TestWorkerStreamsRedisAtErrorLogLevel(t *testing.T) {
 		t.Fatalf("entries=%v err=%v", entries, err)
 	}
 	for i, kind := range []string{"text_delta", "usage"} {
+		if entries[i].Values["run_id"] != "stream-task" || entries[i].Values["agent_instance_id"] == "" || entries[i].Values["agent_name"] != "react" {
+			t.Fatalf("missing attribution: %+v", entries[i])
+		}
 		if entries[i].Values["type"] != kind {
 			t.Fatalf("entry %d=%+v", i, entries[i])
 		}

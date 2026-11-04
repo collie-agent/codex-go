@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 )
 
 type LLMOutputParser[T any] interface {
@@ -24,7 +25,33 @@ const (
 	OutputUsage       OutputKind = "usage"
 	OutputRawResponse OutputKind = "raw_response"
 	OutputTaskInfo    OutputKind = "task_info"
+	OutputAgentSwitch OutputKind = "agent_switch"
+	// 标识一条单个 agent 实例的状态变化事件。它让输出的订阅者知道某个 agent 正在运行、已完成、失败还是被中断，而不必从文本或工具调用结果中推测
+	OutputAgentLifecycle OutputKind = "agent_lifecycle"
 )
+
+// AgentSwitchOutput 表达委派和结果交回；并发分支各自发出切换事件。
+type AgentSwitchOutput struct {
+	SrcAgentName string `json:"src_agent_name"`
+	DstAgentName string `json:"dst_agent_name"`
+}
+
+// ErrInterrupted denotes an explicit user request to stop the entire run.
+var ErrInterrupted = errors.New("agent run interrupted")
+
+type AgentStatus string
+
+const (
+	AgentPending     AgentStatus = "pending"
+	AgentRunning     AgentStatus = "running"
+	AgentCompleted   AgentStatus = "completed"
+	AgentFailed      AgentStatus = "failed"
+	AgentInterrupted AgentStatus = "interrupted"
+)
+
+type AgentLifecycleOutput struct {
+	Status AgentStatus `json:"status"`
+}
 
 // isDeltaOutput 判断事件是否为流式正文增量。
 // 这类事件量大且属于临时内容，只有 debug 级别才回显到 stderr，避免刷屏。
@@ -48,6 +75,11 @@ type TaskInfoOutput struct {
 }
 
 type OutputEvent struct {
+	RunID                 string `json:"run_id"`
+	AgentInstanceID       string `json:"agent_instance_id"`
+	ParentAgentInstanceID string `json:"parent_agent_instance_id"`
+	AgentName             string `json:"agent_name"`
+
 	TaskID string     `json:"task_id"`
 	Label  string     `json:"label,omitempty"`
 	Kind   OutputKind `json:"kind"`

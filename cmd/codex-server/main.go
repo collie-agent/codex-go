@@ -22,7 +22,6 @@ import (
 func main() {
 	addr := flag.String("addr", ":8080", "HTTP listen address")
 	redisURL := flag.String("redis-url", "redis://localhost:6379/0", "Redis URL")
-	interval := flag.Duration("flush-interval", time.Second, "event persistence interval")
 	flag.Parse()
 	opts, err := redis.ParseURL(*redisURL)
 	if err != nil {
@@ -53,7 +52,7 @@ func main() {
 		}
 		return run.Status, err
 	})
-	srv := &http.Server{Addr: *addr, Handler: server.New(backend, database.NewSSEEventStore(db), *interval), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Addr: *addr, Handler: server.New(backend, runs), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shutdown, done := context.WithTimeout(context.Background(), 10*time.Second)

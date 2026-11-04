@@ -49,6 +49,10 @@ func Resume(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load run %q: %w", opts.RunID, err)
 	}
+	// 主动中断已结束原运行；必须在输出或修改检查点前拒绝恢复。
+	if run.Status == "interrupted" {
+		return nil, fmt.Errorf("run %s was interrupted and cannot be resumed", run.RunID)
+	}
 	if run.Mode != "" && run.Mode != "react" {
 		if run.Mode != "plan-execute" && run.Mode != "multi-agent" {
 			return nil, fmt.Errorf("run %s has unsupported mode %q", run.RunID, run.Mode)
@@ -88,7 +92,7 @@ func Resume(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 		results, err := decodeSavedResults(run.Result)
 		return results, errors.Join(errors.New(run.Error), err)
 	}
-	if run.Status != "pending" && run.Status != "running" && run.Status != "failed" && run.Status != "interrupted" {
+	if run.Status != "pending" && run.Status != "running" && run.Status != "failed" {
 		return nil, fmt.Errorf("run %s has unsupported status %q", run.RunID, run.Status)
 	}
 	if opts.OnRunLocked != nil {
@@ -102,7 +106,9 @@ func Resume(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 		defer cleanup()
 		defer opts.Interrupt.Finish()
 	}
-	if err := emitTaskInfo(ctx, opts, loaded, run); err != nil {
+	ctx, outputCtx, opts, cleanupOutput := prepareOutput(ctx, opts, loaded, db)
+	defer cleanupOutput()
+	if err := emitTaskInfo(outputCtx, opts, loaded, run); err != nil {
 		return nil, err
 	}
 	steps, err := lockedStore.Steps(ctx, run.RunID)
@@ -120,7 +126,7 @@ func Resume(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 			})
 		}
 	}
-	executionCtx, cancelExecution := executionContext(ctx, opts.Interrupt)
+	executionCtx, cancelExecution := executionContext(outputCtx, opts.Interrupt)
 	defer cancelExecution()
 	orchestrator := newOrchestrator(executionCtx, workspace, opts)
 	// 恢复始终沿用已保存的模式，尚未生成计划时直接进入 planner。

@@ -14,6 +14,7 @@ import (
 	"github.com/collie-agent/codex-go/internal/config"
 	fileContext "github.com/collie-agent/codex-go/internal/context"
 	filemcp "github.com/collie-agent/codex-go/internal/mcp"
+	"github.com/collie-agent/codex-go/internal/provider"
 )
 
 type AgentProcessorType string
@@ -91,7 +92,7 @@ func (o *ProcessorOrchestrator) saveCheckpoint(state *fileContext.DurableState) 
 
 // Run 按批次执行动态处理流程，按分支顺序返回每个终止分支的最后一个 ReAct 结果。
 // 未执行 ReAct 的分支不产生结果；任何节点失败时返回 nil 和错误。
-func (o *ProcessorOrchestrator) Run(agentConfig *config.AgentConfig, durableState *fileContext.DurableState) ([]ReactResult, error) {
+func (o *ProcessorOrchestrator) Run(agentConfig *config.AgentConfig, durableState *fileContext.DurableState) (results []ReactResult, runErr error) {
 	var zero []ReactResult
 	if o == nil || o.ctx == nil {
 		return zero, fmt.Errorf("orchestrator: context is required")
@@ -105,8 +106,35 @@ func (o *ProcessorOrchestrator) Run(agentConfig *config.AgentConfig, durableStat
 	if durableState == nil || strings.TrimSpace(durableState.Goal) == "" {
 		return zero, fmt.Errorf("orchestrator: durable state with goal is required")
 	}
+	name := agentConfig.ForAgent(string(o.rootAgentType)).Name
+	identity := provider.AgentParticipation{ID: durableState.RunId + "/main", Name: name}
+	output, cleanup := agentOutput(o.ctx, agentConfig)
+	defer cleanup()
+	if err := emitLifecycle(o.ctx, output, durableState.RunId, identity, provider.AgentPending); err != nil {
+		return nil, err
+	}
+	defer func() {
+		status := provider.AgentCompleted
+		if runErr != nil {
+			status = lifecycleFailure(o.ctx)
+		} else {
+			for _, result := range results {
+				if result.Status == FailedReactStatus {
+					status = provider.AgentFailed
+					break
+				}
+			}
+		}
+		if err := finishLifecycle(o.ctx, output, durableState.RunId, identity, status); err != nil {
+			runErr = errors.Join(runErr, err)
+		}
+	}()
+	if err := emitLifecycle(o.ctx, output, durableState.RunId, identity, provider.AgentRunning); err != nil {
+		return nil, err
+	}
 	// 每次运行使用独立的模式设置，避免复用 orchestrator 时串扰。
 	runner := *o
+	runner.ctx = provider.WithAgentParticipation(o.ctx, identity)
 	runner.executionMode = ReactAgentType
 	// 入口仅由 mode 决定，YAML name 不参与调度。
 	if o.rootAgentType == PlanAgentType {

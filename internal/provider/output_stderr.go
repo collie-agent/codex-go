@@ -69,6 +69,8 @@ func (o *StderrOutputer) Emit(ctx context.Context, event OutputEvent) error {
 	}
 	var message string
 	switch event.Kind {
+	case OutputAgentSwitch, OutputKind("agent_lifecycle"), OutputKind("task_completed"), OutputKind("task_interrupted"):
+		return nil
 	case OutputTaskInfo:
 		var data TaskInfoOutput
 		if err := json.Unmarshal(event.Data, &data); err != nil {

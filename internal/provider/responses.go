@@ -54,7 +54,7 @@ func (c *baseResponsesApiClient[T]) SetOutputer(output Outputer) {
 	c.output = output
 }
 
-// emitOutput 的故障仅影响旁路输出，不能导致已完成的模型请求被重新执行。
+// emitOutput 记录输出错误；持久输出器会取消运行上下文，阻止后续执行。
 func (c *baseResponsesApiClient[T]) emitOutput(ctx context.Context, taskID string, kind OutputKind, data any) {
 	encoded, err := json.Marshal(data)
 	if err == nil {
@@ -66,7 +66,7 @@ func (c *baseResponsesApiClient[T]) emitOutput(ctx context.Context, taskID strin
 			}
 			output = c.stderr
 		}
-		err = output.Emit(ctx, OutputEvent{TaskID: taskID, Label: c.contextLogLabel, Kind: kind, Data: encoded})
+		err = output.Emit(ctx, OutputEvent{TaskID: taskID, RunID: taskID, Label: c.contextLogLabel, Kind: kind, Data: encoded})
 	}
 	if err != nil {
 		log.Printf("task %s: emit output kind=%s: %v", taskID, kind, err)
@@ -354,7 +354,7 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 		}
 		if c.output == nil || logger != c.stderr {
 			data, _ := json.Marshal(TextOutput{Text: text})
-			if err := logger.Emit(ctx, OutputEvent{TaskID: taskId, Label: c.contextLogLabel, Kind: OutputText, Data: data}); err != nil {
+			if err := logger.Emit(ctx, OutputEvent{TaskID: taskId, RunID: taskId, Label: c.contextLogLabel, Kind: OutputText, Data: data}); err != nil {
 				log.Printf("task %s: emit response text: %v", taskId, err)
 			}
 		}
