@@ -20,6 +20,7 @@ type ConversationRun struct {
 	CreateAt    time.Time              `json:"create_at"`
 	UpdateAt    time.Time              `json:"update_at"`
 	ToolCalls   []ConversationToolCall `json:"tool_calls"`
+	Agents      []ConversationAgent    `json:"agents"`
 }
 
 type ConversationToolCall struct {
@@ -55,7 +56,11 @@ func (s *RunStore) ConversationRuns(ctx context.Context, convID string) ([]Conve
 		for i, r := range records {
 			ids[i] = r.RunID
 			indexes[r.RunID] = i
-			runs = append(runs, ConversationRun{RunID: r.RunID, ConvID: r.ConvID, Goal: r.Goal, Status: r.Status, Result: r.Result, Error: r.Error, FailureType: r.FailureType, Mode: r.Mode, CreateAt: r.CreateAt, UpdateAt: r.UpdateAt, ToolCalls: []ConversationToolCall{}})
+			agents, err := conversationAgents(r)
+			if err != nil {
+				return err
+			}
+			runs = append(runs, ConversationRun{RunID: r.RunID, ConvID: r.ConvID, Goal: r.Goal, Status: r.Status, Result: r.Result, Error: r.Error, FailureType: r.FailureType, Mode: r.Mode, CreateAt: r.CreateAt, UpdateAt: r.UpdateAt, ToolCalls: []ConversationToolCall{}, Agents: agents})
 		}
 		// Query by root run ownership, including every delegated execution instance.
 		var calls []ToolExecution
@@ -65,6 +70,21 @@ func (s *RunStore) ConversationRuns(ctx context.Context, convID string) ([]Conve
 		for _, c := range calls {
 			i := indexes[c.RunID]
 			runs[i].ToolCalls = append(runs[i].ToolCalls, ConversationToolCall{ExecutionID: c.ExecutionID, CallID: c.CallID, Position: c.Position, Name: c.Name, Arguments: c.Arguments, Status: c.Status, Result: c.Result, Error: c.Error, Batch: c.Batch, BatchPosition: c.BatchPosition})
+		}
+		for i := range runs {
+			// 用执行实例精确关联工具；不能按代理名称或 ID 前缀归组。
+			byExecution := make(map[string][]ConversationToolCall)
+			for _, call := range runs[i].ToolCalls {
+				byExecution[call.ExecutionID] = append(byExecution[call.ExecutionID], call)
+			}
+			for j := range runs[i].Agents {
+				agent := &runs[i].Agents[j]
+				for k := range agent.Turns {
+					turn := &agent.Turns[k]
+					turn.ToolCalls = append(turn.ToolCalls, byExecution[turn.ExecutionID]...)
+					agent.ToolCalls = append(agent.ToolCalls, turn.ToolCalls...)
+				}
+			}
 		}
 		return nil
 	})

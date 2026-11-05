@@ -212,6 +212,7 @@ curl -i -X POST 'http://localhost:8080/runs/RUN_ID/interrupt'
       "mode": "react",
       "create_at": "2026-10-31T12:00:00Z",
       "update_at": "2026-10-31T12:01:00Z",
+      "agents": [],
       "tool_calls": [
         {
           "execution_id": "run-id",
@@ -238,3 +239,57 @@ curl -i -X POST 'http://localhost:8080/runs/RUN_ID/interrupt'
 - 已有会话无运行时返回 `200` 和 `runs: []`；运行无工具调用时返回 `tool_calls: []`。
 - 会话不存在返回 `404`；数据库读取失败返回 `500`；未配置会话查询能力返回 `503`。错误响应格式为 `{"error":"..."}`。
 - 查询返回已提交的快照，执行中的最新增量仍以 SSE 为准。
+
+### 多代理历史视图
+
+multi-agent 运行新增 `agents` 数组，包含主代理及全部已保存的委派（包括尚未执行的子代理）。客户端可为每个元素复用相同的代理展示组件，通过 `agent_instance_id` 关联 SSE 中的实时输出，通过 `parent_agent_instance_id` 建立层级。主代理的父身份为 `""`。
+
+| 字段 | 说明 |
+| --- | --- |
+| `agent_instance_id` | 稳定的代理参与实例 ID；同名多次委派分别返回，同一委派的多轮执行归为一个元素。 |
+| `parent_agent_instance_id` | 发起委派的参与实例 ID。 |
+| `agent_name` | 展示名称；新检查点保存入口名称，旧检查点缺少入口名称时为 `""`，不猜测名称。 |
+| `goal`、`completion_criteria` | 该参与实例的任务和验收标准；未保存标准时为 `null`。 |
+| `status` | 检查点确认的 `completed` / `failed`；尚无确认终态时为 `unknown`。它不是实时生命周期状态，不根据父运行终态推断子代理完成、失败或中断。 |
+| `result` | 已确认的最终 ReactResult（含 `status`、`answer`、`Observation`、`CompletionEvidence`）；尚未确认最终结果时为 `null`。 |
+| `error` | 最后一轮已保存的执行错误；无记录时为 `""`。业务失败原因也可能体现在 `result.answer`。 |
+| `tool_calls` | 该参与实例各轮工具记录，字段结构与运行级 `tool_calls` 相同。 |
+| `turns` | 按执行轮次排列的历史，每轮包含 `execution_id`、`result`、`error`、`tool_calls`。轮次结果格式与代理 `result` 相同，未确认的轮次结果为 `null`。 |
+
+例如，子代理的视图如下（所属运行的 `agents` 数组中的一个元素）：
+
+```json
+{
+  "agent_instance_id": "run-id/delegation-2",
+  "parent_agent_instance_id": "run-id/delegation-1",
+  "agent_name": "worker",
+  "goal": "inspect files",
+  "completion_criteria": ["files checked"],
+  "status": "completed",
+  "result": {
+    "status": "completed",
+    "answer": "files checked",
+    "Observation": [],
+    "CompletionEvidence": []
+  },
+  "error": "",
+  "tool_calls": [],
+  "turns": [
+    {
+      "execution_id": "run-id/delegation-2/turn-0",
+      "result": {
+        "status": "completed",
+        "answer": "files checked",
+        "Observation": [],
+        "CompletionEvidence": []
+      },
+      "error": "",
+      "tool_calls": []
+    }
+  ]
+}
+```
+
+`agents` 采用深度优先的委派顺序，父代理先于其子树；兄弟委派按创建顺序返回，不表示并行执行的时间顺序。代理级工具按轮次汇总，轮内沿用运行级工具顺序；运行级 `tool_calls` 继续包含全部工具，客户端不要重复渲染两份记录。无工具或轮次时分别返回 `[]`；非 multi-agent 运行或尚无多代理检查点时返回 `agents: []`。
+
+该视图只包含已提交的回复与工具快照，不包含尚未提交的正文增量、完整思考流或生命周期事件历史，也不暴露原始检查点、委派上下文及继承的会话内容。实时状态和增量仍通过任务 SSE 获取，不改变 Redis 事件保留策略。无需新增数据库表或列。

@@ -153,6 +153,11 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 	}
 	worker := NewWorker[T](r.ctx, agentConfig, r.mcpClientSess)
 	worker.output = r.output
+	// 每个执行实例独立去重；恢复时沿用已登记的调用标识。
+	seenCalls := make(map[string]string)
+	for _, call := range durableState.ToolExecutions {
+		seenCalls[toolInvocationKey(call.ToolName, call.Arguments)] = call.ToolCallId
+	}
 	formatErrors := 0
 	toolCallErrors := 0
 	batchOffset := 0
@@ -220,6 +225,31 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 				return result, nil, validationErr
 			}
 			return result, []AgentProcessorType{EndAgentType}, nil
+		}
+		// 在登记和执行前移除重复项，也覆盖模型同一批返回的重复调用。
+		pending := toolParams[:0]
+		for _, param := range toolParams {
+			args, err := json.Marshal(param.Arguments)
+			if err != nil {
+				return zero, nil, err
+			}
+			if raw, ok := param.Meta["raw_arguments"].(string); ok {
+				args = []byte(raw)
+			}
+			key := toolInvocationKey(param.Name, string(args))
+			id, _ := param.Meta[toolCallIDMetaKey].(string)
+			if original, exists := seenCalls[key]; exists {
+				message := fmt.Sprintf("Tool %q with these arguments was already called (previous call_id=%q). Duplicate call_id=%q was not executed. Refer to the previous call and its result instead of repeating it.", param.Name, original, id)
+				worker.corrections = append(worker.corrections, message)
+				r.publishToolResult(durableState.RunId, &fileContext.ToolResult{ToolName: param.Name, ToolCallId: id, Error: message})
+				continue
+			}
+			seenCalls[key] = id
+			pending = append(pending, param)
+		}
+		toolParams = pending
+		if len(toolParams) == 0 {
+			continue
 		}
 		if durableState.ExecutionID != "" {
 			for position, param := range toolParams {
@@ -551,4 +581,17 @@ func (r *BaseReactProcess[T]) publishControlToolResult(param *mcpSdk.CallToolPar
 		}
 	}
 	r.publishToolResult(rc.DurableState.RunId, result)
+}
+
+// toolInvocationKey 规范化 JSON 对象键顺序与空白，保留数字精度。
+func toolInvocationKey(name, arguments string) string {
+	decoder := json.NewDecoder(strings.NewReader(arguments))
+	decoder.UseNumber()
+	var value any
+	if decoder.Decode(&value) == nil {
+		if canonical, err := json.Marshal(value); err == nil {
+			arguments = string(canonical)
+		}
+	}
+	return name + "\x00" + arguments
 }

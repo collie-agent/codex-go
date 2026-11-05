@@ -50,8 +50,10 @@ type DelegationGraph[Result, Task any] struct {
 }
 
 type DelegationNode[Result, Task any] struct {
-	Turns []*DelegationTurn[Task]
-	Done  *Result
+	// 入口名称无法从子委派反推，随检查点保存以供历史视图展示。
+	AgentName string `json:"agent_name,omitempty"`
+	Turns     []*DelegationTurn[Task]
+	Done      *Result
 }
 
 type DelegationTurn[Task any] struct {

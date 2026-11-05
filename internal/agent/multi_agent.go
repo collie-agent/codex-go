@@ -116,7 +116,7 @@ func (r *multiAgentRun) saveLocked() error {
 	// Persist only each turn's own state, not the conversation inherited at runtime.
 	snapshot := delegationGraph{NextID: r.graphState.NextID, Nodes: make(map[string]*delegationNode, len(r.graphState.Nodes))}
 	for id, node := range r.graphState.Nodes {
-		copyNode := &delegationNode{Done: node.Done}
+		copyNode := &delegationNode{AgentName: node.AgentName, Done: node.Done}
 		for _, turn := range node.Turns {
 			copyTurn := *turn
 			copyTurn.Local = turn.Local.Clone()
@@ -147,6 +147,7 @@ func (r *multiAgentRun) execute(task DelegatedTask, parent AgentID, upstream []D
 			r.graphState.NextID = 1
 		}
 	}
+	node.AgentName = string(task.Worker)
 	if node.Done != nil {
 		result := *node.Done
 		r.checkpointMu.Unlock()

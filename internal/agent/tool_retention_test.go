@@ -16,7 +16,7 @@ import (
 
 func TestReactRetainsCompleteToolHistory(t *testing.T) {
 	workspace := t.TempDir()
-	if err := os.WriteFile(filepath.Join(workspace, "sample.txt"), []byte("sample"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(workspace, "sample.txt"), []byte("first\nsecond\nthird\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	turn := 0
@@ -83,7 +83,7 @@ func TestReactRetainsCompleteToolHistory(t *testing.T) {
 				call("discovery_list_dir", "list_dir", `{"path":"."}`),
 			})
 		case 2, 3, 4:
-			writeObservationResponse(w, []any{call(fmt.Sprintf("read_%d", turn), "read_file", `{"path":"sample.txt"}`)})
+			writeObservationResponse(w, []any{call(fmt.Sprintf("read_%d", turn), "read_file", fmt.Sprintf(`{"path":"sample.txt","offset":%d,"limit":1}`, turn-1))})
 		default:
 			writeObservationResponse(w, []any{observationMessage(`{"status":"completed","answer":"done"}`)})
 		}
