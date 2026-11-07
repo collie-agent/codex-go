@@ -14,6 +14,7 @@ import (
 type AgentConfig struct {
 	Name       string
 	LogLevel   LogLevel
+	LogDir     string
 	Global     *GlobalConfig
 	LLMConfig  *LLMConfig
 	AllowTools map[McpToolName]struct{}
@@ -63,7 +64,7 @@ func cloneAgentConfig(c *AgentConfig) *AgentConfig {
 	if c == nil {
 		return nil
 	}
-	clone := &AgentConfig{NextAgents: append([]string(nil), c.NextAgents...), MultiAgent: c.MultiAgent, Name: c.Name, LogLevel: c.LogLevel, SysPrompt: c.SysPrompt, LLMConfig: nil, AllowTools: make(map[McpToolName]struct{}, len(c.AllowTools))}
+	clone := &AgentConfig{NextAgents: append([]string(nil), c.NextAgents...), MultiAgent: c.MultiAgent, Name: c.Name, LogDir: c.LogDir, LogLevel: c.LogLevel, SysPrompt: c.SysPrompt, LLMConfig: nil, AllowTools: make(map[McpToolName]struct{}, len(c.AllowTools))}
 	// 全局设置由整个运行共享，不参与 agent 独立配置的复制与覆盖。
 	clone.Global = c.Global
 	clone.agentInstructions = slices.Clone(c.agentInstructions)
@@ -162,6 +163,10 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 	// 日志级别沿用现有解析方式；Redis 仅保存到全局配置。
 	for _, cfg := range resolved {
 		cfg.LogLevel = raw.LogLevel
+		cfg.LogDir = raw.LogDir
+		if cfg.LogDir == "" {
+			cfg.LogDir = "logs"
+		}
 	}
 	if raw.Name == "multi-agent" {
 		if err := validateMultiAgent(raw.MultiAgent, raw.Agents); err != nil {
@@ -279,6 +284,7 @@ func rejectNull(node *yaml.Node) error {
 }
 
 type yamlAgentConfig struct {
+	LogDir     string                        `yaml:"log_dir"`
 	Redis      *yamlRedisConfig              `yaml:"redis"`
 	Name       string                        `yaml:"name"`
 	MultiAgent *MultiAgentConfig             `yaml:"multi-agent"`

@@ -49,7 +49,7 @@ func RegisterTools(server *sdk.Server, config Config) error {
 		return fmt.Errorf("workspace: %w", err)
 	}
 	if config.Timeout <= 0 {
-		config.Timeout = 30 * time.Second
+		config.Timeout = 5 * time.Minute
 	}
 	// MCP server 提供全部内置工具；Agent 的允许列表在调用方控制。
 	type readFileArgs struct {

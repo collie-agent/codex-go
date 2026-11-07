@@ -21,6 +21,7 @@ import (
 )
 
 type Options struct {
+	LogDir      string
 	ConfigPath  string
 	Task        string
 	Workspace   string
@@ -129,7 +130,7 @@ func prepareOutput(ctx context.Context, opts Options, loaded *config.AgentConfig
 	live := opts.Output
 	cleanup := func() {}
 	if live == nil {
-		live, cleanup = provider.NewTaskOutputer(loaded.RedisConfig(), loaded.LogLevel, opts.Stderr)
+		live, cleanup = provider.NewTaskOutputer(loaded.RedisConfig(), loaded.LogLevel, opts.Stderr, opts.outputLogDir(loaded))
 	}
 	outputCtx, cancel := context.WithCancelCause(ctx)
 	opts.Output = &cancelOnOutputFailure{next: live, cancel: cancel}
@@ -278,7 +279,7 @@ func emitTaskInfo(ctx context.Context, opts Options, loaded *config.AgentConfig,
 	output := opts.Output
 	if output == nil {
 		var cleanup func()
-		output, cleanup = provider.NewTaskOutputer(loaded.RedisConfig(), loaded.LogLevel, opts.Stderr)
+		output, cleanup = provider.NewTaskOutputer(loaded.RedisConfig(), loaded.LogLevel, opts.Stderr, opts.outputLogDir(loaded))
 		defer cleanup()
 	}
 	modelName := ""
@@ -291,4 +292,12 @@ func emitTaskInfo(ctx context.Context, opts Options, loaded *config.AgentConfig,
 		return err
 	}
 	return output.Emit(ctx, provider.OutputEvent{TaskID: run.RunID, RunID: run.RunID, Kind: provider.OutputTaskInfo, Data: data})
+}
+
+// 命令行覆盖本次运行的配置；新建与恢复共用同一输出目录解析规则。
+func (o Options) outputLogDir(loaded *config.AgentConfig) string {
+	if o.LogDir != "" {
+		return o.LogDir
+	}
+	return loaded.LogDir
 }

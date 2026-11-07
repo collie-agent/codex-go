@@ -274,3 +274,65 @@ func TestCommandExecutorRuntimeDirectoryMustBeDirectory(t *testing.T) {
 		t.Fatalf("expected runtime validation error, got %v", err)
 	}
 }
+
+// The default host policy exposes the complete build toolchain, not just go/bin.
+func TestCommandExecutorDefaultGoRuntime(t *testing.T) {
+	executor, err := mcp.NewCommandExecutor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := executor.Execute(context.Background(), t.TempDir(), "go", []string{"version"})
+	if err != nil || result.ExitCode != 0 || !strings.HasPrefix(result.Stdout, "go version ") {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func TestCommandExecutorUsesHostModuleCacheOffline(t *testing.T) {
+	cache := t.TempDir()
+	moduleDir := filepath.Join(cache, "example.com", "dependency@v1.0.0")
+	if err := os.MkdirAll(moduleDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(moduleDir, "go.mod"), []byte("module example.com/dependency\n\ngo 1.20\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(moduleDir, "dep.go"), []byte("package dependency\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	download := filepath.Join(cache, "cache", "download", "example.com", "dependency", "@v")
+	if err := os.MkdirAll(download, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string]string{
+		"v1.0.0.mod":     "module example.com/dependency\n\ngo 1.20\n",
+		"v1.0.0.ziphash": "h1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+	} {
+		if err := os.WriteFile(filepath.Join(download, name), []byte(data), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("GOMODCACHE", cache)
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "go.mod"), []byte("module example.com/app\n\ngo 1.20\n\nrequire example.com/dependency v1.0.0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := mcp.NewCommandExecutor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := executor.Execute(context.Background(), workspace, "go", []string{"list", "-mod=mod", "example.com/dependency"})
+	if err != nil || result.ExitCode != 0 || result.Stdout != "example.com/dependency\n" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	result, err = executor.Execute(context.Background(), workspace, "python3", []string{"-c", `import os,pathlib
+assert os.environ['GOPROXY'] == 'off'
+p=pathlib.Path(os.environ['GOMODCACHE'])/'write-probe'
+try: p.write_text('bad')
+except PermissionError: pass
+except OSError: pass
+else: raise AssertionError('module cache writable')
+`})
+	if err != nil || result.ExitCode != 0 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}

@@ -18,10 +18,11 @@ import (
 
 // CommandExecutor executes approved entrypoints inside a fresh sandbox.
 type CommandExecutor struct {
-	bwrap   string
-	path    []string
-	mounts  []string
-	runtime []string
+	bwrap      string
+	path       []string
+	mounts     []string
+	runtime    []string
+	goModCache string
 }
 
 // CommandResult retains at most 1 MiB of combined stdout and stderr.
@@ -72,17 +73,50 @@ func NewCommandExecutor(runtimeDirs ...string) (*CommandExecutor, error) {
 	// directories and host-authorized runtime directories, never Workspace.
 	// Every runtime entry is mounted read-only but exposes its full contents.
 	controlledPath := []string{"/usr/bin", "/bin"}
-	controlledPath = append(controlledPath, runtimes...)
-	return &CommandExecutor{bwrap: path, path: controlledPath, mounts: mounts, runtime: runtimes}, nil
+	for _, dir := range runtimes {
+		controlledPath = append(controlledPath, dir, filepath.Join(dir, "bin"))
+	}
+	// Trust the Go distribution selected by the host program GOROOT,
+	// never a go executable discovered through the inherited host PATH.
+	goRoot := runtime.GOROOT()
+	if resolved, err := filepath.EvalSymlinks(goRoot); err == nil && filepath.IsAbs(resolved) {
+		if info, err := os.Stat(filepath.Join(resolved, "bin", "go")); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0111 != 0 {
+			controlledPath = append(controlledPath, filepath.Join(resolved, "bin"))
+			// System mounts already expose distributions installed under /usr.
+			covered := false
+			for _, mount := range mounts {
+				covered = covered || containsDirectory(mount, resolved)
+			}
+			if !covered {
+				mounts = append(mounts, resolved)
+				runtimes = append(runtimes, resolved)
+			}
+		}
+	}
+	// Resolve only the module cache, never expose the whole host GOPATH/HOME.
+	cacheCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cacheCommand := exec.CommandContext(cacheCtx, filepath.Join(goRoot, "bin", "go"), "env", "GOMODCACHE")
+	cacheCommand.Env = append(os.Environ(), "GOTOOLCHAIN=local")
+	var goModCache string
+	if output, err := cacheCommand.Output(); err == nil {
+		candidate := strings.TrimSpace(string(output))
+		if resolved, err := filepath.EvalSymlinks(candidate); err == nil {
+			if validated, err := validateRuntimeDirs([]string{resolved}, mounts); err == nil {
+				goModCache = validated[0]
+			}
+		}
+	}
+	return &CommandExecutor{bwrap: path, path: controlledPath, mounts: mounts, runtime: runtimes, goModCache: goModCache}, nil
 }
 
-// Execute runs at the canonical Workspace root with a 30-second deadline.
+// Execute runs at the canonical Workspace root with a 5-minute deadline.
 // Nonzero command exits are results; startup failures and interruption are errors.
 // Captured output is retained on errors, and interruption wraps ctx.Err().
 func (e *CommandExecutor) Execute(ctx context.Context, workspace, name string, args []string) (CommandResult, error) {
 	// Only entrypoint names are accepted; paths must never bypass controlled resolution.
 	switch name {
-	case "find", "git", "grep", "npm", "poetry", "python", "python3", "rg", "sed", "ts-node", "tsx":
+	case "cargo", "find", "git", "go", "grep", "npm", "poetry", "python", "python3", "rg", "rustc", "sed", "ts-node", "tsx":
 	default:
 		return CommandResult{}, fmt.Errorf("%w: unapproved command %q", ErrCommandParameter, name)
 	}
@@ -140,10 +174,15 @@ func (e *CommandExecutor) Execute(ctx context.Context, workspace, name string, a
 			sandboxArgs = append(sandboxArgs, "--ro-bind", file, file)
 		}
 	}
+	// Keep shared dependencies immutable; build artifacts stay in sandbox cache.
+	if e.goModCache != "" {
+		sandboxArgs = append(sandboxArgs, "--ro-bind", e.goModCache, "/run/go-mod-cache", "--setenv", "GOMODCACHE", "/run/go-mod-cache")
+	}
+	sandboxArgs = append(sandboxArgs, "--setenv", "GOPROXY", "off", "--setenv", "GOSUMDB", "off", "--setenv", "GOTOOLCHAIN", "local")
 	sandboxArgs = append(sandboxArgs, "--bind", root, root, "--chdir", root,
 		"--setenv", "PATH", strings.Join(e.path, ":"), "--setenv", "LANG", "C.UTF-8", "--setenv", "HOME", "/run/home", "--setenv", "XDG_CACHE_HOME", "/run/cache", "--setenv", "TMPDIR", "/tmp", "--", executable)
 	sandboxArgs = append(sandboxArgs, args...)
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	// A dedicated bwrap status descriptor distinguishes sandbox startup failures
 	// from ordinary nonzero command exits without interpreting command stderr.

@@ -46,8 +46,8 @@ type baseResponsesApiClient[T any] struct {
 	stderr          Outputer
 }
 
-// SetOutputer 在运行前配置输出目标；nil 恢复默认 stderr 输出。
-// 自定义目标接收所有正文 delta；默认 stderr 仅在 debug 级别展示 delta。
+// SetOutputer 在运行前配置输出目标；nil 恢复默认日志文件输出。
+// 自定义目标接收所有正文 delta；默认日志文件 仅在 debug 级别展示 delta。
 // 与其他配置方法一样，不应在请求执行期间调用。
 func (c *baseResponsesApiClient[T]) SetOutputer(output Outputer) {
 	if output == nil {
@@ -70,7 +70,7 @@ func (c *baseResponsesApiClient[T]) emitOutput(ctx context.Context, taskID strin
 	if err == nil {
 		output := c.output
 		if output == nil {
-			// 默认 stderr 只在 debug 级别展示正文增量，避免流式内容刷屏。
+			// 默认日志文件 只在 debug 级别展示正文增量，避免流式内容刷屏。
 			if isDeltaOutput(kind) && c.logLevel != config.DebugLogLevel {
 				return
 			}
@@ -79,7 +79,7 @@ func (c *baseResponsesApiClient[T]) emitOutput(ctx context.Context, taskID strin
 		err = output.Emit(ctx, OutputEvent{TaskID: taskID, RunID: taskID, Label: c.contextLogLabel, Kind: kind, Data: encoded})
 	}
 	if err != nil {
-		log.Printf("task %s: emit output kind=%s: %v", taskID, kind, err)
+		log.Printf("[INFO] task %s: emit output kind=%s: %v", taskID, kind, err)
 	}
 }
 
@@ -352,11 +352,11 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 	if err != nil {
 		var parseErr *OutputParseError
 		if errors.As(err, &parseErr) {
-			log.Printf("task %s: [%s] LLM output format error: %v; output=%q", taskId, c.contextLogLabel, parseErr.Err, parseErr.Output)
+			log.Printf("[ERROR] task %s: [%s] LLM output format error: %v; output=%q", taskId, c.contextLogLabel, parseErr.Err, parseErr.Output)
 			return result, nil, "", fmt.Errorf("task %s: %w", taskId, parseErr)
 		}
 		// 请求错误可能被上层处理，仍需在 error 级别保留诊断。
-		defer func() { log.Printf("task %s: [%s] LLM request failed: %v", taskId, c.contextLogLabel, runErr) }()
+		defer func() { log.Printf("[ERROR] task %s: [%s] LLM request failed: %v", taskId, c.contextLogLabel, runErr) }()
 		// SDK 的 Error() 只含 HTTP 状态；补充服务端诊断，保留原始错误链。
 		var apiErr *openai.Error
 		if errors.As(err, &apiErr) {
@@ -377,7 +377,7 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 	if response.Status != responses.ResponseStatusCompleted {
 		err := fmt.Errorf("task %s: response status %q (error: %s, incomplete reason: %s)",
 			taskId, response.Status, response.Error.Message, response.IncompleteDetails.Reason)
-		log.Printf("task %s: [%s] LLM response failed: %v", taskId, c.contextLogLabel, err)
+		log.Printf("[ERROR] task %s: [%s] LLM response failed: %v", taskId, c.contextLogLabel, err)
 		return result, nil, "", err
 	}
 	var toolCalls []responses.ResponseFunctionToolCall
@@ -400,7 +400,7 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 		if c.output == nil || logger != c.stderr {
 			data, _ := json.Marshal(TextOutput{Text: text})
 			if err := logger.Emit(ctx, OutputEvent{TaskID: taskId, RunID: taskId, Label: c.contextLogLabel, Kind: OutputText, Data: data}); err != nil {
-				log.Printf("task %s: emit response text: %v", taskId, err)
+				log.Printf("[INFO] task %s: emit response text: %v", taskId, err)
 			}
 		}
 	}
@@ -446,7 +446,7 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 	}
 	if err := outputParser.Parse(text, &result); err != nil {
 		// 格式错误可能被上层纠错重试消化，必须在此记录，error 级别也保留诊断。
-		log.Printf("task %s: [%s] LLM output format error: %v; output=%q", taskId, c.contextLogLabel, err, response.OutputText())
+		log.Printf("[ERROR] task %s: [%s] LLM output format error: %v; output=%q", taskId, c.contextLogLabel, err, response.OutputText())
 		var zero T
 		return zero, nil, "", fmt.Errorf("task %s: %w", taskId, &OutputParseError{Output: response.OutputText(), Err: err})
 	}

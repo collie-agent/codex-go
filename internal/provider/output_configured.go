@@ -11,7 +11,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// NewConfiguredOutputer 在 Redis 启用时组合 stderr 和 Stream 输出。
+// NewConfiguredOutputer 在 Redis 启用时组合日志文件和 Stream 输出。
 // 返回的 cleanup 由创建者在运行结束后调用，复用期间 Emit 支持并发。
 // 未配置 Redis 时返回 nil，保留 provider 原有的默认输出行为。
 func NewConfiguredOutputer(cfg *config.RedisConfig, level config.LogLevel) (Outputer, func()) {
@@ -51,12 +51,12 @@ func (o *configuredOutputer) stderrVisible(kind OutputKind) bool {
 	return !isDeltaOutput(kind) || o.level == config.DebugLogLevel
 }
 
-// NewTaskOutputer directs task metadata to the supplied log writer and configured stream.
-func NewTaskOutputer(cfg *config.RedisConfig, level config.LogLevel, writer io.Writer) (Outputer, func()) {
+// NewTaskOutputer 将事件写入注入的 writer 或日志目录，并按配置发送到 Stream。
+func NewTaskOutputer(cfg *config.RedisConfig, level config.LogLevel, writer io.Writer, directories ...string) (Outputer, func()) {
 	output, cleanup := NewConfiguredOutputer(cfg, level)
 	if output == nil {
-		return NewStderrOutputer(writer), cleanup
+		return NewStderrOutputer(writer, directories...), cleanup
 	}
-	output.(*configuredOutputer).stderr = NewStderrOutputer(writer)
+	output.(*configuredOutputer).stderr = NewStderrOutputer(writer, directories...)
 	return output, cleanup
 }

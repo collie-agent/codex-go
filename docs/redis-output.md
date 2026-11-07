@@ -1,6 +1,6 @@
 # Redis Stream 输出
 
-在 agent YAML 顶层配置 `redis` 即启用 Stream 输出，同时保留 stderr 日志：
+在 agent YAML 顶层配置 `redis` 即启用 Stream 输出，同时保留 codex.log 日志：
 
 ```yaml
 name: react
@@ -17,7 +17,7 @@ base:
     stream: true
 ```
 
-`addr` 必填，格式为 `host:port`；`db` 默认为 0。密码可以使用 `password` 或 `password_env`，两者互斥。省略 `redis` 时不建立 Redis 连接。Redis 是全局配置，只能在 YAML 顶层声明，不能放在 `base` 或 `agents.<name>` 中。规划器和各代理共享同一份全局设置；观察器的输出仅打印到 stderr，不写入 Stream。
+`addr` 必填，格式为 `host:port`；`db` 默认为 0。密码可以使用 `password` 或 `password_env`，两者互斥。省略 `redis` 时不建立 Redis 连接。Redis 是全局配置，只能在 YAML 顶层声明，不能放在 `base` 或 `agents.<name>` 中。规划器和各代理共享同一份全局设置；观察器的输出仅打印到 codex.log，不写入 Stream。
 
 每个 task 写入 `codex-go-resp-stream-{task_id}`。通过 `codex-consumer` 消费时，该消息及其所有代理的输出统一使用消息中的 `TaskId`，数据库中的运行 ID 独立生成。输出事件只写入 Redis Stream，不写入 MySQL；Redis 写入失败时返回错误。每条记录包含 Redis 自动生成的 entry ID，以及以下字段：
 
@@ -73,7 +73,7 @@ redis-cli XREAD BLOCK 5000 STREAMS codex-go-resp-stream-your-task-id 0-0
 当 `stream: true` 时，`answer_delta` 在模型生成过程中提取 JSON 的根级
 `answer` / `result.answer`，或 line protocol 根块 / 直接 RESULT 子块的
 `ANSWER` 字符串。字段名、转义和 Unicode 代理对跨 chunk 时会等待足够输入，
-只发送已解码的内容。stderr 仅在 `log_level: debug` 时打印 `LLM answer delta=...`，
+只发送已解码的内容。codex.log 仅在 `log_level: debug` 时打印 `LLM answer delta=...`，
 其他级别只写入 Stream，避免流式内容刷屏。
 同时保留原始 `text_delta`，不发送完整 `text` 事件；同一轮响应中两类片段与 `text` 互斥。
 
@@ -87,7 +87,7 @@ redis-cli XREAD BLOCK 5000 STREAMS codex-go-resp-stream-your-task-id 0-0
 这些片段是当前模型轮次的临时内容，不代表任务已成功：完整响应仍需解析和业务校验，
 响应格式校验失败、混合最终结果与工具调用被拒绝、请求失败或流中断时，若本次请求已发送片段，
 会在返回错误及后续纠错重试之前发送 `output_reset`，并在所有日志级别（包括 `error`）
-打印撤回的字节数到 stderr。消费端必须处理该事件：按
+打印撤回的字节数到 codex.log。消费端必须处理该事件：按
 `run_id + agent_instance_id` 分别维护各代理的正文，对 `text_delta` 缓冲删除末尾
 `text_bytes` 个 **UTF-8 字节**，对 `answer_delta` 缓冲删除末尾 `answer_bytes` 个
 UTF-8 字节；仅撤回失败请求的内容，保留此前轮次。JavaScript 字符串长度按 UTF-16

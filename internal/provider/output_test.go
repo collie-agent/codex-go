@@ -25,7 +25,14 @@ func withoutLogTime(t *testing.T, output string) string {
 	if _, err := time.ParseInLocation(layout, output[:len(layout)], time.Local); err != nil {
 		t.Fatalf("invalid log timestamp: %q: %v", output, err)
 	}
-	return output[len(layout)+1:]
+	body := output[len(layout)+1:]
+	for _, level := range []string{"[INFO] ", "[ERROR] "} {
+		if strings.HasPrefix(body, level) {
+			return strings.TrimPrefix(body, level)
+		}
+	}
+	t.Fatalf("missing log level: %q", output)
+	return ""
 }
 
 type failingWriter struct{ err error }
@@ -42,30 +49,19 @@ func TestStderrOutputerWriteError(t *testing.T) {
 	}
 }
 
-func TestStderrOutputerDefaultsToStderr(t *testing.T) {
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r.Close()
-	defer w.Close()
-	previous := os.Stderr
-	os.Stderr = w
-	defer func() { os.Stderr = previous }()
+func TestStderrOutputerDefaultsToLogFile(t *testing.T) {
+	t.Chdir(t.TempDir())
 	if err := provider.NewStderrOutputer(nil).Emit(context.Background(), provider.OutputEvent{
 		TaskID: "default", Kind: provider.OutputText, Data: json.RawMessage(`{"text":"hello"}`),
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-	data, err := io.ReadAll(r)
+	data, err := os.ReadFile("logs/codex.log")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want := "task default: LLM response text=hello\n"; withoutLogTime(t, string(data)) != want {
-		t.Fatalf("stderr = %q, want %q", data, want)
+		t.Fatalf("logs = %q, want %q", data, want)
 	}
 }
 

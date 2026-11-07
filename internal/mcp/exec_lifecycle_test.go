@@ -140,15 +140,15 @@ func TestExecuteKeepsCallsIndependent(t *testing.T) {
 	}
 }
 
-func TestExecuteUsesDefaultThirtySecondTimeout(t *testing.T) {
+func TestExecuteCanRunBeyondThirtySeconds(t *testing.T) {
 	executor := newLifecycleExecutor(t)
 	started := time.Now()
 	result, err := executor.Execute(context.Background(), t.TempDir(), "python3", []string{"-u", "-c", "print('started'); import time; time.sleep(35)"})
-	if !errors.Is(err, context.DeadlineExceeded) || result.Stdout != "started\n" {
+	if err != nil || result.ExitCode != 0 || result.Stdout != "started\n" {
 		t.Fatalf("unexpected default timeout result: result=%+v err=%v", result, err)
 	}
-	if elapsed := time.Since(started); elapsed < 29*time.Second || elapsed > 34*time.Second {
-		t.Fatalf("default timeout fired at %s", elapsed)
+	if elapsed := time.Since(started); elapsed < 35*time.Second || elapsed > 45*time.Second {
+		t.Fatalf("command completed at %s", elapsed)
 	}
 }
 

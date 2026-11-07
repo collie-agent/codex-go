@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +15,7 @@ import (
 	"github.com/collie-agent/codex-go/internal/application"
 	"github.com/collie-agent/codex-go/internal/config"
 	"github.com/collie-agent/codex-go/internal/entity"
+	"github.com/collie-agent/codex-go/internal/logging"
 	"github.com/collie-agent/codex-go/internal/provider"
 	"github.com/collie-agent/codex-go/internal/rdb"
 	"github.com/redis/go-redis/v9"
@@ -37,12 +37,20 @@ func RunWithConcurrency(ctx context.Context, opts application.Options, concurren
 	if opts.Timeout <= 0 {
 		return fmt.Errorf("--timeout must be positive")
 	}
-	if opts.Stderr == nil {
-		opts.Stderr = os.Stderr
-	}
 	loaded, err := config.LoadAgentConfig(opts.ConfigPath)
 	if err != nil {
 		return err
+	}
+	if opts.Stderr == nil {
+		dir := opts.LogDir
+		if dir == "" {
+			dir = loaded.LogDir
+		}
+		writer := logging.FileWriter{Directory: dir}
+		if _, err := writer.Write(nil); err != nil {
+			return fmt.Errorf("open consumer log: %w", err)
+		}
+		opts.Stderr = writer
 	}
 	cfg := loaded.RedisConfig()
 	if cfg == nil {
@@ -101,6 +109,7 @@ func (w *lockedWriter) Write(p []byte) (int, error) {
 }
 
 func consume(ctx context.Context, client *redis.Client, opts application.Options) error {
+	logger := logging.NewLogger(opts.Stderr)
 	for ctx.Err() == nil {
 		// 有限阻塞让空队列在取消后也能及时退出，避免 BLPOP 0 永久占用连接。
 		values, err := client.BLPop(ctx, time.Second, rdb.TASK_QUEUE_NAME).Result()
@@ -115,11 +124,11 @@ func consume(ctx context.Context, client *redis.Client, opts application.Options
 		}
 		var message entity.TaskMessage
 		if err := json.Unmarshal([]byte(values[1]), &message); err != nil {
-			fmt.Fprintf(opts.Stderr, "consumer: invalid task message: %v\n", err)
+			logger.Printf("[ERROR] consumer: invalid task message: %v\n", err)
 			continue
 		}
 		if !message.ValidInput() || strings.TrimSpace(message.TaskId) == "" {
-			fmt.Fprintln(opts.Stderr, "consumer: invalid task message: TaskId and either Input or RunId are required")
+			logger.Print("[ERROR] consumer: invalid task message: TaskId and either Input or RunId are required")
 			continue
 		}
 		runID := message.RunId
@@ -150,7 +159,7 @@ func consume(ctx context.Context, client *redis.Client, opts application.Options
 		interrupted := errors.Is(executeErr, application.ErrInterrupted) && !errors.As(executeErr, &saveErr)
 		if executeErr != nil {
 			err := executeErr
-			fmt.Fprintf(opts.Stderr, "consumer: task_id=%q failed: %v\n", message.TaskId, err)
+			logger.Printf("[ERROR] consumer: task_id=%q failed: %v\n", message.TaskId, err)
 		}
 		// 应用层仅在业务失败结果成功保存后返回结果；恢复终态失败也遵循此约定。
 		businessFailed := hasBusinessFailure(results)
@@ -167,10 +176,10 @@ func consume(ctx context.Context, client *redis.Client, opts application.Options
 			err := output.Emit(publishCtx, provider.OutputEvent{TaskID: message.TaskId, RunID: runID, Kind: provider.OutputKind(eventType), Data: json.RawMessage(`{}`)})
 			cancel()
 			if err != nil {
-				fmt.Fprintf(opts.Stderr, "consumer: task_id=%q publish %s failed: %v\n", message.TaskId, eventType, err)
+				logger.Printf("[ERROR] consumer: task_id=%q publish %s failed: %v\n", message.TaskId, eventType, err)
 			}
 			if executeErr == nil {
-				fmt.Fprintf(opts.Stderr, "consumer: task_id=%q completed\n", message.TaskId)
+				logger.Printf("[INFO] consumer: task_id=%q completed\n", message.TaskId)
 			}
 		}
 	}

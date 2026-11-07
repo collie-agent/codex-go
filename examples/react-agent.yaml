@@ -1,4 +1,6 @@
 name: react
+# Provider 日志目录，默认 ./logs；命令行 --log-dir 可覆盖。
+# log_dir: ./logs
 # debug 额外显示流式文本片段；info 显示上下文和工具结果；error 仍显示工具调用和完整响应文本。
 log_level: info
 # 可选 Redis Stream 输出，格式说明见 docs/redis-output.md。

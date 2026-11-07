@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"sort"
 	"strings"
 
@@ -102,7 +101,7 @@ func (w *Worker[T]) Run(modelContext fileContext.Contexter) (result T, text stri
 		for _, call := range toolCalls {
 			data, _ := json.Marshal(provider.ToolResultOutput{Name: call.Name, CallID: call.CallID, Error: "tool batch was not executed: " + runErr.Error()})
 			if err := output.Emit(w.ctx, provider.OutputEvent{TaskID: request.RunID, Label: request.LogLabel, Kind: provider.OutputToolError, Data: data}); err != nil {
-				log.Printf("task %s: emit rejected tool error: %v", request.RunID, err)
+				log.Printf("[ERROR] task %s: emit rejected tool error: %v", request.RunID, err)
 			}
 		}
 	}()
@@ -112,7 +111,7 @@ func (w *Worker[T]) Run(modelContext fileContext.Contexter) (result T, text stri
 	}
 	// This is the assistant's visible response text for the ReAct turn, not hidden reasoning.
 	if w.agentConfig.LogLevel.InfoEnabled() {
-		fmt.Fprintf(os.Stderr, "task %s: assistant output=%s\n", request.RunID, assistantOutput)
+		log.Printf("[INFO] task %s: assistant output=%s", request.RunID, assistantOutput)
 	}
 	var toolParams []*mcpSdk.CallToolParams
 	if len(toolCalls) > 0 {

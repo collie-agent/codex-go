@@ -25,6 +25,58 @@ func TestCommandExecutorRejectsUnapprovedEntrypoints(t *testing.T) {
 	}
 }
 
+func TestCommandExecutorFindsGoInRuntimeBin(t *testing.T) {
+	runtimeDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(runtimeDir, "bin"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimeDir, "bin", "go"), []byte("#!/bin/sh\nprintf go-runtime"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := mcp.NewCommandExecutor(runtimeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := executor.Execute(context.Background(), t.TempDir(), "go", nil)
+	if err != nil || result.ExitCode != 0 || result.Stdout != "go-runtime" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func TestCommandExecutorAllowsGo(t *testing.T) {
+	runtimeDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(runtimeDir, "go"), []byte("#!/bin/sh\nprintf go-ok"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := mcp.NewCommandExecutor(runtimeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := executor.Execute(context.Background(), t.TempDir(), "go", nil)
+	if err != nil || result.ExitCode != 0 || result.Stdout != "go-ok" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func TestCommandExecutorAllowsRust(t *testing.T) {
+	for _, name := range []string{"cargo", "rustc"} {
+		t.Run(name, func(t *testing.T) {
+			runtimeDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(runtimeDir, name), []byte("#!/bin/sh\nprintf rust-ok"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			executor, err := mcp.NewCommandExecutor(runtimeDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := executor.Execute(context.Background(), t.TempDir(), name, nil)
+			if err != nil || result.ExitCode != 0 || result.Stdout != "rust-ok" {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+		})
+	}
+}
+
 func TestCommandExecutorWorkspaceReadWrite(t *testing.T) {
 	executor, err := mcp.NewCommandExecutor()
 	if err != nil {
@@ -132,7 +184,8 @@ for p in [sys.argv[2], 'outside']:
  else: raise AssertionError('host secret visible')
 for key in ['SANDBOX_SECRET', 'SSH_AUTH_SOCK', 'HTTPS_PROXY']:
  assert key not in os.environ, key
-assert os.environ['PATH'] == '/usr/bin:/bin'
+assert os.environ['PATH'].split(':')[:2] == ['/usr/bin', '/bin']
+assert sys.argv[1] not in os.environ['PATH'].split(':')
 assert pathlib.Path(os.environ['HOME']).is_dir()
 assert not list(pathlib.Path(os.environ['HOME']).iterdir())
 for fd in range(3, 32):

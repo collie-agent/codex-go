@@ -237,17 +237,10 @@ func TestResponsesOutputFailurePreservesResultWithoutRetry(t *testing.T) {
 	}
 }
 
-func TestResponsesDefaultOutputUsesStderr(t *testing.T) {
+func TestResponsesDefaultOutputUsesLogFile(t *testing.T) {
 	for _, reset := range []bool{false, true} {
 		t.Run(fmt.Sprint(reset), func(t *testing.T) {
-			file, err := os.CreateTemp(t.TempDir(), "stderr")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer file.Close()
-			previous := os.Stderr
-			os.Stderr = file
-			defer func() { os.Stderr = previous }()
+			t.Chdir(t.TempDir())
 			client := newOutputTestClient(t, outputResponse, false)
 			var output recordedOutput
 			if reset {
@@ -257,12 +250,12 @@ func TestResponsesDefaultOutputUsesStderr(t *testing.T) {
 			if _, _, _, err := client.RunWithToolMessages(context.Background(), "output-task", "inspect", nil, nil); err != nil {
 				t.Fatal(err)
 			}
-			data, err := os.ReadFile(file.Name())
+			data, err := os.ReadFile("logs/codex.log")
 			if err != nil {
 				t.Fatal(err)
 			}
 			if len(output.events) != 0 || strings.Count(string(data), "LLM usage") != 1 || strings.Count(string(data), "LLM response text=") != 1 {
-				t.Fatalf("default stderr=%s replaced events=%v", data, output.events)
+				t.Fatalf("default logs=%s replaced events=%v", data, output.events)
 			}
 		})
 	}

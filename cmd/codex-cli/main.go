@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/collie-agent/codex-go/internal/agent"
 	"github.com/collie-agent/codex-go/internal/application"
+	"github.com/collie-agent/codex-go/internal/logging"
 )
 
 func main() {
@@ -21,7 +23,8 @@ func main() {
 		flag.PrintDefaults()
 	}
 	workspace := flag.String("workspace", "", "workspace directory (required for new runs; optional when resuming)")
-	timeout := flag.Duration("timeout", 30*time.Second, "tool command timeout")
+	timeout := flag.Duration("timeout", 5*time.Minute, "tool command timeout")
+	logDir := flag.String("log-dir", "", "output log directory (overrides YAML log_dir; default ./logs)")
 	configPath := flag.String("config", "", "YAML agent configuration (required)")
 	convID := flag.String("conv-id", "", "existing conversation ID (creates a conversation when omitted)")
 	task := flag.String("task", "", "agent task (required)")
@@ -33,13 +36,17 @@ func main() {
 		runtimeDirs = append(runtimeDirs, dir)
 		return nil
 	})
-	flag.Parse()
+	logging.ParseFlags()
+	if err := logging.Setup(*logDir, *configPath); err != nil {
+		log.Printf("[ERROR] %v", err)
+		os.Exit(1)
+	}
 	if *configPath == "" || (*runID == "" && *workspace == "") || *timeout <= 0 || (*runID == "" && strings.TrimSpace(*task) == "") || (*runID != "" && strings.TrimSpace(*task) != "") {
-		fmt.Fprintln(os.Stderr, "--config and either --task with --workspace or --run-id are required (--task and --run-id are mutually exclusive); --timeout must be positive")
+		log.Print("[ERROR] --config and either --task with --workspace or --run-id are required (--task and --run-id are mutually exclusive); --timeout must be positive")
 		os.Exit(2)
 	}
 	if *mode != "" && *mode != "react" && *mode != "plan-execute" && *mode != "multi-agent" {
-		fmt.Fprintf(os.Stderr, "unsupported mode %q: expected react, plan-execute or multi-agent\n", *mode)
+		log.Printf("[ERROR] unsupported mode %q: expected react, plan-execute or multi-agent", *mode)
 		os.Exit(2)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -58,28 +65,28 @@ func main() {
 	// 启动时扫描一次；新建和恢复运行共用索引，不在每轮模型请求时读取磁盘。
 	skills, err := agent.LoadSkills()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		log.Printf("[ERROR] %v", err)
 		os.Exit(1)
 	}
 	var results []agent.ReactResult
 	if *runID != "" {
-		results, err = application.Resume(ctx, application.Options{ConfigPath: *configPath, RunID: *runID, Workspace: *workspace, Mode: *mode, MCPCommand: *mcpCommand, Timeout: *timeout, RuntimeDirs: runtimeDirs, Skills: skills, Stderr: os.Stderr, Interrupt: interrupt})
+		results, err = application.Resume(ctx, application.Options{ConfigPath: *configPath, RunID: *runID, Workspace: *workspace, Mode: *mode, MCPCommand: *mcpCommand, Timeout: *timeout, RuntimeDirs: runtimeDirs, Skills: skills, LogDir: *logDir, Interrupt: interrupt})
 	} else {
-		results, err = application.Run(ctx, application.Options{ConfigPath: *configPath, Task: *task, Workspace: *workspace, ConvID: *convID, Mode: *mode, MCPCommand: *mcpCommand, Timeout: *timeout, RuntimeDirs: runtimeDirs, Skills: skills, Stderr: os.Stderr, Interrupt: interrupt})
+		results, err = application.Run(ctx, application.Options{ConfigPath: *configPath, Task: *task, Workspace: *workspace, ConvID: *convID, Mode: *mode, MCPCommand: *mcpCommand, Timeout: *timeout, RuntimeDirs: runtimeDirs, Skills: skills, LogDir: *logDir, Interrupt: interrupt})
 	}
 	if err != nil {
 		if errors.Is(err, application.ErrInterrupted) {
 			var saveErr *application.InterruptPersistenceError
 			if errors.As(err, &saveErr) {
-				fmt.Fprintln(os.Stderr, "interrupted state could not be saved")
+				log.Print("[ERROR] interrupted state could not be saved")
 			} else {
-				fmt.Fprintln(os.Stderr, "interrupted state saved")
+				log.Print("[INFO] interrupted state saved")
 			}
 		}
-		fmt.Fprintln(os.Stderr, err)
+		log.Printf("[ERROR] %v", err)
 		os.Exit(1)
 	}
 	for _, result := range results {
-		fmt.Printf("final answer: %s\n", result.Answer)
+		log.Printf("[INFO] final answer: %s", result.Answer)
 	}
 }

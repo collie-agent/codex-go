@@ -52,7 +52,17 @@ func TestAgentCommandsRequireDatabase(t *testing.T) {
 	for _, binary := range buildCommands(t) {
 		cmd := exec.Command(binary, "--config", configFile(t, "http://127.0.0.1:1"), "--workspace", t.TempDir(), "--task", "inspect")
 		cmd.Env = append(os.Environ(), "CODEX_MYSQL_URL=")
+		dir := t.TempDir()
+		cmd.Args = append(cmd.Args, "--log-dir", dir)
 		output, err := cmd.CombinedOutput()
+		data, readErr := os.ReadFile(filepath.Join(dir, "codex.log"))
+		if readErr != nil {
+			t.Fatalf("read command log: %v; output=%s", readErr, output)
+		}
+		if len(output) != 0 {
+			t.Fatalf("unexpected console diagnostics: %s", output)
+		}
+		output = data
 		if err == nil || !strings.Contains(string(output), "CODEX_MYSQL_URL is required") {
 			t.Fatalf("output=%s, err=%v", output, err)
 		}
@@ -87,10 +97,11 @@ func TestAgentCommandsPersistSuccessfulRuns(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
+		err, logs := runLoggedCommand(t, cmd)
+		if err != nil {
 			t.Fatalf("run: %v: %s", err, &stderr)
 		}
-		ids := regexp.MustCompile(`run_id=([a-f0-9]+) conv_id=([a-f0-9]+)`).FindStringSubmatch(stderr.String())
+		ids := regexp.MustCompile(`run_id=([a-f0-9]+) conv_id=([a-f0-9]+)`).FindStringSubmatch(logs)
 		if len(ids) != 3 {
 			t.Fatalf("missing IDs: %s", &stderr)
 		}
@@ -102,7 +113,7 @@ func TestAgentCommandsPersistSuccessfulRuns(t *testing.T) {
 		if err := json.Unmarshal(saved.Result, &result); err != nil {
 			t.Fatal(err)
 		}
-		if stdout.String() != "final answer: done\n" || saved.Status != "completed" || saved.ConvID != ids[2] || saved.Goal != "inspect" || saved.Mode != "react" || saved.Workspace != workspace || result.Answer != "done" || len(result.Observation) != 1 || result.Observation[0] != "found README" || len(result.CompletionEvidence) != 1 || result.CompletionEvidence[0] != "read README" {
+		if (stdout.Len() != 0 || !strings.Contains(logs, "[INFO] final answer: done\n")) || saved.Status != "completed" || saved.ConvID != ids[2] || saved.Goal != "inspect" || saved.Mode != "react" || saved.Workspace != workspace || result.Answer != "done" || len(result.Observation) != 1 || result.Observation[0] != "found README" || len(result.CompletionEvidence) != 1 || result.CompletionEvidence[0] != "read README" {
 			t.Fatalf("stdout=%q, run=%+v, result=%+v", &stdout, saved, result)
 		}
 	}
@@ -281,8 +292,8 @@ func TestCheckpointFailureStopsToolsAndSuppressesUnsavedAnswers(t *testing.T) {
 				var stdout, stderr bytes.Buffer
 				cmd.Stdout = &stdout
 				cmd.Stderr = &stderr
-				err = cmd.Run()
-				if err == nil || stdout.Len() != 0 || !strings.Contains(stderr.String(), "checkpoint unavailable") {
+				err, logs := runLoggedCommand(t, cmd)
+				if err == nil || stdout.Len() != 0 || !strings.Contains(logs, "checkpoint unavailable") {
 					t.Fatalf("err=%v stdout=%s stderr=%s", err, &stdout, &stderr)
 				}
 				if _, err := os.Stat(filepath.Join(workspace, "marker.txt")); !os.IsNotExist(err) {
@@ -335,10 +346,11 @@ func TestAgentCommandsRetainFailedRunsInExistingConversation(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
-		if err := cmd.Run(); err == nil {
+		err, logs := runLoggedCommand(t, cmd)
+		if err == nil {
 			t.Fatal("failed task exited successfully")
 		}
-		ids := regexp.MustCompile(`run_id=([a-f0-9]+) conv_id=([a-f0-9]+)`).FindStringSubmatch(stderr.String())
+		ids := regexp.MustCompile(`run_id=([a-f0-9]+) conv_id=([a-f0-9]+)`).FindStringSubmatch(logs)
 		if len(ids) != 3 || ids[2] != parent.ConvID || seen[ids[1]] {
 			t.Fatalf("incorrect IDs: %s", &stderr)
 		}
@@ -385,10 +397,11 @@ func TestAgentCommandsResumePlanFinalizesSavedLastStepWithoutModelCalls(t *testi
 		cmd.Env = append(os.Environ(), "CODEX_MYSQL_URL="+os.Getenv("CODEX_TEST_MYSQL_URL"))
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
-		if err := cmd.Run(); err != nil {
+		err, logs := runLoggedCommand(t, cmd)
+		if err != nil {
 			t.Fatalf("entry %d resume: %v: %s", i, err, &stderr)
 		}
-		if stdout.String() != "final answer: already saved\n" {
+		if stdout.Len() != 0 || !strings.Contains(logs, "[INFO] final answer: already saved\n") {
 			t.Fatalf("entry %d output=%q, want saved answer", i, &stdout)
 		}
 	}
@@ -446,10 +459,11 @@ func TestAgentCommandsResumeSavedPlanAndSkipCompletedSteps(t *testing.T) {
 		cmd.Env = append(os.Environ(), "CODEX_MYSQL_URL="+os.Getenv("CODEX_TEST_MYSQL_URL"))
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
-		if err := cmd.Run(); err != nil {
+		err, logs := runLoggedCommand(t, cmd)
+		if err != nil {
 			t.Fatalf("entry %d resume: %v: %s", i, err, &stderr)
 		}
-		if stdout.String() != "final answer: report finished\n" {
+		if stdout.Len() != 0 || !strings.Contains(logs, "[INFO] final answer: report finished\n") {
 			t.Fatalf("entry %d output=%q, want resumed answer", i, &stdout)
 		}
 		saved, err := store.Get(context.Background(), run.RunID)
@@ -509,10 +523,11 @@ func TestAgentCommandsResumeFailedReactRunAndReplayCompletedResult(t *testing.T)
 			cmd.Env = append(os.Environ(), "CODEX_MYSQL_URL="+os.Getenv("CODEX_TEST_MYSQL_URL"))
 			var stdout, stderr bytes.Buffer
 			cmd.Stdout, cmd.Stderr = &stdout, &stderr
-			if err := cmd.Run(); err != nil {
+			err, logs := runLoggedCommand(t, cmd)
+			if err != nil {
 				t.Fatalf("entry %d attempt %d resume: %v: %s", i, attempt, err, &stderr)
 			}
-			if stdout.String() != "final answer: resumed result\n" {
+			if stdout.Len() != 0 || !strings.Contains(logs, "[INFO] final answer: resumed result\n") {
 				t.Fatalf("entry %d attempt %d output=%q", i, attempt, &stdout)
 			}
 		}
@@ -580,7 +595,8 @@ func TestAgentCommandsRejectUnavailableOrUnmigratedDatabase(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			cmd.Stdout = &stdout
 			cmd.Stderr = &stderr
-			if err := cmd.Run(); err == nil || stdout.Len() != 0 || !strings.Contains(stderr.String(), tc.want) || strings.Contains(stderr.String(), "run_id=") {
+			err, logs := runLoggedCommand(t, cmd)
+			if err == nil || stdout.Len() != 0 || !strings.Contains(logs, tc.want) || strings.Contains(logs, "run_id=") {
 				t.Fatalf("unexpected database failure: stdout=%s, stderr=%s, err=%v", &stdout, &stderr, err)
 			}
 		}
@@ -604,4 +620,20 @@ func TestMCPCommandsDoNotRequireDatabase(t *testing.T) {
 			t.Fatalf("MCP required database: %v: %s", err, output)
 		}
 	}
+}
+
+// 日志是命令的公开输出契约；终端缓冲区只用于检查没有诊断泄漏到协议通道。
+func runLoggedCommand(t *testing.T, cmd *exec.Cmd) (error, string) {
+	t.Helper()
+	dir := t.TempDir()
+	cmd.Args = append(cmd.Args, "--log-dir", dir)
+	err := cmd.Run()
+	data, readErr := os.ReadFile(filepath.Join(dir, "codex.log"))
+	if readErr != nil {
+		t.Fatalf("read command log: %v (command error: %v)", readErr, err)
+	}
+	if buffer, ok := cmd.Stderr.(*bytes.Buffer); ok && buffer.Len() != 0 {
+		t.Fatalf("unexpected stderr: %s", buffer)
+	}
+	return err, string(data)
 }

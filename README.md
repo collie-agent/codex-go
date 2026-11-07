@@ -82,7 +82,9 @@ ReAct 通过 MCP stdio 连接独立工具进程，从服务获取工具定义，
 
 文件工具以 Workspace 为路径边界，校验相对路径和符号链接，拒绝越界访问。`exec` 在 Linux 上使用 bwrap 与 seccomp 隔离整个命令进程树：工作目录可读写，必要运行时目录只读挂载，临时目录独立，默认禁网，不继承宿主 HOME 或凭据环境。入口命令受白名单约束，允许的构建工具仍可启动项目脚本及子进程。
 
-seccomp 进一步限制命名 Unix socket、io_uring 和非本机 ABI；隔离不可用时拒绝执行，不回退宿主。命令退出、超时或取消时清理整个沙箱。当前限制执行时间和输出量，`exec` 最长 30 秒、两路输出合计最多 1 MiB；没有 CPU、内存、进程数或磁盘配额，也不会自动撤销工作目录中的文件修改。
+默认只读挂载宿主程序的 GOROOT（目录及 bin/go 存在时），支持直接执行 Go 命令；不会从宿主 PATH 搜索 Go。其他外部工具链需在启动时通过 `--runtime-dir` 显式授权，例如 `--runtime-dir /home/user/go`。该目录只读挂载，目录本身及其 `bin` 子目录会加入受控 PATH；Go 需要授权完整的 GOROOT，而不只是 `bin`。修改配置或程序后需重启提供工具的进程。
+
+seccomp 进一步限制命名 Unix socket、io_uring 和非本机 ABI；隔离不可用时拒绝执行，不回退宿主。命令退出、超时或取消时清理整个沙箱。当前限制执行时间和输出量，`exec` 最长 5 分钟、两路输出合计最多 1 MiB；没有 CPU、内存、进程数或磁盘配额，也不会自动撤销工作目录中的文件修改。
 
 实现入口：[`internal/mcp/exec_runtime.go`](internal/mcp/exec_runtime.go)、[`exec_seccomp_linux.go`](internal/mcp/exec_seccomp_linux.go)、[命令隔离 ADR](docs/adr/0002-command-sandbox-boundary.md)。
 
@@ -192,9 +194,9 @@ flowchart TD
     STORE --> DB[("MySQL")]
     APP --> OUTPUT["Outputer 运行事件输出"]
     MODEL --> OUTPUT
-    OUTPUT --> STDERR["stderr 诊断信息"]
+    OUTPUT --> STDERR["codex.log 诊断信息"]
     OUTPUT -. "可选" .-> REDIS[("Redis Stream")]
-    APP --> ANSWER["stdout 已保存的最终答案"]
+    APP --> ANSWER["codex.log 已保存的最终答案"]
 ```
 
 `codex-cli` 在宿主进程中组织模型调用和状态推进，`codex-mcp` 通过 stdio 提供工具服务；命令隔离在 `exec` 内部实施。MySQL 保存恢复所需的运行记录，Redis Stream 用于可选的事件输出。
@@ -295,3 +297,21 @@ docs/adr/             架构决策
 ```
 
 领域术语见 [GLOSSARY.md](GLOSSARY.md)。本地议题以 Markdown 记录在 `.scratch/<feature>/`，规则见 [议题跟踪说明](docs/agents/issue-tracker.md)。
+
+Go 离线依赖：启动时读取宿主 Go 的 GOMODCACHE，将存在且通过目录边界校验的缓存只读挂载到 `/run/go-mod-cache`，并设置沙箱 GOMODCACHE。沙箱 GOPROXY=off、GOSUMDB=off、GOTOOLCHAIN=local；构建缓存仍位于隔离临时目录。请先在宿主运行 `go mod download` 预填充项目依赖，再启动或重启服务；缺失依赖不会自动下载。不会挂载整个 GOPATH 或宿主 HOME。
+
+### 日志目录
+
+命令行诊断、最终答案、consumer 状态和 agent/provider/server 运行日志统一追加写入进程当前目录下的 `./logs/codex.log`，目录不存在时自动创建。
+可在 YAML 顶层配置：
+
+```yaml
+log_dir: /var/log/codex
+```
+
+`cmd`、`codex-cli` 和 `codex-consumer` 均支持 `--log-dir /path/to/logs`，
+优先级为命令行参数 > YAML `log_dir` > `./logs`。新运行与恢复运行使用相同规则；
+相对路径以进程当前目录为基准。日志追加写入，文件写入错误会返回给调用方。
+日志格式为 `YYYY/MM/DD HH:MM:SS [INFO|ERROR] 内容`，最终答案也写入日志文件。
+`codex-mcp`、`codex-server` 和迁移命令同样支持 `--log-dir`（默认 `./logs`）。
+MCP stdio、HTTP/SSE 响应及 `--help` 保留原有协议或帮助格式；日志目录本身无法打开时，启动错误回退到带时间和级别的 stderr。

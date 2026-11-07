@@ -5,8 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/collie-agent/codex-go/internal/logging"
 	"io"
-	"os"
 	"sync"
 	"time"
 )
@@ -47,16 +47,20 @@ type RawResponseOutput struct {
 // StderrOutputer 将结构化事件呈现为可读日志；必须通过 NewStderrOutputer 创建。
 // OutputSchema.Data 是 schema 本身；其余 Data 分别编码对应的 *Output 结构。
 // 时间前缀使用本地时间，与标准 logger 的日期时间格式一致。
-// 不进行日志级别过滤，也不关闭注入的 writer。
+// 不进行日志级别过滤，也不关闭注入的 writer；默认追加写入日志文件。
 type StderrOutputer struct {
 	writer io.Writer
 	mu     sync.Mutex
 }
 
-// NewStderrOutputer 的 writer 为 nil 时使用 os.Stderr。
-func NewStderrOutputer(writer io.Writer) *StderrOutputer {
+// NewStderrOutputer 在未注入 writer 时追加写入日志目录，默认使用 ./logs。
+func NewStderrOutputer(writer io.Writer, directories ...string) *StderrOutputer {
 	if writer == nil {
-		writer = os.Stderr
+		dir := "logs"
+		if len(directories) > 0 && directories[0] != "" {
+			dir = directories[0]
+		}
+		writer = logging.FileWriter{Directory: dir}
 	}
 	return &StderrOutputer{writer: writer}
 }
@@ -154,10 +158,14 @@ func (o *StderrOutputer) Emit(ctx context.Context, event OutputEvent) error {
 	// 锁覆盖整条事件的写入，避免同一输出器的并发事件交错。
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	line := time.Now().Format("2006/01/02 15:04:05") + " " + prefix + message + "\n"
-	if event.Kind == OutputTaskInfo {
-		line = message + "\n"
+	level := "INFO"
+	if event.Kind == OutputToolError {
+		level = "ERROR"
 	}
+	if event.Kind == OutputTaskInfo {
+		prefix = ""
+	}
+	line := time.Now().Format("2006/01/02 15:04:05") + " [" + level + "] " + prefix + message + "\n"
 	n, err := io.WriteString(o.writer, line)
 	if err == nil && n != len(line) {
 		return io.ErrShortWrite

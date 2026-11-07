@@ -162,7 +162,7 @@ func (r *ReactProcess[T]) switchToPlanExecute(toolParam *mcpSdk.CallToolParams, 
 			return false, r.executionErr
 		}
 	}
-	log.Printf("task %s: [react] switching to plan-execute", durableState.RunId)
+	log.Printf("[INFO] task %s: [react] switching to plan-execute", durableState.RunId)
 	return true, nil
 }
 

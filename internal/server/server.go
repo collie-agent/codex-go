@@ -42,12 +42,12 @@ func New(backend Backend, store Store) http.Handler {
 			} else {
 				c.Request.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), c.Request.Body))
 			}
-			log.Printf("HTTP request started: method=%s path=%s body=%q read_error=%v", c.Request.Method, c.Request.URL.Path, body, err)
+			log.Printf("[ERROR] HTTP request started: method=%s path=%s body=%q read_error=%v", c.Request.Method, c.Request.URL.Path, body, err)
 		} else {
-			log.Printf("HTTP request started: method=%s path=%s", c.Request.Method, c.Request.URL.Path)
+			log.Printf("[INFO] HTTP request started: method=%s path=%s", c.Request.Method, c.Request.URL.Path)
 		}
 		defer func() {
-			log.Printf("HTTP request finished: method=%s path=%s status=%d duration=%s", c.Request.Method, c.Request.URL.Path, c.Writer.Status(), time.Since(start))
+			log.Printf("[INFO] HTTP request finished: method=%s path=%s status=%d duration=%s", c.Request.Method, c.Request.URL.Path, c.Writer.Status(), time.Since(start))
 		}()
 		c.Next()
 	})
@@ -62,7 +62,7 @@ func New(backend Backend, store Store) http.Handler {
 			return
 		}
 		if err != nil {
-			log.Printf("read conversation runs: %v", err)
+			log.Printf("[INFO] read conversation runs: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "cannot read conversation runs"})
 			return
 		}

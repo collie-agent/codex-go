@@ -127,16 +127,16 @@ func (r *BaseReactProcess[T]) prepareCompaction(a *asyncCompaction, cfg *config.
 		}
 		// 只有主循环收取结果；交回 advanceCompaction 统一保存检查点和切换视图。
 		started := time.Now()
-		log.Printf("task %s: [compact] sync wait started execution_id=%q tokens=%d threshold=%d applied_attempts=%d", durable.RunId, durable.ExecutionID, tokens, syncTokenThreshold, attempts)
+		log.Printf("[INFO] task %s: [compact] sync wait started execution_id=%q tokens=%d threshold=%d applied_attempts=%d", durable.RunId, durable.ExecutionID, tokens, syncTokenThreshold, attempts)
 		select {
 		case <-r.ctx.Done():
-			log.Printf("task %s: [compact] sync wait cancelled execution_id=%q duration=%s error=%v", durable.RunId, durable.ExecutionID, time.Since(started), r.ctx.Err())
+			log.Printf("[ERROR] task %s: [compact] sync wait cancelled execution_id=%q duration=%s error=%v", durable.RunId, durable.ExecutionID, time.Since(started), r.ctx.Err())
 			return appliedAny, r.ctx.Err()
 		case result := <-a.pending:
 			if result.err != nil {
-				log.Printf("task %s: [compact] sync wait failed execution_id=%q duration=%s error=%v", durable.RunId, durable.ExecutionID, time.Since(started), result.err)
+				log.Printf("[ERROR] task %s: [compact] sync wait failed execution_id=%q duration=%s error=%v", durable.RunId, durable.ExecutionID, time.Since(started), result.err)
 			} else {
-				log.Printf("task %s: [compact] sync wait completed execution_id=%q duration=%s", durable.RunId, durable.ExecutionID, time.Since(started))
+				log.Printf("[INFO] task %s: [compact] sync wait completed execution_id=%q duration=%s", durable.RunId, durable.ExecutionID, time.Since(started))
 			}
 			a.pending <- result
 		}
@@ -170,7 +170,7 @@ func (r *BaseReactProcess[T]) advanceCompaction(a *asyncCompaction, cfg *config.
 				}
 			}
 			model.compaction = result.compaction
-			log.Printf("task %s: [compact] applied execution_id=%q through_batch=%d", durable.RunId, durable.ExecutionID, result.compaction.ThroughBatch)
+			log.Printf("[INFO] task %s: [compact] applied execution_id=%q through_batch=%d", durable.RunId, durable.ExecutionID, result.compaction.ThroughBatch)
 			return true, nil
 		default:
 			return false, nil
@@ -278,7 +278,7 @@ func (r *BaseReactProcess[T]) compactContext(cfg *config.AgentConfig, durable *f
 			}
 		}
 		started := time.Now()
-		log.Printf("task %s: [compact] triggered execution_id=%q tokens=%d token_source=%s threshold=%d previous_through_batch=%d through_batch=%d added_records=%d retained_batches=%d", durable.RunId, durable.ExecutionID, triggerTokens, tokenSource, exceedTokenThreshold, previous, through, len(added), retainedBatches)
+		log.Printf("[INFO] task %s: [compact] triggered execution_id=%q tokens=%d token_source=%s threshold=%d previous_through_batch=%d through_batch=%d added_records=%d retained_batches=%d", durable.RunId, durable.ExecutionID, triggerTokens, tokenSource, exceedTokenThreshold, previous, through, len(added), retainedBatches)
 		payload := struct {
 			PreviousSummary    *ExecutionCompaction
 			AddedToolRecords   []*fileContext.ToolResult
@@ -369,7 +369,7 @@ Summarize execution evidence relevant to the current Goal, CompletionCriteria an
 		model.compaction = compaction
 		remaining := estimateReactTokens(model.ModelRequest(), model.corrections...)
 		if remaining > exceedTokenThreshold {
-			log.Printf("task %s: [compact] retry attempt=%d tokens=%d threshold=%d", durable.RunId, attempt, remaining, exceedTokenThreshold)
+			log.Printf("[INFO] task %s: [compact] retry attempt=%d tokens=%d threshold=%d", durable.RunId, attempt, remaining, exceedTokenThreshold)
 			continue
 		}
 		encoded, err := json.Marshal(compaction)
@@ -387,7 +387,7 @@ Summarize execution evidence relevant to the current Goal, CompletionCriteria an
 		}
 		originalModel.compaction = compaction
 		// 后台调用只完成快照摘要，实时视图由主循环在请求边界切换。
-		log.Printf("task %s: [compact] generated execution_id=%q through_batch=%d added_records=%d summary_bytes=%d duration=%s", durable.RunId, durable.ExecutionID, through, len(added), len(encoded), time.Since(started))
+		log.Printf("[INFO] task %s: [compact] generated execution_id=%q through_batch=%d added_records=%d summary_bytes=%d duration=%s", durable.RunId, durable.ExecutionID, through, len(added), len(encoded), time.Since(started))
 		return nil
 	}
 	return fmt.Errorf("compact execution: context exceeds token budget after 3 attempts")

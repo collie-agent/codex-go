@@ -7,3 +7,7 @@
 网络命名空间不能阻止通过挂载目录中的 pathname Unix socket 连接宿主服务，因此额外使用子进程继承的 seccomp 过滤器禁止创建 Unix socket，并禁止 `io_uring`、旧式 `socketcall` 和非本机 ABI 绕过过滤。匿名 `socketpair` 仍可用于内部 IPC；依赖命名 Unix socket 或这些被禁止接口的项目任务会失败。过滤器无法安装时拒绝执行。
 
 第一版只限制执行时间和捕获输出，没有 CPU、内存、进程数和磁盘配额；用户接受超时前资源耗尽的可能性。此决策不构成承载恶意代码的完整资源隔离方案。具体契约见 [MCP 文件工具规格](../../.scratch/mcp-file-tools/spec.md)。
+
+宿主默认运行时策略额外只读暴露程序的 GOROOT（含 bin/go 的有效目录），使 Go 工具可直接使用；不从继承的 PATH 发现工具链。其他工作区外运行时仍需显式配置。GOROOT 不存在时不添加挂载，保持其他工具可用。
+
+Go 离线依赖：启动时读取宿主 Go 的 GOMODCACHE，将存在且通过目录边界校验的缓存只读挂载到 `/run/go-mod-cache`，并设置沙箱 GOMODCACHE。沙箱 GOPROXY=off、GOSUMDB=off、GOTOOLCHAIN=local；构建缓存仍位于隔离临时目录。请先在宿主运行 `go mod download` 预填充项目依赖，再启动或重启服务；缺失依赖不会自动下载。不会挂载整个 GOPATH 或宿主 HOME。

@@ -5,14 +5,18 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"time"
 
 	"github.com/collie-agent/codex-go/internal/application"
+	"github.com/collie-agent/codex-go/internal/logging"
 	filemcp "github.com/collie-agent/codex-go/internal/mcp"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+var logDirectory = flag.String("log-dir", "", "output log directory (overrides YAML log_dir; default ./logs)")
 
 func main() {
 	flag.Usage = func() {
@@ -20,7 +24,7 @@ func main() {
 		flag.PrintDefaults()
 	}
 	workspace := flag.String("workspace", "", "workspace directory (required for new runs; optional when resuming)")
-	timeout := flag.Duration("timeout", 30*time.Second, "tool command timeout")
+	timeout := flag.Duration("timeout", 5*time.Minute, "tool command timeout")
 	configPath := flag.String("config", "", "YAML agent configuration")
 	convID := flag.String("conv-id", "", "existing conversation ID (creates a conversation when omitted)")
 	task := flag.String("task", "", "agent task")
@@ -30,7 +34,11 @@ func main() {
 		runtimeDirs = append(runtimeDirs, dir)
 		return nil
 	})
-	flag.Parse()
+	logging.ParseFlags()
+	if err := logging.Setup(*logDirectory, *configPath); err != nil {
+		log.Printf("[ERROR] %v", err)
+		os.Exit(1)
+	}
 	var err error
 	if *runID != "" && *configPath == "" {
 		err = fmt.Errorf("--config is required when --run-id is provided")
@@ -45,7 +53,7 @@ func main() {
 		err = run(*workspace, *timeout, runtimeDirs...)
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		log.Printf("[ERROR] %v", err)
 		os.Exit(1)
 	}
 }
@@ -53,12 +61,12 @@ func main() {
 func resumeAgent(configPath, runID, workspace string, timeout time.Duration, runtimeDirs ...string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	results, err := application.Resume(ctx, application.Options{ConfigPath: configPath, RunID: runID, Workspace: workspace, Timeout: timeout, RuntimeDirs: runtimeDirs, Stderr: os.Stderr})
+	results, err := application.Resume(ctx, application.Options{ConfigPath: configPath, RunID: runID, Workspace: workspace, Timeout: timeout, RuntimeDirs: runtimeDirs, LogDir: *logDirectory})
 	if err != nil {
 		return err
 	}
 	for _, result := range results {
-		fmt.Printf("final answer: %s\n", result.Answer)
+		log.Printf("[INFO] final answer: %s", result.Answer)
 	}
 	return nil
 }
@@ -71,12 +79,12 @@ func runAgentInConversation(configPath, task, workspace, convID string, timeout 
 	// 工具超时不限制整个模型运行；返回后取消异步观察器。
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	results, err := application.Run(ctx, application.Options{ConfigPath: configPath, Task: task, Workspace: workspace, ConvID: convID, Timeout: timeout, RuntimeDirs: runtimeDirs, Stderr: os.Stderr})
+	results, err := application.Run(ctx, application.Options{ConfigPath: configPath, Task: task, Workspace: workspace, ConvID: convID, Timeout: timeout, RuntimeDirs: runtimeDirs, LogDir: *logDirectory})
 	if err != nil {
 		return err
 	}
 	for _, result := range results {
-		fmt.Printf("final answer: %s\n", result.Answer)
+		log.Printf("[INFO] final answer: %s", result.Answer)
 	}
 	return nil
 }

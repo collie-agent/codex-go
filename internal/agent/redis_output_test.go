@@ -107,7 +107,7 @@ func TestPlannerPublishesRedisOutput(t *testing.T) {
 	}
 }
 
-func TestObserverPrintsWithoutPublishingRedisOutput(t *testing.T) {
+func TestObserverLogsWithoutPublishingRedisOutput(t *testing.T) {
 	redisClient, addr := testutil.StartRedis(t)
 	server := plannerTestServer(t, `{"ConfirmedFacts":["found evidence"],"ReportedErrors":[]}`, false)
 	cfg := plannerTestConfig(server.URL, config.JsonLLMOutputSchema)
@@ -115,20 +115,13 @@ func TestObserverPrintsWithoutPublishingRedisOutput(t *testing.T) {
 	cfg.Global = &config.GlobalConfig{Redis: &config.RedisConfig{Addr: addr}}
 	durable := &fileContext.DurableState{RunId: "observe-task", Goal: "inspect"}
 	observation := fileContext.NewObservationContext(durable, &fileContext.Observation{}, &fileContext.ToolResult{ToolName: "read_file", ToolCallId: "read", Result: "hello"})
-	output, err := os.CreateTemp(t.TempDir(), "observation-log")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer output.Close()
-	stderr := os.Stderr
-	os.Stderr = output
-	defer func() { os.Stderr = stderr }()
+	t.Chdir(t.TempDir())
 	if _, _, err := NewObserveProcess[ObserveResult](t.Context(), observation).Run(cfg, durable); err != nil {
 		t.Fatal(err)
 	}
-	logs, err := os.ReadFile(output.Name())
+	logs, err := os.ReadFile("logs/codex.log")
 	if err != nil || !strings.Contains(string(logs), `found evidence`) {
-		t.Fatalf("observation missing from stderr: %s, err=%v", logs, err)
+		t.Fatalf("observation missing from log file: %s, err=%v", logs, err)
 	}
 	entries, err := redisClient.XRange(t.Context(), "codex-go-resp-stream-observe-task", "-", "+").Result()
 	if err != nil || len(entries) != 0 {

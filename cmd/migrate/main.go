@@ -5,21 +5,28 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 
 	"github.com/collie-agent/codex-go/internal/database"
+	"github.com/collie-agent/codex-go/internal/logging"
 )
 
 func main() {
+	logDir := flag.String("log-dir", "", "log directory (default ./logs)")
 	flag.Usage = func() {
 		fmt.Fprintln(flag.CommandLine.Output(), "Usage: migrate\nCreate conversation and agent_run tables using CODEX_MYSQL_URL; safe to repeat.")
 	}
-	flag.Parse()
-	if err := migrate(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+	logging.ParseFlags()
+	if err := logging.Setup(*logDir, ""); err != nil {
+		log.Printf("[ERROR] %v", err)
 		os.Exit(1)
 	}
-	fmt.Fprintln(os.Stderr, "database migration completed")
+	if err := migrate(); err != nil {
+		log.Printf("[ERROR] %v", err)
+		os.Exit(1)
+	}
+	log.Print("[INFO] database migration completed")
 }
 
 func migrate() error {

@@ -243,7 +243,7 @@ func (r *multiAgentRun) execute(task DelegatedTask, parent AgentID, upstream []D
 				if err = r.emitSwitch(identity, parent); err != nil {
 					return MultiAgentResult{}, err
 				}
-				log.Printf("task %s: [multi-agent] %s -> %s: report %s (status=%s)", r.durable.RunId, task.Worker, parent, task.TaskID, result.Result.Status)
+				log.Printf("[INFO] task %s: [multi-agent] %s -> %s: report %s (status=%s)", r.durable.RunId, task.Worker, parent, task.TaskID, result.Result.Status)
 			}
 			return result, err
 		}
@@ -289,7 +289,7 @@ func (r *multiAgentRun) execute(task DelegatedTask, parent AgentID, upstream []D
 		var wg sync.WaitGroup
 		for i := range tasks { //对子agent并发
 			wg.Go(func() {
-				log.Printf("task %s: [multi-agent] %s -> %s: delegate %s", r.durable.RunId, task.Worker, tasks[i].Worker, tasks[i].TaskID)
+				log.Printf("[INFO] task %s: [multi-agent] %s -> %s: delegate %s", r.durable.RunId, task.Worker, tasks[i].Worker, tasks[i].TaskID)
 				output, err := r.execute(tasks[i], task.Worker, slices.Clone(upstream), task.TaskID, created[i])
 				if err != nil {
 					errs[i] = err

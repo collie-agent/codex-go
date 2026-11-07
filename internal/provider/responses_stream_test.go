@@ -41,20 +41,12 @@ func TestResponsesStreamReturnsCompleteText(t *testing.T) {
 				t.Fatal(err)
 			}
 			client.SetLogLevel(level)
-			file, err := os.CreateTemp(t.TempDir(), "stderr")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer file.Close()
-			previous := os.Stderr
-			os.Stderr = file
-			client.SetOutputer(nil)
-			defer func() { os.Stderr = previous }()
+			t.Chdir(t.TempDir())
 			result, _, _, err := client.Run(context.Background(), "stream-test", "question", nil)
 			if err != nil || result.Answer != "complete" {
 				t.Fatalf("result=%+v err=%v", result, err)
 			}
-			data, err := os.ReadFile(file.Name())
+			data, err := os.ReadFile("logs/codex.log")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -88,19 +80,11 @@ func TestResponsesStreamLogsDeltaOnlyInDebug(t *testing.T) {
 				t.Fatal(err)
 			}
 			client.SetLogLevel(level)
-			file, err := os.CreateTemp(t.TempDir(), "stderr")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer file.Close()
-			previous := os.Stderr
-			os.Stderr = file
-			client.SetOutputer(nil)
-			defer func() { os.Stderr = previous }()
+			t.Chdir(t.TempDir())
 			if _, _, _, err := client.Run(context.Background(), "delta-test", "question", nil); err != nil {
 				t.Fatal(err)
 			}
-			data, err := os.ReadFile(file.Name())
+			data, err := os.ReadFile("logs/codex.log")
 			if err != nil {
 				t.Fatal(err)
 			}

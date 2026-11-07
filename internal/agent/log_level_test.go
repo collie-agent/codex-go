@@ -60,7 +60,8 @@ func TestReactLogLevels(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				// 同时捕获标准日志和直接写入 stderr 的日志，验证真实输出路径。
+				// 同时检查 provider 日志文件和其他组件的诊断输出。
+				t.Chdir(t.TempDir())
 				output, err := os.CreateTemp(t.TempDir(), "react-log")
 				if err != nil {
 					t.Fatal(err)
@@ -78,7 +79,11 @@ func TestReactLogLevels(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				logs := string(data)
+				providerLogs, err := os.ReadFile("logs/codex.log")
+				if err != nil {
+					t.Fatal(err)
+				}
+				logs := string(data) + string(providerLogs)
 				if got := strings.Count(logs, "LLM response text="); got != 2 {
 					t.Errorf("response text logs = %d, want 2", got)
 				}

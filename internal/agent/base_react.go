@@ -205,7 +205,7 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 			}
 			var callErr *toolCallError
 			if errors.As(err, &callErr) {
-				log.Printf("task %s: [react] tool calling error: %v", durableState.RunId, err)
+				log.Printf("[ERROR] task %s: [react] tool calling error: %v", durableState.RunId, err)
 				// 非法调用整批拒绝，反馈原始错误后在当前轮重试，不放行任何工具副作用。
 				toolCallErrors++
 				if toolCallErrors > maxToolCallErrors {
@@ -522,10 +522,10 @@ func (r *BaseReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, t
 
 	// 错误独立于结果详情打印，确保 error 级别也能看到可恢复的工具失败。
 	if result.Error != "" {
-		log.Printf("[react] tool calling error: %s", result.Error)
+		log.Printf("[ERROR] [react] tool calling error: %s", result.Error)
 	}
 	if agentConfig == nil || agentConfig.LogLevel.InfoEnabled() {
-		log.Printf("[react] tool calling result: %+v", result)
+		log.Printf("[INFO] [react] tool calling result: %+v", result)
 	}
 	if shouldObserveTool(toolParam) {
 		// exec 的参数和原始结果随快照交给观察器，由 LLM 筛选影响后续决策的新增信息。
@@ -589,7 +589,7 @@ func (r *BaseReactProcess[T]) publishToolResult(taskID string, result *fileConte
 		err = r.output.Emit(r.ctx, provider.OutputEvent{TaskID: taskID, Label: "react", Kind: kind, Data: data})
 	}
 	if err != nil {
-		log.Printf("task %s: emit tool outcome: %v", taskID, err)
+		log.Printf("[INFO] task %s: emit tool outcome: %v", taskID, err)
 	}
 }
 

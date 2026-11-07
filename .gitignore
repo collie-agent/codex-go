@@ -8,6 +8,7 @@
 *.dylib
 *.test
 *.out
+*.log
 
 # Go coverage and profiling files
 coverage.out
@@ -28,3 +29,6 @@ Thumbs.db
 *.swp
 *.swo
 
+
+# Local provider logs
+logs/
