@@ -36,6 +36,32 @@ Multi-agent 模式由 `MultiAgentProcessorOrchestrator` 调度，每个代理复
 
 实现入口：[`internal/context/context.go`](internal/context/context.go)、[`observation.go`](internal/context/observation.go)、[`internal/agent/observe.go`](internal/agent/observe.go)。
 
+### Context Compaction（上下文压缩）
+
+每次 ReAct 模型请求前检查输入 token 预算：上一请求报告的输入 token 数或当前上下文估算超过 24 × 1024 时，启动异步压缩；达到 32 × 1024 时，先等待压缩、保存检查点并复检预算，再继续请求。每个执行实例同时最多运行一个压缩任务，后台任务限时 2 分钟。估算按 ASCII 约四字符一个 token、其他字符一个 token 计算，并计入累计纠错消息及其中引用的非法输出。
+
+压缩模型将旧摘要与新增工具记录合并为事实、已执行操作、未解决问题和剩余工作，并通过原调用 ID 保留证据来源。后续推理使用摘要和摘要未覆盖的完整工具交互，后台压缩期间追加的记录也会保留。每次摘要生成后最多复检、重试 3 轮；压缩或检查点保存失败时停止执行，保留已有检查点和完整工具记录。
+
+压缩仅改变模型视图，完整执行记录仍按执行实例保存，可用本地工具 `read_tool_result` 按 `call_id` 分页回读，不会重新执行原工具。恢复时沿用摘要及其覆盖批次，新计划步骤和独立委派使用各自的摘要；工具结果未知时仍停止自动恢复。
+
+压缩模型默认继承 `base.llm`，可通过 `agents.compact` 独立配置，不提供工具调用。`llm` 整块替换，独立配置时需提供模型和凭据来源：
+
+```yaml
+agents:
+  compact:
+    llm:
+      api_key_env: OPENAI_API_KEY
+      model: your-compact-model
+      output_schema: json_llm_output # 或 line_protocol_llm_output
+      stream: false
+    sys_prompt: |
+      保留与当前目标有关的关键证据。
+```
+
+`sys_prompt` 追加到内置压缩指令，省略时继承 `base.sys_prompt`。已有数据库升级后需先执行 `./bin/codex-migrate`，添加 `execution_instance.compaction` 列。完整预算规则、同步等待日志、输出纠错和回读参数见 [ReAct 上下文压缩](docs/react-compaction.md)。
+
+实现入口：[`internal/agent/compact.go`](internal/agent/compact.go)、[`read_tool_result.go`](internal/agent/read_tool_result.go)。
+
 ### Tool Runtime（工具执行层）
 
 ReAct 通过 MCP stdio 连接独立工具进程，从服务获取工具定义，并根据 `allow_tools` 筛选模型可用能力。执行前再次检查权限和输入 schema，同轮独立调用并发执行；参数或工具错误作为工具结果回填，让模型根据实际错误调整操作。
@@ -48,7 +74,7 @@ ReAct 通过 MCP stdio 连接独立工具进程，从服务获取工具定义，
 
 当前记忆由执行实例内的工具交互、结构化观察、计划步骤记录和同一会话的历史运行组成。新建或恢复运行时，应用层按运行顺序加载此前记录：已完成运行提供目标与结果，失败或主动中断的运行还提供执行进度、工具交互及错误。历史仅作为当前任务的参考，不恢复旧任务的调度状态，也不代表当前任务已经完成。
 
-工具历史保留调用参数、结果及错误；普通执行过程中，后续工具结果写入时会清理旧的 `list_dir`、`glob` 发现结果。检查点恢复则重放已确认交互，保留恢复依据。当前没有独立的向量数据库、语义检索或自动提炼跨会话长期记忆；技能文件提供显式知识和流程复用。
+工具历史完整保留调用参数、结果及错误。`list_dir`、`glob` 的调用与结果仅在紧接着的一轮决策及该轮格式纠错中保留，之后从模型视图移除；恢复时最新工具批次供首次决策使用。完整执行记录仍用于恢复、压缩及原文回读。当前没有独立的向量数据库、语义检索或自动提炼跨会话长期记忆；技能文件提供显式知识和流程复用。
 
 实现入口：[`internal/application/history.go`](internal/application/history.go)、[`run.go`](internal/application/run.go)、[`internal/context/history.go`](internal/context/history.go)。
 
@@ -232,6 +258,7 @@ flowchart TD
 ### 上下文管理与运行恢复
 
 - **任务上下文**：维护目标、完成标准、计划进度、工具交互和结构化观察。
+- **上下文压缩**：超过 24K token 启动异步摘要，达到 32K 等待压缩并复检预算；保留完整执行记录，支持原文回读及摘要恢复。详见 [ReAct 上下文压缩](docs/react-compaction.md)。
 - **会话延续**：新任务可引用同一会话此前运行的结果及已保存历史。详见 [会话历史与恢复](docs/conversation-history.md)。
 - **检查点恢复**：恢复已确认的工具历史，跳过已完成步骤，继续未完成委派；工具执行结果未知时停止自动恢复。
 - **主动中断**：停止整个运行及其子任务并保存中断状态；后续通过新运行延续会话，中断后的原运行不能恢复。详见 [HTTP 中断接口](docs/codex-server.md#主动中断运行)。
