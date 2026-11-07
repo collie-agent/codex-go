@@ -288,3 +288,45 @@ func TestLoadAgentConfigStream(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadCompactModelConfiguration(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test")
+	path := filepath.Join(t.TempDir(), "agent.yaml")
+	for _, tc := range []struct {
+		name, settings, model string
+		schema                LLMOutputSchema
+		wantErr               bool
+	}{
+		{"override", "  compact:\n    llm:\n      model: compact-model\n      output_schema: line_protocol_llm_output\n", "compact-model", LineProtocolLLMOutputSchema, false},
+		{"inherit", "", "base-model", JsonLLMOutputSchema, false},
+		{"invalid schema", "  compact:\n    llm:\n      model: compact-model\n      output_schema: invalid\n", "", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := "name: react\nbase:\n  llm:\n    model: base-model\n  allow_tools: [read_file]\nagents:\n" + tc.settings
+			if tc.settings == "" {
+				data = strings.TrimSuffix(data, "agents:\n")
+			}
+			if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadAgentConfig(path)
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "output_schema") {
+					t.Fatalf("error = %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			compact := cfg.ForAgent("compact")
+			if compact.LLMConfig.Model != tc.model || compact.LLMConfig.OutputSchema != tc.schema || len(compact.AllowTools) != 0 {
+				t.Fatalf("compact = %+v", compact)
+			}
+			compact.LLMConfig.Model = "changed"
+			if cfg.ForAgent("compact").LLMConfig.Model != tc.model {
+				t.Fatal("compact configuration is shared")
+			}
+		})
+	}
+}

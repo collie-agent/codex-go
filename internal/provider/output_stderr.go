@@ -92,6 +92,12 @@ func (o *StderrOutputer) Emit(ctx context.Context, event OutputEvent) error {
 		if event.Kind == OutputAnswerDelta {
 			message = "LLM answer delta=" + data.Text
 		}
+	case OutputReset:
+		var data OutputResetOutput
+		if err := json.Unmarshal(event.Data, &data); err != nil {
+			return err
+		}
+		message = fmt.Sprintf("LLM output reset text_bytes=%d answer_bytes=%d", data.TextBytes, data.AnswerBytes)
 	case OutputContext:
 		var data ContextOutput
 		if err := json.Unmarshal(event.Data, &data); err != nil {

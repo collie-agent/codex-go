@@ -3,6 +3,7 @@ package application_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -205,5 +206,103 @@ func TestTerminalReactBusinessFailureReturnsSavedResult(t *testing.T) {
 				t.Fatalf("requests=%d want=%d", requests, wantRequests)
 			}
 		})
+	}
+}
+
+func TestResumeReactPreservesIncrementalCompactionAndOriginalEvidence(t *testing.T) {
+	_, store := runStore(t)
+	ctx := context.Background()
+	run, err := store.Create(ctx, "", "original compacted goal", t.TempDir(), "react")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run.CompletionCriteria = []string{"original criterion"}
+	summary := agent.ExecutionCompaction{ExecutionID: run.RunID, ThroughBatch: 3, Summary: agent.ExecutionSummary{Facts: []agent.Evidence{{Text: "earlier evidence", SourceCallIDs: []string{"call_1"}}}}}
+	encoded, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	durable := &state.DurableState{RunId: run.RunID, ExecutionID: run.RunID, CompletionCriteria: run.CompletionCriteria, ExecutionCompaction: encoded}
+	for batch := 1; batch <= 14; batch++ {
+		durable.ToolExecutions = append(durable.ToolExecutions, &state.ToolResult{Batch: batch, ToolCallId: fmt.Sprintf("call_%d", batch), ToolName: "read_file", Arguments: `{"path":"evidence"}`, Status: "success", Result: fmt.Sprintf("original-batch-%d:", batch) + strings.Repeat("payload ", 1800)})
+	}
+	if err := store.SaveDurableCheckpoint(ctx, &run, durable, "react"); err != nil {
+		t.Fatal(err)
+	}
+	compactions, reasoning := 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var request struct {
+			Input []struct {
+				Content string `json:"content"`
+				Type    string `json:"type"`
+				CallID  string `json:"call_id"`
+				Output  string `json:"output"`
+			} `json:"input"`
+			Text struct {
+				Format struct {
+					Schema struct {
+						Properties map[string]any `json:"properties"`
+					} `json:"schema"`
+				} `json:"format"`
+			} `json:"text"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&request); err != nil {
+			t.Error(err)
+		}
+		if _, compact := request.Text.Format.Schema.Properties["Facts"]; compact {
+			compactions++
+			input := ""
+			for _, item := range request.Input {
+				if item.Type != "function_call_output" {
+					input += item.Content
+				}
+			}
+			if compactions == 1 {
+				for _, want := range []string{"earlier evidence", "original-batch-4:", "original-batch-6:", "original compacted goal", "original criterion"} {
+					if !strings.Contains(input, want) {
+						t.Errorf("incremental input missing %q", want)
+					}
+				}
+				for _, excluded := range []string{"original-batch-1:", "original-batch-3:", "original-batch-7:"} {
+					if strings.Contains(input, excluded) {
+						t.Errorf("incremental input repeats %q", excluded)
+					}
+				}
+			}
+			writeResult(w, `{"Facts":[{"Text":"earlier evidence","SourceCallIDs":["call_1"]}],"Actions":[],"OpenIssues":[],"Pending":[]}`)
+			return
+		}
+		reasoning++
+		if reasoning == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"id":"read","status":"completed","output":[{"type":"function_call","id":"fc_original","call_id":"read_original","name":"read_tool_result","arguments":"{\"call_id\":\"call_1\",\"offset\":0,\"limit\":17}"}]}`)
+			return
+		}
+		found := false
+		for _, item := range request.Input {
+			if item.Type == "function_call_output" && item.CallID == "read_original" && strings.Contains(item.Output, "original-batch-1:") {
+				found = true
+			}
+		}
+		if !found {
+			t.Error("resume cannot read original compacted evidence")
+		}
+		writeResult(w, `{"status":"completed","answer":"done"}`)
+	}))
+	defer server.Close()
+	result, err := application.Resume(ctx, application.Options{RunID: run.RunID, ConfigPath: agentConfig(t, server.URL), Timeout: time.Second, Stderr: io.Discard})
+	if err != nil || len(result) != 1 || result[0].Answer != "done" || reasoning != 2 || compactions < 1 {
+		t.Fatalf("result=%+v compact=%d reasoning=%d err=%v", result, compactions, reasoning, err)
+	}
+	saved, err := store.Execution(ctx, run.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var savedSummary agent.ExecutionCompaction
+	if err := json.Unmarshal(saved.ExecutionCompaction, &savedSummary); err != nil {
+		t.Fatal(err)
+	}
+	if savedSummary.ThroughBatch < 6 || len(saved.ToolExecutions) != 15 || saved.ToolExecutions[0].Result != durable.ToolExecutions[0].Result {
+		t.Fatalf("incomplete restored history: summary=%+v calls=%d", savedSummary, len(saved.ToolExecutions))
 	}
 }

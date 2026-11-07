@@ -352,9 +352,10 @@ type RunOutcome struct {
 type DurableState struct {
 	MultiAgentCheckpoint []byte
 
-	ExecutionResult []byte
-	ExecutionID     string
-	ToolExecutions  []*ToolResult
+	ExecutionCompaction []byte // 派生摘要与覆盖批次；完整工具记录仍是恢复依据。
+	ExecutionResult     []byte
+	ExecutionID         string
+	ToolExecutions      []*ToolResult
 
 	PreviousRunOutcomes []RunOutcome
 	RunId               string
@@ -423,6 +424,7 @@ func (s *DurableState) Clone() *DurableState {
 	clone := *s
 	clone.MultiAgentCheckpoint = slices.Clone(s.MultiAgentCheckpoint)
 	clone.ExecutionResult = slices.Clone(s.ExecutionResult)
+	clone.ExecutionCompaction = slices.Clone(s.ExecutionCompaction)
 	clone.ToolExecutions = make([]*ToolResult, len(s.ToolExecutions))
 	for i, call := range s.ToolExecutions {
 		if call != nil {

@@ -71,7 +71,7 @@ func (o *ObserveProcess[T]) Run(agentConfig *config.AgentConfig, durableState *f
 				return zero, nil, fmt.Errorf("task %s: observation: output format errors exceeded limit (%d): %w", taskID, maxOutputFormatErrors, err)
 			}
 			// 纠错独立于系统指令和观察快照，后续重试保留此前的纠错消息。
-			corrections = append(corrections, outputFormatCorrection(formatErrors, err, parseErr))
+			corrections = append(corrections, outputFormatCorrection(taskID, "observe", formatErrors, err, parseErr))
 			client.SetCorrectionMessages(corrections)
 			continue
 		}

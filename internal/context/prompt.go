@@ -1,8 +1,30 @@
 package context
 
-// 通用部分只约束 JSON 语法；业务结果示例由各上下文提供。
+import "github.com/collie-agent/codex-go/internal/config"
+
+// 通用示例演示 JSON 语法；业务字段及其语义由各上下文另行提供。
 const jsonFormatPrompt = `Output format: JSON.
-Return exactly one valid JSON value matching the requested output schema. Do not include Markdown fences, comments, or explanatory text. Preserve field name casing exactly. Use JSON arrays for lists, including [] for empty lists.`
+Return exactly one valid JSON value matching the requested output schema. Do not include Markdown fences, comments, or explanatory text. Preserve field name casing exactly. Use JSON arrays for lists, including [] for empty lists.
+
+### Common JSON example 1
+
+**Input:** Return message "hello", count 2, ratio 0.5, ok true and enabled false.
+
+**Output:**
+
+` + "```json\n" + `{"message":"hello","count":2,"ratio":0.5,"ok":true,"enabled":false}
+` + "```" + `
+
+### Common JSON example 2
+
+**Input:** Return tags "first" and "second", nested detail with message "nested", an empty items list and optional note null.
+
+**Output:**
+
+` + "```json\n" + `{"tags":["first","second"],"detail":{"message":"nested"},"items":[],"note":null}
+` + "```" + `
+
+These examples illustrate formatting only. Use the current task's declared field names, types and values.`
 
 // 通用示例使用与业务结果无关的字段；格式约束只作用于最终文本，不限制原生工具调用。
 const lineProtocolFormatPrompt = `Final text output format: Line Protocol.
@@ -95,3 +117,15 @@ END NO_TOOL
 Invalid forms (do not output these): TAGS=[]; DETAIL={}; MESSAGE=hello; COUNT=NaN; META.NOTE="x" when no such literal field is declared; BEGIN RESULT closed by END PLAN; two root blocks; or a field emitted both as FIELD=null and as a FIELD child block.
 
 Now handle the original task. If tools are needed, use the supplied native function tools. Otherwise, return the final result using its declared schema and Line Protocol format only. Before sending final text, check that the first line is the root BEGIN line, the last line is its matching END line, and every answer or explanation is inside a declared field. Output only that document for a final text result.`
+
+// CommonFormatFewShot 公开公共格式契约，调用方随后追加自身字段及业务示例。
+func CommonFormatFewShot(schema config.LLMOutputSchema) string {
+	switch schema {
+	case config.JsonLLMOutputSchema:
+		return jsonFormatPrompt
+	case config.LineProtocolLLMOutputSchema:
+		return lineProtocolFormatPrompt
+	default:
+		return ""
+	}
+}

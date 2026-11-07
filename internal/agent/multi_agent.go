@@ -190,6 +190,7 @@ func (r *multiAgentRun) execute(task DelegatedTask, parent AgentID, upstream []D
 				}
 				local.ExecutionResult = slices.Clone(r.durable.ExecutionResult)
 				local.ToolExecutions = r.durable.Clone().ToolExecutions
+				local.ExecutionCompaction = slices.Clone(r.durable.ExecutionCompaction)
 			}
 			node.Turns = append(node.Turns, &delegationTurn{Local: local})
 			if err := r.saveLocked(); err != nil {
@@ -354,6 +355,7 @@ func (r *multiAgentRun) publishTurnLocked(turn *delegationTurn, parent AgentID, 
 		r.durable.ExecutionID = turn.Local.ExecutionID
 		r.durable.ExecutionResult = slices.Clone(turn.Local.ExecutionResult)
 		r.durable.ToolExecutions = turn.Local.Clone().ToolExecutions
+		r.durable.ExecutionCompaction = slices.Clone(turn.Local.ExecutionCompaction)
 	}
 }
 
@@ -396,6 +398,7 @@ func (r *multiAgentRun) invoke(task DelegatedTask, reports []DelegatedTask, pare
 			r.durable.ExecutionID = local.ExecutionID
 			r.durable.ExecutionResult = slices.Clone(local.ExecutionResult)
 			r.durable.ToolExecutions = local.Clone().ToolExecutions
+			r.durable.ExecutionCompaction = slices.Clone(local.ExecutionCompaction)
 		}
 		return r.saveLocked()
 	}

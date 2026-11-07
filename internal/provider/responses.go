@@ -41,6 +41,8 @@ type baseResponsesApiClient[T any] struct {
 	corrections     []string
 	logLevel        config.LogLevel
 	output          Outputer
+	inputTokens     int64
+	additionalTools []*sdk.Tool
 	stderr          Outputer
 }
 
@@ -52,6 +54,14 @@ func (c *baseResponsesApiClient[T]) SetOutputer(output Outputer) {
 		c.stderr = NewStderrOutputer(nil)
 	}
 	c.output = output
+}
+
+// InputTokens 返回最近一次请求中模型报告的输入 token 数；未提供 usage 时为零。
+func (c *baseResponsesApiClient[T]) InputTokens() int64 { return c.inputTokens }
+
+// SetAdditionalTools 为执行实例内的本地工具提供定义；执行仍由调用方负责。
+func (c *baseResponsesApiClient[T]) SetAdditionalTools(tools []*sdk.Tool) {
+	c.additionalTools = slices.Clone(tools)
 }
 
 // emitOutput 记录输出错误；持久输出器会取消运行上下文，阻止后续执行。
@@ -129,7 +139,7 @@ func NewResponsesApiClient[T any](llmConfig *config.LLMConfig, allowTools map[co
 
 // Run returns unparsed output text as reasoning when the response calls tools.
 // Responses without tool calls are parsed into T.
-// A nil MCP session sends a request without tools.
+// A nil MCP session omits remote tools; explicitly supplied local tools remain available.
 // 方法不能独立声明泛型参数，因此在创建客户端时指定结果类型
 func (c *baseResponsesApiClient[T]) Run(ctx context.Context, taskId, input string, mcpClientSess *sdk.ClientSession) (T, []responses.ResponseFunctionToolCall, string, error) {
 	return c.RunWithToolMessages(ctx, taskId, input, mcpClientSess, nil)
@@ -143,7 +153,8 @@ type ToolMessage struct {
 }
 
 // RunWithToolMessages 原样发送调用方组装的 input；格式约束和末尾上下文由调用方负责。
-func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId, input string, mcpClientSess *sdk.ClientSession, messages []ToolMessage) (T, []responses.ResponseFunctionToolCall, string, error) {
+func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, taskId, input string, mcpClientSess *sdk.ClientSession, messages []ToolMessage) (_ T, _ []responses.ResponseFunctionToolCall, _ string, runErr error) {
+	c.inputTokens = 0
 	var result T
 	var outputParser LLMOutputParser[*T]
 	var textConfig responses.ResponseTextConfigParam
@@ -170,31 +181,35 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 	}
 
 	var tools []responses.ToolUnionParam
+	candidates := slices.Clone(c.additionalTools)
 	if mcpClientSess != nil {
 		for tool, err := range mcpClientSess.Tools(ctx, nil) {
 			if err != nil {
 				return result, nil, "", fmt.Errorf("task %s: list MCP tools: %w", taskId, err)
 			}
-			if _, ok := c.agentConfig.AllowTools[config.McpToolName(tool.Name)]; !ok {
-				continue
-			}
-			schema, err := json.Marshal(tool.InputSchema)
-			if err != nil {
-				return result, nil, "", fmt.Errorf("task %s: encode tool %s schema: %w", taskId, tool.Name, err)
-			}
-			var parameters map[string]any
-			if err := json.Unmarshal(schema, &parameters); err != nil {
-				return result, nil, "", fmt.Errorf("task %s: decode tool %s schema: %w", taskId, tool.Name, err)
-			}
-			// strict 工具要求所有字段必填，由模型按描述显式提供默认值。
-			if err := strictJSONSchema(parameters, "$"); err != nil {
-				return result, nil, "", fmt.Errorf("task %s: generate strict tool %s schema: %w", taskId, tool.Name, err)
-			}
-			tools = append(tools, responses.ToolUnionParam{OfFunction: &responses.FunctionToolParam{
-				Name: tool.Name, Description: openai.String(tool.Description),
-				Parameters: parameters, Strict: openai.Bool(true),
-			}})
+			candidates = append(candidates, tool)
 		}
+	}
+	for _, tool := range candidates {
+		if _, ok := c.agentConfig.AllowTools[config.McpToolName(tool.Name)]; !ok {
+			continue
+		}
+		schema, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			return result, nil, "", fmt.Errorf("task %s: encode tool %s schema: %w", taskId, tool.Name, err)
+		}
+		var parameters map[string]any
+		if err := json.Unmarshal(schema, &parameters); err != nil {
+			return result, nil, "", fmt.Errorf("task %s: decode tool %s schema: %w", taskId, tool.Name, err)
+		}
+		// strict 工具要求所有字段必填，由模型按描述显式提供默认值。
+		if err := strictJSONSchema(parameters, "$"); err != nil {
+			return result, nil, "", fmt.Errorf("task %s: generate strict tool %s schema: %w", taskId, tool.Name, err)
+		}
+		tools = append(tools, responses.ToolUnionParam{OfFunction: &responses.FunctionToolParam{
+			Name: tool.Name, Description: openai.String(tool.Description),
+			Parameters: parameters, Strict: openai.Bool(true),
+		}})
 	}
 	// 工具定义仅通过 tools 字段提供，避免在 input 中重复注入。
 	params := responses.ResponseNewParams{
@@ -250,11 +265,29 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 	var attemptBodies []*usageBody
 	// 自定义目标接收全部流式片段，stderr 的展示级别由输出适配器处理。
 	answer := &answerStream{lineProtocol: c.agentConfig.LLMConfig.OutputSchema == config.LineProtocolLLMOutputSchema}
-	onTextDelta := func(delta string) {
-		if text := answer.feed(delta); text != "" {
+	// 校验前的流式正文是临时内容；失败时只撤回本次请求已发出的字节。
+	// 使用字节数与 Go/Redis 的 UTF-8 编码一致，避免误删此前轮次的答案。
+	var provisional OutputResetOutput
+	defer func() {
+		if runErr != nil && (provisional.TextBytes > 0 || provisional.AnswerBytes > 0) {
+			c.emitOutput(context.WithoutCancel(ctx), taskId, OutputReset, provisional)
+		}
+	}()
+	var streamedText strings.Builder
+	onTextDelta := func(delta string) error {
+		streamedText.WriteString(delta)
+		text := answer.feed(delta)
+		// 确定非法后不再发布当前片段；立即交由传输层取消，再撤回此前已发布内容。
+		if answer.err != nil {
+			return &OutputParseError{Output: streamedText.String(), Err: answer.err}
+		}
+		provisional.TextBytes += len(delta)
+		if text != "" {
+			provisional.AnswerBytes += len(text)
 			c.emitOutput(ctx, taskId, OutputAnswerDelta, TextOutput{Text: text})
 		}
 		c.emitOutput(ctx, taskId, OutputTextDelta, TextOutput{Text: delta})
+		return nil
 	}
 	response, err := c.strategy.create(ctx, c.client, params, onTextDelta, option.WithMiddleware(func(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
 		resp, requestErr := next(req)
@@ -313,7 +346,17 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 		_ = body.Close()
 	}
 
+	if response != nil {
+		c.inputTokens = response.Usage.InputTokens
+	}
 	if err != nil {
+		var parseErr *OutputParseError
+		if errors.As(err, &parseErr) {
+			log.Printf("task %s: [%s] LLM output format error: %v; output=%q", taskId, c.contextLogLabel, parseErr.Err, parseErr.Output)
+			return result, nil, "", fmt.Errorf("task %s: %w", taskId, parseErr)
+		}
+		// 请求错误可能被上层处理，仍需在 error 级别保留诊断。
+		defer func() { log.Printf("task %s: [%s] LLM request failed: %v", taskId, c.contextLogLabel, runErr) }()
 		// SDK 的 Error() 只含 HTTP 状态；补充服务端诊断，保留原始错误链。
 		var apiErr *openai.Error
 		if errors.As(err, &apiErr) {
@@ -332,8 +375,10 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 	}
 	// 统计已由 HTTP 尝试层记录；此处状态检查和输出解析不得重复计数。
 	if response.Status != responses.ResponseStatusCompleted {
-		return result, nil, "", fmt.Errorf("task %s: response status %q (error: %s, incomplete reason: %s)",
+		err := fmt.Errorf("task %s: response status %q (error: %s, incomplete reason: %s)",
 			taskId, response.Status, response.Error.Message, response.IncompleteDetails.Reason)
+		log.Printf("task %s: [%s] LLM response failed: %v", taskId, c.contextLogLabel, err)
+		return result, nil, "", err
 	}
 	var toolCalls []responses.ResponseFunctionToolCall
 	for _, item := range response.Output {
@@ -359,15 +404,19 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 			}
 		}
 	}
-	if !c.agentConfig.LLMConfig.Stream && strings.TrimSpace(text) != "" {
-		visibleText := answer.feed(text)
-		if c.output == nil {
-			visibleText = text
-		}
-		if c.output != nil || !c.logLevel.InfoEnabled() {
-			c.emitOutput(ctx, taskId, OutputText, TextOutput{Text: visibleText})
+
+	emitNonStreamingText := func() {
+		if !c.agentConfig.LLMConfig.Stream && strings.TrimSpace(text) != "" {
+			visibleText := answer.feed(text)
+			if c.output == nil {
+				visibleText = text
+			}
+			if c.output != nil || !c.logLevel.InfoEnabled() {
+				c.emitOutput(ctx, taskId, OutputText, TextOutput{Text: visibleText})
+			}
 		}
 	}
+
 	if len(toolCalls) > 0 {
 		// 普通说明可以伴随工具调用；可解析的最终结果与工具调用互斥。
 		// 在返回任何调用前整批拒绝，避免执行副作用后再发现完成声明冲突。
@@ -386,6 +435,7 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 				Err:    rejection,
 			})
 		}
+		emitNonStreamingText()
 		return result, toolCalls, text, nil
 	}
 	if strings.TrimSpace(text) == "" {
@@ -395,9 +445,12 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 		text = lineProtocolResponseDocument(text)
 	}
 	if err := outputParser.Parse(text, &result); err != nil {
+		// 格式错误可能被上层纠错重试消化，必须在此记录，error 级别也保留诊断。
+		log.Printf("task %s: [%s] LLM output format error: %v; output=%q", taskId, c.contextLogLabel, err, response.OutputText())
 		var zero T
 		return zero, nil, "", fmt.Errorf("task %s: %w", taskId, &OutputParseError{Output: response.OutputText(), Err: err})
 	}
+	emitNonStreamingText()
 	return result, toolCalls, "", nil
 }
 
@@ -465,18 +518,21 @@ func attemptErrorStatus(err error) string {
 
 // responseStrategy isolates transport; both strategies return the same complete response.
 type responseStrategy interface {
-	create(context.Context, *openai.Client, responses.ResponseNewParams, func(string), ...option.RequestOption) (*responses.Response, error)
+	create(context.Context, *openai.Client, responses.ResponseNewParams, func(string) error, ...option.RequestOption) (*responses.Response, error)
 }
 
 type nonStreamingResponseStrategy struct{}
 
-func (nonStreamingResponseStrategy) create(ctx context.Context, client *openai.Client, params responses.ResponseNewParams, _ func(string), opts ...option.RequestOption) (*responses.Response, error) {
+func (nonStreamingResponseStrategy) create(ctx context.Context, client *openai.Client, params responses.ResponseNewParams, _ func(string) error, opts ...option.RequestOption) (*responses.Response, error) {
 	return client.Responses.New(ctx, params, opts...)
 }
 
 type streamingResponseStrategy struct{}
 
-func (streamingResponseStrategy) create(ctx context.Context, client *openai.Client, params responses.ResponseNewParams, onTextDelta func(string), opts ...option.RequestOption) (*responses.Response, error) {
+func (streamingResponseStrategy) create(ctx context.Context, client *openai.Client, params responses.ResponseNewParams, onTextDelta func(string) error, opts ...option.RequestOption) (*responses.Response, error) {
+	// 格式错误只取消当前 HTTP 请求，父运行上下文必须保持可用以便纠错重试。
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	stream := client.Responses.NewStreaming(ctx, params, opts...)
 	defer stream.Close()
 	var response *responses.Response
@@ -486,7 +542,10 @@ func (streamingResponseStrategy) create(ctx context.Context, client *openai.Clie
 		case "response.output_text.delta":
 			// 仅转发正文片段；工具参数、推理片段和最终完整文本由各自路径处理。
 			if onTextDelta != nil && event.Delta != "" {
-				onTextDelta(event.Delta)
+				if err := onTextDelta(event.Delta); err != nil {
+					cancel()
+					return nil, err
+				}
 			}
 		case "response.completed", "response.failed", "response.incomplete":
 			// Terminal events carry the authoritative full text, tool calls and usage.

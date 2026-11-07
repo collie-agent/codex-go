@@ -14,7 +14,7 @@ import (
 	filemcp "github.com/collie-agent/codex-go/internal/mcp"
 )
 
-func TestReactRetainsCompleteToolHistory(t *testing.T) {
+func TestReactExpiresDiscoveryResultsAndRetainsOtherToolHistory(t *testing.T) {
 	workspace := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workspace, "sample.txt"), []byte("first\nsecond\nthird\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -48,14 +48,14 @@ func TestReactRetainsCompleteToolHistory(t *testing.T) {
 				}
 			}
 			want := 0
-			if turn >= 2 {
+			if turn == 2 {
 				want = 1
 			}
 			if calls != want || outputs != want {
 				t.Errorf("turn %d: %s call/result counts = %d/%d, want %d/%d", turn, id, calls, outputs, want, want)
 			}
 		}
-		// 所有调用及结果在完整执行实例中持续保留。
+		// 非目录检索工具的调用及结果持续保留在模型视图。
 		for readTurn := 2; readTurn < turn; readTurn++ {
 			id := fmt.Sprintf("read_%d", readTurn)
 			calls, outputs := 0, 0
@@ -106,6 +106,9 @@ func TestReactRetainsCompleteToolHistory(t *testing.T) {
 		return nil
 	})
 	result, _, err := process.Run(cfg, durable)
+	if len(durable.ToolExecutions) != 5 || durable.ToolExecutions[0].Result == "" || durable.ToolExecutions[1].Result == "" {
+		t.Error("complete execution history was not retained")
+	}
 	if !registered {
 		t.Error("batch not registered before execution")
 	}

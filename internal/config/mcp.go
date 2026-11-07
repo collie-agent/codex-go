@@ -3,6 +3,7 @@ package config
 type McpToolName string
 
 const (
+	ReadToolResultMCPToolName           McpToolName = "read_tool_result"
 	UpdateCompletionCriteriaMCPToolName McpToolName = "update_completion_criteria"
 	LoadSkillMCPToolName                McpToolName = "load_skill"
 	SwitchToPlanExecuteMCPToolName      McpToolName = "switch_to_plan_execute"

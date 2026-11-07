@@ -1,10 +1,12 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -18,6 +20,41 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/openai/openai-go/v3"
 )
+
+func TestResponsesFailureLoggedAtErrorLevel(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, want string
+		status           int
+	}{
+		{"request", `{"error":{"message":"provider unavailable"}}`, "provider unavailable", http.StatusBadRequest},
+		{"response", `{"status":"failed","error":{"code":"server_error","message":"generation failed"}}`, "generation failed", http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = fmt.Fprint(w, tc.body)
+			}))
+			defer server.Close()
+			client, err := NewResponsesApiClient[struct {
+				Answer string `json:"answer"`
+			}](&config.LLMConfig{ApiKey: "secret", BaseUrl: server.URL, Model: "test", OutputSchema: config.JsonLLMOutputSchema}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client.SetLogLevel(config.ErrorLogLevel)
+			client.SetContextLogLabel("react")
+			var logs bytes.Buffer
+			previous := log.Writer()
+			log.SetOutput(&logs)
+			defer log.SetOutput(previous)
+			_, _, _, err = client.Run(context.Background(), "failure-task", "prompt", nil)
+			if err == nil || !strings.Contains(logs.String(), tc.want) || !strings.Contains(logs.String(), "task failure-task: [react] LLM ") {
+				t.Fatalf("err=%v logs=%q", err, logs.String())
+			}
+		})
+	}
+}
 
 func TestResponsesDisableThinkingAndExposeAPIError(t *testing.T) {
 	for _, schema := range []config.LLMOutputSchema{config.JsonLLMOutputSchema, config.LineProtocolLLMOutputSchema} {

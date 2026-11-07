@@ -23,6 +23,12 @@ base:
   sys_prompt: |
     保持任务范围清晰：只修改工作目录中的目标文件，并在完成时简要说明验证结果。
 agents:
+  # 可选：省略 compact 时继承 base；llm 为整块替换。
+  # compact:
+  #   llm:
+  #     api_key_env: OPENAI_API_KEY
+  #     model: your-compact-model
+  #     output_schema: line_protocol_llm_output
   observe:
     # 空提示词覆盖 base 的提示词，只保留观察器内置提示词。
     sys_prompt: ""

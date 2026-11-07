@@ -70,6 +70,7 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 		durableState.ExecutionID = ""
 		durableState.ExecutionResult = nil
 		durableState.ToolExecutions = nil
+		durableState.ExecutionCompaction = nil
 	}
 	agentConfig = agentConfig.ForAgent("react")
 	rc := r.newContext(agentConfig, durableState)

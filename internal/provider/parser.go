@@ -217,7 +217,12 @@ func blockJSONAt(block *ParsedBlock, t reflect.Type, path string, ancestors map[
 			object[declaration.key] = data
 		} else {
 			if len(values) != 1 {
-				return nil, fmt.Errorf("block %s contains repeated non-array field %s", block.Type, name)
+				message := fmt.Sprintf("block %s contains repeated non-array field %s (path %s)", block.Type, name, protocolPath(path, declaration.key))
+				// 切片元素中的标量重复通常表示把多条记录合并到了同一块；要求模型重新分块，不能猜测字段配对。
+				if strings.HasSuffix(path, "]") {
+					message += fmt.Sprintf(". Put each list item in separate BEGIN %s / END %s blocks, with %s exactly once per block", block.Type, block.Type, name)
+				}
+				return nil, fmt.Errorf("%s", message)
 			}
 			object[declaration.key] = values[0]
 		}

@@ -101,6 +101,7 @@ func (r *BaseReactProcess[T]) SetSkills(skills []Skill) {
 // newContext 只添加两种模式共用的提示词和技能，不选择运行模式。
 func (r *BaseReactProcess[T]) newContext(cfg *config.AgentConfig, durable *fileContext.DurableState) *fileContext.ReactContext {
 	cfg.AllowTools[config.LoadSkillMCPToolName] = struct{}{}
+	cfg.AllowTools[config.ReadToolResultMCPToolName] = struct{}{}
 	delete(cfg.AllowTools, config.SwitchToPlanExecuteMCPToolName)
 	rc := fileContext.NewReactContext(durable)
 	rc.SetSysPrompt(cfg.SysPrompt)
@@ -153,11 +154,26 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 	}
 	worker := NewWorker[T](r.ctx, agentConfig, r.mcpClientSess)
 	worker.output = r.output
+	worker.localTools = []*mcpSdk.Tool{readToolResultDefinition()}
 	// 每个执行实例独立去重；恢复时沿用已登记的调用标识。
 	seenCalls := make(map[string]string)
 	for _, call := range durableState.ToolExecutions {
 		seenCalls[toolInvocationKey(call.ToolName, call.Arguments)] = call.ToolCallId
 	}
+	transient := &transientResultsContext{Contexter: modelContext}
+	compacted := &compactModelContext{Contexter: transient}
+	if len(durableState.ExecutionCompaction) > 0 {
+		var saved ExecutionCompaction
+		if err := json.Unmarshal(durableState.ExecutionCompaction, &saved); err != nil {
+			return zero, nil, fmt.Errorf("restore execution compaction: %w", err)
+		}
+		if saved.ExecutionID == durableState.ExecutionID {
+			compacted.compaction = &saved
+		}
+	}
+	modelContext = compacted
+	compaction := &asyncCompaction{}
+	defer compaction.close()
 	formatErrors := 0
 	toolCallErrors := 0
 	batchOffset := 0
@@ -167,6 +183,8 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 		}
 	}
 	for i := 1; i <= r.maxTurn; i++ {
+		// 同轮纠错不推进过期边界；恢复时最新一批仍供首次决策使用。
+		transient.minimumBatch = batchOffset + i - 1
 		var result T
 		var toolParams []*mcpSdk.CallToolParams
 		// 格式纠错留在当前轮，避免最后一轮的可恢复错误直接耗尽执行预算。
@@ -175,6 +193,12 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 				return zero, nil, err
 			}
 			var err error
+			compacted.corrections = worker.corrections
+			if applied, err := r.prepareCompaction(compaction, agentConfig, durableState, compacted, worker.inputTokens); err != nil {
+				return zero, nil, err
+			} else if applied {
+				worker.inputTokens = 0 // 旧模型视图的 usage 不再用于触发压缩。
+			}
 			result, _, toolParams, err = worker.Run(modelContext)
 			if err == nil {
 				break
@@ -199,7 +223,7 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 				return zero, nil, fmt.Errorf("ReAct turn %d: output format errors exceeded limit (%d): %w", i, maxOutputFormatErrors, err)
 			}
 			// 纠错仅属于本次运行的消息历史，不混入工具观察的 ReportedErrors。
-			worker.corrections = append(worker.corrections, outputFormatCorrection(formatErrors, err, parseErr))
+			worker.corrections = append(worker.corrections, outputFormatCorrection(durableState.RunId, "react", formatErrors, err, parseErr))
 		}
 		if len(toolParams) == 0 {
 			validationErr := validate(result)
@@ -229,6 +253,11 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 		// 在登记和执行前移除重复项，也覆盖模型同一批返回的重复调用。
 		pending := toolParams[:0]
 		for _, param := range toolParams {
+			// 摘要可能已替换此前回读的上下文，纯只读查询允许重新获取同一页。
+			if param.Name == string(config.ReadToolResultMCPToolName) {
+				pending = append(pending, param)
+				continue
+			}
 			args, err := json.Marshal(param.Arguments)
 			if err != nil {
 				return zero, nil, err
@@ -349,12 +378,15 @@ func (r *BaseReactProcess[T]) batchToolCallings(toolParams []*mcpSdk.CallToolPar
 	// 执行前获取本批工具的实际 schema；校验失败也作为工具结果返回下一轮。
 	schemas := make(map[string]any)
 	var schemaErr error
-	for tool, err := range r.mcpClientSess.Tools(r.ctx, nil) {
-		if err != nil {
-			schemaErr = fmt.Errorf("list tool schemas: %w", err)
-			break
+	schemas[string(config.ReadToolResultMCPToolName)] = readToolResultDefinition().InputSchema
+	if r.mcpClientSess != nil {
+		for tool, err := range r.mcpClientSess.Tools(r.ctx, nil) {
+			if err != nil {
+				schemaErr = fmt.Errorf("list tool schemas: %w", err)
+				break
+			}
+			schemas[tool.Name] = tool.InputSchema
 		}
-		schemas[tool.Name] = tool.InputSchema
 	}
 	var wg sync.WaitGroup
 	for _, toolParam := range toolParams {
@@ -375,6 +407,11 @@ func (r *BaseReactProcess[T]) batchToolCallings(toolParams []*mcpSdk.CallToolPar
 			}
 			if err != nil {
 				r.updateContext(&mcpSdk.CallToolResult{IsError: true, Content: []mcpSdk.Content{&mcpSdk.TextContent{Text: err.Error()}}}, toolParam, rc, nil, agentConfig)
+				return
+			}
+			if toolParam.Name == string(config.ReadToolResultMCPToolName) {
+				callResult := r.readToolResult(toolParam, rc.DurableState)
+				r.updateContext(callResult, toolParam, rc, nil, agentConfig)
 				return
 			}
 			callResult, err := r.mcpClientSess.CallTool(r.ctx, toolParam)

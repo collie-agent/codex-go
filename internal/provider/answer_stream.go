@@ -2,6 +2,7 @@ package provider
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"unicode/utf8"
 )
@@ -14,6 +15,7 @@ type answerStream struct {
 	pending      string
 	started      bool
 	done         bool
+	err          error
 }
 
 func (s *answerStream) feed(delta string) string {
@@ -52,20 +54,41 @@ func (s *answerStream) feed(delta string) string {
 				break
 			}
 			if s.pending[1] == 'u' {
+				// 缺失的十六进制位等待下一片段；已出现的非法字符则立即报错。
+				for i := 2; i < min(6, len(s.pending)); i++ {
+					if !strings.ContainsRune("0123456789abcdefABCDEF", rune(s.pending[i])) {
+						s.err = fmt.Errorf("invalid JSON literal for ANSWER: invalid Unicode escape")
+						s.done = true
+						return out.String()
+					}
+				}
 				n = 6
 				if len(s.pending) < n {
 					break
 				}
 				// A high surrogate must wait for its low surrogate across chunk boundaries.
 				if strings.HasPrefix(strings.ToLower(s.pending[2:6]), "d") && strings.ContainsRune("89ab", rune(strings.ToLower(s.pending[3:4])[0])) {
-					n = 12
-					if len(s.pending) < n {
+					if len(s.pending) == 6 || (len(s.pending) == 7 && s.pending[6] == '\\') {
 						break
+					}
+					if strings.HasPrefix(s.pending[6:], `\u`) {
+						for i := 8; i < min(12, len(s.pending)); i++ {
+							if !strings.ContainsRune("0123456789abcdefABCDEF", rune(s.pending[i])) {
+								s.err = fmt.Errorf("invalid JSON literal for ANSWER: invalid Unicode escape")
+								s.done = true
+								return out.String()
+							}
+						}
+						n = 12
+						if len(s.pending) < n {
+							break
+						}
 					}
 				}
 			}
 			var decoded string
-			if json.Unmarshal([]byte("\""+s.pending[:n]+"\""), &decoded) != nil {
+			if err := json.Unmarshal([]byte("\""+s.pending[:n]+"\""), &decoded); err != nil {
+				s.err = fmt.Errorf("invalid JSON literal for ANSWER: %w", err)
 				s.done = true
 				break
 			}
@@ -74,6 +97,7 @@ func (s *answerStream) feed(delta string) string {
 			continue
 		}
 		if c < 0x20 {
+			s.err = fmt.Errorf("invalid JSON literal for ANSWER: unescaped control character 0x%02x", c)
 			s.done = true
 			break
 		}

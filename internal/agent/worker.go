@@ -23,6 +23,8 @@ type Worker[T LLMSchema] struct {
 	mcpClientSess *mcpSdk.ClientSession
 	corrections   []string
 	output        provider.Outputer
+	inputTokens   int64
+	localTools    []*mcpSdk.Tool
 }
 
 // toolCallError 表示模型生成的调用不合法，可反馈纠正；请求和传输错误不属于此类。
@@ -51,6 +53,9 @@ func (w *Worker[T]) Run(modelContext fileContext.Contexter) (result T, text stri
 	client, err := provider.NewResponsesApiClient[T](w.agentConfig.LLMConfig, allowTools)
 	if err != nil {
 		return result, "", nil, err
+	}
+	if request.AllowTools {
+		client.SetAdditionalTools(w.localTools)
 	}
 	client.SetContextLogLabel(request.LogLabel)
 	client.SetLogLevel(w.agentConfig.LogLevel)
@@ -85,6 +90,7 @@ func (w *Worker[T]) Run(modelContext fileContext.Contexter) (result T, text stri
 		})
 	}
 	result, toolCalls, assistantOutput, err := client.RunWithToolMessages(w.ctx, request.RunID, input, session, messages)
+	w.inputTokens = client.InputTokens()
 	if err != nil {
 		return result, "", nil, err
 	}

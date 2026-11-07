@@ -40,6 +40,23 @@ func TestLineProtocolMisplacedFieldReportsPathAndDestination(t *testing.T) {
 	}
 }
 
+func TestLineProtocolRepeatedItemFieldReportsSeparateBlocks(t *testing.T) {
+	type evidence struct {
+		Text          string
+		SourceCallIDs []string
+	}
+	type summary struct {
+		Facts []evidence `lineprotocol:"FACTS"`
+	}
+	var got summary
+	err := (&LineProtocolOutput[*summary]{}).Parse("BEGIN RESULT\nBEGIN FACTS\nTEXT=\"first\"\nSOURCECALLIDS=\"call_1\"\nTEXT=\"second\"\nSOURCECALLIDS=\"call_2\"\nEND FACTS\nEND RESULT", &got)
+	for _, want := range []string{"repeated non-array field TEXT", "Facts[0].Text", "separate BEGIN FACTS / END FACTS blocks", "exactly once"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("error must contain %q, got %v", want, err)
+		}
+	}
+}
+
 func TestJsonOutput(t *testing.T) {
 	var model parserPlan
 	parser := &JsonOutput[*parserPlan]{}

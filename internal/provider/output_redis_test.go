@@ -364,3 +364,20 @@ func TestRedisOutputPreservesAgentAttribution(t *testing.T) {
 		t.Fatalf("event=%+v", e)
 	}
 }
+
+func TestRedisOutputerWritesReset(t *testing.T) {
+	client, _ := testutil.StartRedis(t)
+	output := provider.NewRedisOutputer(rdb.NewRedisManagerWithClient(client))
+	data := json.RawMessage(`{"text_bytes":42,"answer_bytes":6}`)
+	if err := output.Emit(t.Context(), provider.OutputEvent{TaskID: "retry", RunID: "run", AgentInstanceID: "agent", Kind: provider.OutputReset, Data: data}); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := client.XRange(t.Context(), "codex-go-resp-stream-retry", "-", "+").Result()
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("entries=%v err=%v", entries, err)
+	}
+	fields := entries[0].Values
+	if fields["type"] != "output_reset" || fields["delta"] != string(data) || fields["agent_instance_id"] != "agent" || fields["run_id"] != "run" {
+		t.Fatalf("reset lost data or attribution: %v", fields)
+	}
+}

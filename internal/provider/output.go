@@ -17,6 +17,7 @@ const (
 	OutputSchema      OutputKind = "schema"
 	OutputContext     OutputKind = "context"
 	OutputAnswerDelta OutputKind = "answer_delta"
+	OutputReset       OutputKind = "output_reset"
 	OutputTextDelta   OutputKind = "text_delta"
 	OutputText        OutputKind = "text"
 	OutputToolCall    OutputKind = "tool_call"
@@ -29,6 +30,13 @@ const (
 	// 标识一条单个 agent 实例的状态变化事件。它让输出的订阅者知道某个 agent 正在运行、已完成、失败还是被中断，而不必从文本或工具调用结果中推测
 	OutputAgentLifecycle OutputKind = "agent_lifecycle"
 )
+
+// OutputResetOutput 撤回当前失败响应的正文后缀，不影响此前轮次和其他代理。
+// 两个通道分别按 UTF-8 字节数撤回；消费端只处理自己展示的通道。
+type OutputResetOutput struct {
+	TextBytes   int `json:"text_bytes"`
+	AnswerBytes int `json:"answer_bytes"`
+}
 
 // AgentSwitchOutput 表达委派和结果交回；并发分支各自发出切换事件。
 type AgentSwitchOutput struct {

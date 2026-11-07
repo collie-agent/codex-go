@@ -45,6 +45,7 @@ delta: {"text":"hello"}
 | `agent_switch` | `{"src_agent_name":"supervisor","dst_agent_name":"worker"}` |
 | `text_delta` | `{"text":"hello"}` |
 | `answer_delta` | `{"text":"解码后的答案片段"}` |
+| `output_reset` | `{"text_bytes":42,"answer_bytes":6}`（撤回本次失败响应已发送的片段） |
 | `tool_call` | `{"name":"read_file","call_id":"call-1","arguments":"{\"path\":\"a.txt\"}"}` |
 | `tool_result` | `{"name":"read_file","call_id":"call-1","result":[{"type":"text","text":"content"}]}` |
 | `tool_error` | `{"name":"read_file","call_id":"call-1","error":"file missing"}` |
@@ -76,8 +77,29 @@ redis-cli XREAD BLOCK 5000 STREAMS codex-go-resp-stream-your-task-id 0-0
 其他级别只写入 Stream，避免流式内容刷屏。
 同时保留原始 `text_delta`，不发送完整 `text` 事件；同一轮响应中两类片段与 `text` 互斥。
 
+对于已识别的 `answer` / `result.answer` / `ANSWER` 字符串，若流式提取发现未转义的
+控制字符、非法转义（如 `\q`）或 Unicode 转义中出现非法十六进制字符，会立即取消
+当前 LLM 请求并关闭流，不等待完整响应；确认非法的当前 chunk 不再发送。
+随后撤回此前已发送的片段，并以输出格式错误进入原有纠错重试流程，父运行上下文
+保持有效。跨 chunk 尚未收全的 `\`、`\uXXXX` 和 Unicode 代理对会继续等待，
+不会提前判错。其他结构及 schema 错误仍由完整响应解析校验。
+
 这些片段是当前模型轮次的临时内容，不代表任务已成功：完整响应仍需解析和业务校验，
-失败或重试不会撤回已发出的片段。不要跨轮次直接拼接成已确认的最终答案；
+响应格式校验失败、混合最终结果与工具调用被拒绝、请求失败或流中断时，若本次请求已发送片段，
+会在返回错误及后续纠错重试之前发送 `output_reset`，并在所有日志级别（包括 `error`）
+打印撤回的字节数到 stderr。消费端必须处理该事件：按
+`run_id + agent_instance_id` 分别维护各代理的正文，对 `text_delta` 缓冲删除末尾
+`text_bytes` 个 **UTF-8 字节**，对 `answer_delta` 缓冲删除末尾 `answer_bytes` 个
+UTF-8 字节；仅撤回失败请求的内容，保留此前轮次。JavaScript 字符串长度按 UTF-16
+计算，不能直接用这两个字节数调用字符串 `slice`；可用 `TextEncoder` / `TextDecoder`
+对 UTF-8 字节缓冲截断后解码。按 SSE/Redis entry ID 去重，避免重复执行撤回。
+同一响应的 `text_delta` 与 `answer_delta` 是原始正文和解码答案两种视图，选择一种展示，
+不要把两个通道拼接到同一个答案中。非流式 `text` 在完整响应通过解析后才发送，
+格式失败的响应不发送 `text`，也无需撤回。
+
+撤回事件要求消费端升级；忽略该事件的旧消费端仍会保留失败片段。业务校验在代理层执行，
+`output_reset` 只覆盖 provider 请求或格式解析失败，不代表最终业务结果确认。
+不要跨轮次直接拼接成已确认的最终答案；
 队列任务的整体完成仍以 `task_completed` 为准。服务端只提供最终文本、未提供
 正文 delta 时，不会补发 `answer_delta`。
 

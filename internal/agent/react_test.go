@@ -195,10 +195,20 @@ func TestReactRetriesOutputParseErrors(t *testing.T) {
 				defer server.Close()
 				// 最后一轮也应允许纠正格式，不消耗工具执行的轮数预算。
 				process := &ReactProcess[ReactResult]{BaseReactProcess: BaseReactProcess[ReactResult]{ctx: t.Context(), maxTurn: 1}}
-				cfg := &config.AgentConfig{LLMConfig: &config.LLMConfig{
+				cfg := &config.AgentConfig{LogLevel: config.ErrorLogLevel, LLMConfig: &config.LLMConfig{
 					BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: schema,
 				}}
+				var logs bytes.Buffer
+				writer := log.Writer()
+				log.SetOutput(&logs)
+				t.Cleanup(func() { log.SetOutput(writer) })
 				got, next, err := process.Run(cfg, &fileContext.DurableState{CompletionCriteria: []string{"original task verified"}, RunId: "retry-task", Goal: "answer"})
+				for _, count := range []string{"1/3", "2/3", "3/3"} {
+					want := "task retry-task: [react] LLM output format error (" + count + "):"
+					if strings.Count(logs.String(), want) != 1 {
+						t.Errorf("expected one %q log at error level: %s", want, logs.String())
+					}
+				}
 				if calls != 4 {
 					t.Fatalf("requests = %d, want 4; err = %v", calls, err)
 				}

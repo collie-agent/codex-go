@@ -37,7 +37,7 @@ func (o *RedisOutputer) Emit(ctx context.Context, event OutputEvent) error {
 	switch event.Kind {
 	case OutputSchema, OutputContext, OutputRawResponse:
 		return nil
-	case OutputTaskInfo, OutputAnswerDelta, OutputText, OutputTextDelta, OutputToolCall, OutputToolResult, OutputToolError, OutputUsage, OutputAgentSwitch, OutputKind("agent_lifecycle"), OutputKind("task_completed"), OutputKind("task_interrupted"):
+	case OutputReset, OutputTaskInfo, OutputAnswerDelta, OutputText, OutputTextDelta, OutputToolCall, OutputToolResult, OutputToolError, OutputUsage, OutputAgentSwitch, OutputKind("agent_lifecycle"), OutputKind("task_completed"), OutputKind("task_interrupted"):
 	default:
 		return fmt.Errorf("redis output: unsupported event type %q", event.Kind)
 	}

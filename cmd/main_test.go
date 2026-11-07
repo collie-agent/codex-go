@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -161,8 +162,13 @@ func TestRunAgentUsesYAMLAllowedToolAndReturnsItsResultToModel(t *testing.T) {
 			return
 		}
 		requests++
-		if len(request.Tools) != 3 || request.Tools[0].Name != "load_skill" || request.Tools[1].Name != "read_file" || request.Tools[2].Name != "switch_to_plan_execute" {
-			t.Errorf("model saw tools %v, want read_file and built-in control tools", request.Tools)
+		names := make([]string, 0, len(request.Tools))
+		for _, tool := range request.Tools {
+			names = append(names, tool.Name)
+		}
+		slices.Sort(names)
+		if !slices.Equal(names, []string{"load_skill", "read_file", "read_tool_result", "switch_to_plan_execute"}) {
+			t.Errorf("model saw tools %v, want read_file and built-in tools", request.Tools)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if requests == 1 {
@@ -220,8 +226,13 @@ func TestRunAgentRejectsModelCallOutsideYAMLAllowedTools(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		if len(request.Tools) != 3 || request.Tools[0].Name != "load_skill" || request.Tools[1].Name != "read_file" || request.Tools[2].Name != "switch_to_plan_execute" {
-			t.Errorf("model saw tools %v, want read_file and built-in control tools", request.Tools)
+		names := make([]string, 0, len(request.Tools))
+		for _, tool := range request.Tools {
+			names = append(names, tool.Name)
+		}
+		slices.Sort(names)
+		if !slices.Equal(names, []string{"load_skill", "read_file", "read_tool_result", "switch_to_plan_execute"}) {
+			t.Errorf("model saw tools %v, want read_file and built-in tools", request.Tools)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -384,7 +395,7 @@ func TestRunAgentUsesObserveAgentConfiguration(t *testing.T) {
 	}
 }
 
-func TestRunAgentWithEmptyYAMLAllowedToolsExposesNoTools(t *testing.T) {
+func TestRunAgentWithEmptyYAMLAllowedToolsExposesOnlyBuiltInTools(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if testutil.RespondWithCriteria(t, w, r) {
 			return
@@ -396,8 +407,13 @@ func TestRunAgentWithEmptyYAMLAllowedToolsExposesNoTools(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		if len(request.Tools) != 2 || request.Tools[0].Name != "load_skill" || request.Tools[1].Name != "switch_to_plan_execute" {
-			t.Errorf("model saw tools %v, want built-in control tools", request.Tools)
+		names := make([]string, 0, len(request.Tools))
+		for _, tool := range request.Tools {
+			names = append(names, tool.Name)
+		}
+		slices.Sort(names)
+		if !slices.Equal(names, []string{"load_skill", "read_tool_result", "switch_to_plan_execute"}) {
+			t.Errorf("model saw tools %v, want built-in tools", request.Tools)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{

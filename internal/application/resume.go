@@ -142,6 +142,7 @@ func Resume(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 		durable.ExecutionID = saved.ExecutionID
 		durable.ExecutionResult = saved.ExecutionResult
 		durable.ToolExecutions = saved.ToolExecutions
+		durable.ExecutionCompaction = saved.ExecutionCompaction
 	}
 	if mode == "multi-agent" {
 		durable.MultiAgentCheckpoint = append([]byte(nil), run.MultiAgentCheckpoint...)
@@ -153,6 +154,7 @@ func Resume(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 			durable.ExecutionID = saved.ExecutionID
 			durable.ExecutionResult = saved.ExecutionResult
 			durable.ToolExecutions = saved.ToolExecutions
+			durable.ExecutionCompaction = saved.ExecutionCompaction
 		}
 	}
 	if mode == "plan-execute" {
@@ -176,6 +178,7 @@ func Resume(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 					return nil, fmt.Errorf("load step execution instance: %w", err)
 				}
 				durable.ExecutionID, durable.ExecutionResult, durable.ToolExecutions = saved.ExecutionID, saved.ExecutionResult, saved.ToolExecutions
+				durable.ExecutionCompaction = saved.ExecutionCompaction
 				break
 			}
 			if step.Status == state.PendingExecutionStatus {
