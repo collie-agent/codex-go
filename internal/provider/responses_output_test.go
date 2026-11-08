@@ -168,7 +168,7 @@ func TestResponsesEmitsUsage(t *testing.T) {
 	if data != want || events[0].TaskID != "output-task" || events[0].Label != "observe" {
 		t.Fatalf("usage event=%+v data=%+v", events[0], data)
 	}
-	if len(output.events) != 2 || output.events[0].Kind != OutputUsage || output.events[1].Kind != OutputText {
+	if len(output.events) != 3 || output.events[0].Kind != OutputUsage || output.events[1].Kind != OutputAnswerDelta || output.events[2].Kind != OutputText {
 		t.Fatalf("event order=%v", output.events)
 	}
 }
@@ -279,5 +279,33 @@ func TestResponsesEmitsText(t *testing.T) {
 	}
 	if events[0].TaskID != "output-task" || events[0].Label != "observe" || data.Text != "ok" {
 		t.Fatalf("event=%+v data=%+v", events[0], data)
+	}
+}
+
+func TestResponsesEmitsToolExplanation(t *testing.T) {
+	const explanation = "我需要继续检查压缩触发阈值所在的位置，以及它与其他上下文预算逻辑的关系。"
+	for _, level := range []config.LogLevel{config.InfoLogLevel, config.ErrorLogLevel} {
+		t.Run(string(level), func(t *testing.T) {
+			body := `{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"` + explanation + `"}]},{"type":"function_call","call_id":"call-1","name":"inspect","arguments":"{}"}]}`
+			client := newOutputTestClient(t, body, false)
+			client.SetLogLevel(level)
+			var output recordedOutput
+			client.SetOutputer(&output)
+			_, calls, text, err := client.RunWithToolMessages(t.Context(), "output-task", "inspect", nil, nil)
+			if err != nil || len(calls) != 1 || text != explanation {
+				t.Fatalf("calls=%v text=%q err=%v", calls, text, err)
+			}
+			events := output.ofKind(OutputText)
+			if len(events) != 1 {
+				t.Fatalf("text events=%v", events)
+			}
+			var data TextOutput
+			if err := json.Unmarshal(events[0].Data, &data); err != nil {
+				t.Fatal(err)
+			}
+			if data.Text != explanation {
+				t.Fatalf("text=%q", data.Text)
+			}
+		})
 	}
 }

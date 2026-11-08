@@ -17,16 +17,18 @@ const (
 	OutputSchema      OutputKind = "schema"
 	OutputContext     OutputKind = "context"
 	OutputAnswerDelta OutputKind = "answer_delta"
-	OutputReset       OutputKind = "output_reset"
-	OutputTextDelta   OutputKind = "text_delta"
-	OutputText        OutputKind = "text"
-	OutputToolCall    OutputKind = "tool_call"
-	OutputToolResult  OutputKind = "tool_result"
-	OutputToolError   OutputKind = "tool_error"
-	OutputUsage       OutputKind = "usage"
-	OutputRawResponse OutputKind = "raw_response"
-	OutputTaskInfo    OutputKind = "task_info"
-	OutputAgentSwitch OutputKind = "agent_switch"
+	// OutputAssistantDelta 只承载工具调用伴随的可见过程说明。
+	OutputAssistantDelta OutputKind = "assistant_delta"
+	OutputReset          OutputKind = "output_reset"
+	OutputTextDelta      OutputKind = "text_delta"
+	OutputText           OutputKind = "text"
+	OutputToolCall       OutputKind = "tool_call"
+	OutputToolResult     OutputKind = "tool_result"
+	OutputToolError      OutputKind = "tool_error"
+	OutputUsage          OutputKind = "usage"
+	OutputRawResponse    OutputKind = "raw_response"
+	OutputTaskInfo       OutputKind = "task_info"
+	OutputAgentSwitch    OutputKind = "agent_switch"
 	// 标识一条单个 agent 实例的状态变化事件。它让输出的订阅者知道某个 agent 正在运行、已完成、失败还是被中断，而不必从文本或工具调用结果中推测
 	OutputAgentLifecycle OutputKind = "agent_lifecycle"
 )
@@ -64,7 +66,7 @@ type AgentLifecycleOutput struct {
 // isDeltaOutput 判断事件是否为流式正文增量。
 // 这类事件量大且属于临时内容，只有 debug 级别才回显到 stderr，避免刷屏。
 func isDeltaOutput(kind OutputKind) bool {
-	return kind == OutputTextDelta || kind == OutputAnswerDelta
+	return kind == OutputTextDelta || kind == OutputAnswerDelta || kind == OutputAssistantDelta
 }
 
 // ToolResultOutput 用 call_id 关联工具调用；Result 保存原生 MCP content JSON。

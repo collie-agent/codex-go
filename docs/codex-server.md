@@ -94,7 +94,7 @@ data: {"id":"1793261930925-0","type":"text_delta","delta":"{\"text\":\"hello\"}"
 | `id` | string | Redis Stream ID，与 SSE 的 `id` 相同。 |
 | `run_id` | string | 所属代理运行 ID，与任务流 ID 分开。 |
 | `agent_instance_id`、`parent_agent_instance_id`、`agent_name` | string | 代理参与实例归属；主代理父身份为空，运行汇总可无代理身份。 |
-| `type` | string | 输出类型，如 `task_info`、`agent_lifecycle`、`answer_delta`、`text_delta`、`tool_call`、`tool_result`、`tool_error`、`text`、`usage`、`task_completed` 或 `task_interrupted`。 |
+| `type` | string | 输出类型，如 `task_info`、`agent_lifecycle`、`assistant_delta`、`answer_delta`、`text_delta`、`tool_call`、`tool_result`、`tool_error`、`text`、`usage`、`task_completed` 或 `task_interrupted`。 |
 | `delta` | string | 对应类型的数据，以 JSON **字符串**编码；需要对该字符串再次解析 JSON。 |
 
 HTTP 接口的 JSON 字段使用小写下划线命名；旧版 `ConvId`、`ID`、`Type` 和 `Delta` 字段需要相应更新。各类型的 `delta` 结构、流式输出配置及保留策略见 [Redis Stream 输出](redis-output.md)。客户端应按 SSE 协议解析事件，再解析 `data` JSON；如果需要读取具体内容，再解析 `delta`。例如浏览器中可使用：
@@ -125,7 +125,14 @@ data: {"id":"1793261930926-0","type":"task_completed","delta":"{}"}
 
 SSE 接口只从 Redis Stream 读取并推送事件，不写入 MySQL。Redis 读取失败会结束连接；由于响应头已经发送，客户端通常只能观察到连接断开。续传仍从 Redis 读取，并受 Redis Stream 保留时间限制。
 
-模型配置 `stream: false` 时，`text` 的 `delta` 为 `{"text":"提取并解码后的 answer"}`；`stream: true` 时发送 `text_delta/answer_delta`，不发送 `text`。互斥规则按模型轮次生效。
+客户端按 SSE 数据中的 `type` 区分可见内容，`delta` 是 JSON 字符串，解析后读取 `text`：
+
+- `assistant_delta`：工具调用伴随的过程说明，追加到过程区。流式和非流式均支持；在该轮响应完成并通过工具/最终结果互斥校验后整段发送，不保证随模型 token 实时到达。
+- `answer_delta`：提取并解码的答案，追加到答案区。流式请求逐片发送，非流式请求解析成功后整段发送。
+- `text_delta`：原始流式正文，可能包含 JSON 或 line protocol，仅用于原文查看或诊断。
+- `text`：非流式兼容事件，可能是答案或工具说明。使用前两个语义事件的客户端应忽略 `text` 和 `text_delta`，避免重复显示。
+
+流式答案是临时内容，仍需处理 `output_reset` 的 `answer_bytes` 撤回（UTF-8 字节），并以 `task_completed` 判断整体完成。过程说明在响应校验后发送，不使用 `answer_bytes` 或 `text_bytes` 撤回。
 
 ## 获取运行和会话 ID
 

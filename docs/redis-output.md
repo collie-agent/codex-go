@@ -44,6 +44,7 @@ delta: {"text":"hello"}
 | `agent_lifecycle` | `{"status":"running"}`（状态及转换见[代理生命周期协议](agent-lifecycle.md)） |
 | `agent_switch` | `{"src_agent_name":"supervisor","dst_agent_name":"worker"}` |
 | `text_delta` | `{"text":"hello"}` |
+| `assistant_delta` | `{"text":"继续检查上下文预算。"}` |
 | `answer_delta` | `{"text":"解码后的答案片段"}` |
 | `output_reset` | `{"text_bytes":42,"answer_bytes":6}`（撤回本次失败响应已发送的片段） |
 | `tool_call` | `{"name":"read_file","call_id":"call-1","arguments":"{\"path\":\"a.txt\"}"}` |
@@ -60,7 +61,7 @@ delta: {"text":"hello"}
 
 主动中断的队列任务在中断状态保存成功后发送 `task_interrupted`，不发送 `task_completed`；中断状态保存失败不会发送 `task_interrupted`。该事件同样使用任务的 Stream，支持回放和续传。
 
-Stream 不发送 schema、请求上下文和原始响应；这些事件仅按日志配置输出。流式 delta、工具结果和 usage 不受 `log_level` 过滤；`stream: false` 时只发送提取后的 `text`，不发送 `text_delta/answer_delta`。usage 按每次 HTTP 尝试记录，缺失计数使用字符串 `"unknown"`，与 `"0"` 区分。
+Stream 不发送 schema、请求上下文和原始响应；这些事件仅按日志配置输出。流式 delta、工具结果和 usage 不受 `log_level` 过滤；`stream: false` 时答案发送 `answer_delta`，同时保留兼容 `text`，不发送 `text_delta`。usage 按每次 HTTP 尝试记录，缺失计数使用字符串 `"unknown"`，与 `"0"` 区分。
 
 消费者可以用 `XRANGE` 或 `XREAD` 读取临时 Stream；每次写入将过期时间刷新为 24 小时。SSE 的 `id` 是 Redis Stream 事件标识，用于该任务流内的去重和续传。服务端不提供运行事件历史查询接口，Stream 过期后无法通过任务级 SSE 补读。
 
@@ -75,7 +76,9 @@ redis-cli XREAD BLOCK 5000 STREAMS codex-go-resp-stream-your-task-id 0-0
 `ANSWER` 字符串。字段名、转义和 Unicode 代理对跨 chunk 时会等待足够输入，
 只发送已解码的内容。codex.log 仅在 `log_level: debug` 时打印 `LLM answer delta=...`，
 其他级别只写入 Stream，避免流式内容刷屏。
-同时保留原始 `text_delta`，不发送完整 `text` 事件；同一轮响应中两类片段与 `text` 互斥。
+同时保留原始 `text_delta`，不发送完整 `text` 事件。`stream: false` 时，答案解析成功后通过 `answer_delta` 整段发送，同时保留旧 `text` 事件。
+
+工具调用伴随的可见过程说明通过独立的 `assistant_delta` 发送，流式和非流式请求使用相同协议。为避免将结构化最终结果误发为说明，服务端等待该轮响应完成且通过工具调用与最终结果互斥校验，再整段发送说明；它不保证逐 token 到达。无说明的工具调用不发送空事件，被拒绝的混合结果不发送说明。该事件不受 `log_level` 过滤，日志仅在 debug 级别回显。
 
 对于已识别的 `answer` / `result.answer` / `ANSWER` 字符串，若流式提取发现未转义的
 控制字符、非法转义（如 `\q`）或 Unicode 转义中出现非法十六进制字符，会立即取消
@@ -93,9 +96,7 @@ redis-cli XREAD BLOCK 5000 STREAMS codex-go-resp-stream-your-task-id 0-0
 UTF-8 字节；仅撤回失败请求的内容，保留此前轮次。JavaScript 字符串长度按 UTF-16
 计算，不能直接用这两个字节数调用字符串 `slice`；可用 `TextEncoder` / `TextDecoder`
 对 UTF-8 字节缓冲截断后解码。按 SSE/Redis entry ID 去重，避免重复执行撤回。
-同一响应的 `text_delta` 与 `answer_delta` 是原始正文和解码答案两种视图，选择一种展示，
-不要把两个通道拼接到同一个答案中。非流式 `text` 在完整响应通过解析后才发送，
-格式失败的响应不发送 `text`，也无需撤回。
+客户端以 `assistant_delta` 展示过程说明，以 `answer_delta` 展示答案，忽略兼容 `text` 和原始 `text_delta`，避免重复显示或将协议文本当作说明。`assistant_delta` 在响应校验后才发送，不参与 `output_reset` 的正文/答案撤回。非流式答案在完整响应通过解析后才发送，格式失败的非流式响应不发送答案，也无需撤回。
 
 撤回事件要求消费端升级；忽略该事件的旧消费端仍会保留失败片段。业务校验在代理层执行，
 `output_reset` 只覆盖 provider 请求或格式解析失败，不代表最终业务结果确认。
@@ -109,6 +110,6 @@ Line protocol 也支持空格或 Tab 分隔的单行格式，例如
 流式提取和最终解析使用相同的分隔规则，字符串内的空格、协议关键字和转义保持原样；
 原有逐行格式仍然支持。
 
-实时输出使用 `/tasks/{task_id}/events`；接续说明见[任务输出接续](output-replay.md)。
+实时输出使用 `/tasks/{task_id}/events`；浏览器事件分流、UTF-8 撤回、去重及重连示例见[客户端对接示例](codex-server.md#客户端对接示例)，接续说明见[任务输出接续](output-replay.md)。
 
 多代理模式在委派前发送 `agent_switch`（父代理 → 子代理），子代理产生最终结果并交回父代理时发送反向事件，包括显式返回、无后续委派和业务失败。主代理最终结束、模型多轮执行及执行错误不产生额外切换事件。事件归属于发起切换的代理参与实例，消息体中的名称只用于展示；并发分支分别发出事件，不表示全局只有一个代理在运行。切换事件沿用统一的 Redis 和 SSE 链路；写入错误向上传播，并停止后续调度。恢复跳过的已完成子代理不重新发送切换事件。

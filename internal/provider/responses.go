@@ -408,7 +408,8 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 	emitNonStreamingText := func() {
 		if !c.agentConfig.LLMConfig.Stream && strings.TrimSpace(text) != "" {
 			visibleText := answer.feed(text)
-			if c.output == nil {
+			// 工具调用附带的说明是可见正文，不含结构化 answer，也必须发送到 SSE。
+			if c.output == nil || len(toolCalls) > 0 {
 				visibleText = text
 			}
 			if c.output != nil || !c.logLevel.InfoEnabled() {
@@ -435,6 +436,10 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 				Err:    rejection,
 			})
 		}
+		// 终态才能确认正文属于工具说明；不将原始协议文本增量直接当作说明。
+		if strings.TrimSpace(text) != "" {
+			c.emitOutput(ctx, taskId, OutputAssistantDelta, TextOutput{Text: text})
+		}
 		emitNonStreamingText()
 		return result, toolCalls, text, nil
 	}
@@ -449,6 +454,13 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 		log.Printf("[ERROR] task %s: [%s] LLM output format error: %v; output=%q", taskId, c.contextLogLabel, err, response.OutputText())
 		var zero T
 		return zero, nil, "", fmt.Errorf("task %s: %w", taskId, &OutputParseError{Output: response.OutputText(), Err: err})
+	}
+	if !c.agentConfig.LLMConfig.Stream {
+		// 与流式调用使用相同的答案通道；旧 text 事件继续供兼容客户端消费。
+		decoded := (&answerStream{lineProtocol: c.agentConfig.LLMConfig.OutputSchema == config.LineProtocolLLMOutputSchema}).feed(text)
+		if decoded != "" {
+			c.emitOutput(ctx, taskId, OutputAnswerDelta, TextOutput{Text: decoded})
+		}
 	}
 	emitNonStreamingText()
 	return result, toolCalls, "", nil

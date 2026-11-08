@@ -275,8 +275,12 @@ func TestResponsesRedisNonStreamingTextContainsExtractedAnswer(t *testing.T) {
 		switch entry.Values["type"] {
 		case "text":
 			texts = append(texts, entry.Values["delta"].(string))
-		case "text_delta", "answer_delta":
-			t.Fatalf("non-streaming delta: %+v", entry)
+		case "answer_delta":
+			if entry.Values["delta"] != `{"text":"hello\n世界"}` {
+				t.Fatalf("answer delta: %+v", entry)
+			}
+		case "text_delta":
+			t.Fatalf("non-streaming raw delta: %+v", entry)
 		}
 	}
 	if len(texts) != 1 || texts[0] != `{"text":"hello\n世界"}` {

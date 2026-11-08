@@ -145,20 +145,20 @@ func TestConsumerCompletesTerminalTasksAfterOutputButNotExecutionFailure(t *test
 				if event.ID == "" {
 					t.Fatal("completion missing Redis stream ID")
 				}
-				replay, err := manager.ReadTaskStream(ctx, "queued-task", "0-0")
-				if err != nil {
-					t.Fatal(err)
-				}
 				found := false
-				for _, saved := range replay {
-					if saved.ID == event.ID {
-						found = true
+				// ReadTaskStream 分页返回；新增输出事件后终态可能落在下一页。
+				for replayID := "0-0"; !found; {
+					replay, err := manager.ReadTaskStream(ctx, "queued-task", replayID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, saved := range replay {
+						replayID = saved.ID
+						if saved.ID == event.ID {
+							found = true
+						}
 					}
 				}
-				if !found {
-					t.Fatal("completion unavailable in Redis replay")
-				}
-
 				if event.RunID == "" || event.RunID == "queued-task" || event.AgentInstanceID != "" || event.ParentAgentInstanceID != "" || event.AgentName != "" {
 					t.Fatalf("wrong run summary attribution: %+v", event)
 				}

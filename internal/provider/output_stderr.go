@@ -87,7 +87,7 @@ func (o *StderrOutputer) Emit(ctx context.Context, event OutputEvent) error {
 			return err
 		}
 		message = "LLM response text=" + data.Text
-	case OutputTextDelta, OutputAnswerDelta:
+	case OutputTextDelta, OutputAnswerDelta, OutputAssistantDelta:
 		var data TextOutput
 		if err := json.Unmarshal(event.Data, &data); err != nil {
 			return err

@@ -72,7 +72,7 @@ func TestRejectedResponseDoesNotDuplicateAnswer(t *testing.T) {
 						t.Fatal(err)
 					}
 					switch event.Kind {
-					case OutputAnswerDelta, OutputText:
+					case OutputAnswerDelta:
 						answer += data.Text
 					case OutputTextDelta:
 						raw += data.Text
