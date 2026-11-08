@@ -29,6 +29,10 @@ func Resume(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	opts = resolveExecOptions(opts, loaded)
+	if err := config.ValidateExecPolicy(opts.ExecNetwork, opts.ExecEnv); err != nil {
+		return nil, err
+	}
 	if opts.Timeout <= 0 {
 		return nil, fmt.Errorf("--timeout must be positive")
 	}
@@ -205,9 +209,21 @@ func newOrchestrator(ctx context.Context, workspace string, opts Options) runOrc
 	if opts.Mode == "multi-agent" {
 		var multi *agent.MultiAgentProcessorOrchestrator
 		if opts.MCPCommand == "" {
-			multi = agent.NewMultiAgentProcessorOrchestrator(ctx, filemcp.Config{Workspace: workspace, Timeout: opts.Timeout, RuntimeDirs: opts.RuntimeDirs})
+			multi = agent.NewMultiAgentProcessorOrchestrator(ctx, filemcp.Config{Workspace: workspace, Timeout: opts.Timeout, RuntimeDirs: opts.RuntimeDirs, DiscoverHostCommands: opts.DiscoverHostCommands, ExecCommands: opts.ExecCommands, ExecNetwork: opts.ExecNetwork, ExecEnv: opts.ExecEnv})
 		} else {
 			args := []string{"--workspace", workspace, "--timeout", opts.Timeout.String()}
+			if opts.ExecNetwork != "" {
+				args = append(args, "--exec-network", opts.ExecNetwork)
+			}
+			for _, name := range opts.ExecEnv {
+				args = append(args, "--exec-env", name)
+			}
+			if opts.DiscoverHostCommands {
+				args = append(args, "--discover-host-commands")
+			}
+			for _, command := range opts.ExecCommands {
+				args = append(args, "--exec-command", command)
+			}
 			for _, dir := range opts.RuntimeDirs {
 				args = append(args, "--runtime-dir", dir)
 			}
@@ -218,9 +234,21 @@ func newOrchestrator(ctx context.Context, workspace string, opts Options) runOrc
 	}
 	var orchestrator *agent.ProcessorOrchestrator
 	if opts.MCPCommand == "" {
-		orchestrator = agent.NewProcessorOrchestrator(ctx, filemcp.Config{Workspace: workspace, Timeout: opts.Timeout, RuntimeDirs: opts.RuntimeDirs})
+		orchestrator = agent.NewProcessorOrchestrator(ctx, filemcp.Config{Workspace: workspace, Timeout: opts.Timeout, RuntimeDirs: opts.RuntimeDirs, DiscoverHostCommands: opts.DiscoverHostCommands, ExecCommands: opts.ExecCommands, ExecNetwork: opts.ExecNetwork, ExecEnv: opts.ExecEnv})
 	} else {
 		args := []string{"--workspace", workspace, "--timeout", opts.Timeout.String()}
+		if opts.ExecNetwork != "" {
+			args = append(args, "--exec-network", opts.ExecNetwork)
+		}
+		for _, name := range opts.ExecEnv {
+			args = append(args, "--exec-env", name)
+		}
+		if opts.DiscoverHostCommands {
+			args = append(args, "--discover-host-commands")
+		}
+		for _, command := range opts.ExecCommands {
+			args = append(args, "--exec-command", command)
+		}
 		for _, dir := range opts.RuntimeDirs {
 			args = append(args, "--runtime-dir", dir)
 		}

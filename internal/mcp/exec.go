@@ -18,19 +18,22 @@ import (
 
 // CommandExecutor executes approved entrypoints inside a fresh sandbox.
 type CommandExecutor struct {
-	bwrap      string
-	path       []string
-	mounts     []string
-	runtime    []string
-	goModCache string
+	network     string
+	environment []string
+	bwrap       string
+	path        []string
+	mounts      []string
+	runtime     []string
+	goModCache  string
+	allowed     map[string]bool
+	discovered  map[string]string
 }
 
-// CommandResult retains at most 1 MiB of combined stdout and stderr.
+// CommandResult retains the complete stdout and stderr captured during execution.
 type CommandResult struct {
-	Stdout    string
-	Stderr    string
-	ExitCode  int
-	Truncated bool
+	Stdout   string
+	Stderr   string
+	ExitCode int
 }
 
 // Error classes let callers distinguish rejected inputs from a sandbox that
@@ -72,7 +75,7 @@ func NewCommandExecutor(runtimeDirs ...string) (*CommandExecutor, error) {
 	// PATH is fixed at initialization: it searches only trusted system
 	// directories and host-authorized runtime directories, never Workspace.
 	// Every runtime entry is mounted read-only but exposes its full contents.
-	controlledPath := []string{"/usr/bin", "/bin"}
+	controlledPath := []string{"/usr/local/bin", "/usr/bin", "/bin"}
 	for _, dir := range runtimes {
 		controlledPath = append(controlledPath, dir, filepath.Join(dir, "bin"))
 	}
@@ -115,9 +118,7 @@ func NewCommandExecutor(runtimeDirs ...string) (*CommandExecutor, error) {
 // Captured output is retained on errors, and interruption wraps ctx.Err().
 func (e *CommandExecutor) Execute(ctx context.Context, workspace, name string, args []string) (CommandResult, error) {
 	// Only entrypoint names are accepted; paths must never bypass controlled resolution.
-	switch name {
-	case "cargo", "find", "git", "go", "grep", "npm", "poetry", "python", "python3", "rg", "rustc", "sed", "ts-node", "tsx":
-	default:
+	if !e.commandAllowed(name) {
 		return CommandResult{}, fmt.Errorf("%w: unapproved command %q", ErrCommandParameter, name)
 	}
 	root, err := resolveWorkspace(workspace)
@@ -154,9 +155,16 @@ func (e *CommandExecutor) Execute(ctx context.Context, workspace, name string, a
 		}
 	}
 	if executable == "" {
+		executable = e.discovered[name]
+	}
+	if executable == "" {
 		return CommandResult{}, fmt.Errorf("%w: command unavailable in controlled PATH: %s", ErrCommandParameter, name)
 	}
-	sandboxArgs := []string{"--unshare-user", "--unshare-pid", "--unshare-net", "--unshare-ipc", "--unshare-uts", "--cap-drop", "ALL", "--die-with-parent", "--new-session", "--hostname", "command-sandbox", "--clearenv"}
+	sandboxArgs := []string{"--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--cap-drop", "ALL", "--die-with-parent", "--new-session", "--hostname", "command-sandbox", "--clearenv"}
+	// Host networking is an explicit grant to the entire command process tree.
+	if e.network != "host" {
+		sandboxArgs = append(sandboxArgs, "--unshare-net")
+	}
 	// A fresh mount namespace exposes system runtimes read-only, never host HOME or /etc wholesale.
 	for _, dir := range commandSystemDirs {
 		if _, statErr := os.Stat(dir); statErr == nil {
@@ -179,7 +187,18 @@ func (e *CommandExecutor) Execute(ctx context.Context, workspace, name string, a
 		sandboxArgs = append(sandboxArgs, "--ro-bind", e.goModCache, "/run/go-mod-cache", "--setenv", "GOMODCACHE", "/run/go-mod-cache")
 	}
 	sandboxArgs = append(sandboxArgs, "--setenv", "GOPROXY", "off", "--setenv", "GOSUMDB", "off", "--setenv", "GOTOOLCHAIN", "local")
-	sandboxArgs = append(sandboxArgs, "--bind", root, root, "--chdir", root,
+	for _, value := range e.environment {
+		name, value, _ := strings.Cut(value, "=")
+		sandboxArgs = append(sandboxArgs, "--setenv", name, value)
+	}
+	sandboxArgs = append(sandboxArgs, "--bind", root, root)
+	// Rebind Git metadata explicitly: the workspace can contain an inherited
+	// read-only .git submount. Never expose a symlink target outside Workspace.
+	gitDir := filepath.Join(root, ".git")
+	if info, err := os.Lstat(gitDir); err == nil && info.IsDir() {
+		sandboxArgs = append(sandboxArgs, "--bind", gitDir, gitDir)
+	}
+	sandboxArgs = append(sandboxArgs, "--chdir", root,
 		"--setenv", "PATH", strings.Join(e.path, ":"), "--setenv", "LANG", "C.UTF-8", "--setenv", "HOME", "/run/home", "--setenv", "XDG_CACHE_HOME", "/run/cache", "--setenv", "TMPDIR", "/tmp", "--", executable)
 	sandboxArgs = append(sandboxArgs, args...)
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -213,7 +232,7 @@ func (e *CommandExecutor) Execute(ctx context.Context, workspace, name string, a
 	cmd.Stdout = commandStream{capture, false}
 	cmd.Stderr = commandStream{capture, true}
 	err = cmd.Run()
-	result := CommandResult{Stdout: capture.stdout.String(), Stderr: capture.stderr.String(), ExitCode: -1, Truncated: capture.truncated}
+	result := CommandResult{Stdout: capture.stdout.String(), Stderr: capture.stderr.String(), ExitCode: -1}
 	if cmd.ProcessState != nil {
 		result.ExitCode = cmd.ProcessState.ExitCode()
 	}
@@ -251,13 +270,11 @@ func containsDirectory(parent, child string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// Only execution time and captured output are bounded. There are no CPU,
+// Only execution time is bounded. There are no CPU,
 // memory, process-count or disk quotas in this version.
 type commandCapture struct {
 	mu             sync.Mutex
 	stdout, stderr bytes.Buffer
-	size           int
-	truncated      bool
 }
 type commandStream struct {
 	capture *commandCapture
@@ -266,21 +283,11 @@ type commandStream struct {
 
 func (s commandStream) Write(data []byte) (int, error) {
 	c := s.capture
-	// Both stream copier goroutines take this lock before consuming the shared
-	// budget, so concurrent stdout/stderr writes can never exceed 1 MiB.
+	// stdout and stderr are copied concurrently; retain both streams in full.
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	n := len(data)
-	available := (1 << 20) - c.size
-	if len(data) > available {
-		data = data[:available]
-		c.truncated = true
-	}
 	if s.stderr {
-		c.stderr.Write(data)
-	} else {
-		c.stdout.Write(data)
+		return c.stderr.Write(data)
 	}
-	c.size += len(data)
-	return n, nil // Keep draining discarded output so a full pipe cannot stall the child.
+	return c.stdout.Write(data)
 }

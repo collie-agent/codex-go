@@ -23,11 +23,19 @@ const (
 
 // Config contains settings shared by the tools registered on an MCP server.
 type Config struct {
+	// ExecNetwork is none (default) or host; tool arguments cannot change it.
+	ExecNetwork string
+	// ExecEnv authorizes host variable names, resolved once when exec is registered.
+	ExecEnv   []string
 	Workspace string
 	Timeout   time.Duration
 	// RuntimeDirs are host-authorized read-only directories for exec; tool
 	// arguments cannot add mounts or change the controlled executable PATH.
 	RuntimeDirs []string
+	// DiscoverHostCommands opts into initialization-time discovery from host PATH.
+	DiscoverHostCommands bool
+	// ExecCommands adds entrypoints to the built-in whitelist.
+	ExecCommands []string
 }
 
 type ReadFileLine struct {

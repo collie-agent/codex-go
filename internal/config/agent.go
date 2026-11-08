@@ -109,6 +109,9 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 	if err := strict.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("parse config %q: %w", path, err)
 	}
+	if err := ValidateExecPolicy(raw.ExecNetwork, raw.ExecEnv); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(raw.Name) == "" {
 		return nil, fmt.Errorf("config name is required")
 	}
@@ -184,7 +187,7 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 	}
 	out := cloneAgentConfig(resolved[entry])
 	out.Name = raw.Name
-	out.Global = &GlobalConfig{Redis: redisConfig}
+	out.Global = &GlobalConfig{ExecNetwork: raw.ExecNetwork, ExecEnv: raw.ExecEnv, Redis: redisConfig, DiscoverHostCommands: raw.DiscoverHostCommands, ExecCommands: raw.ExecCommands, RuntimeDirs: raw.RuntimeDirs}
 	out.configs = resolved
 	out.MultiAgent = raw.MultiAgent
 	for name := range raw.Agents {
@@ -284,13 +287,18 @@ func rejectNull(node *yaml.Node) error {
 }
 
 type yamlAgentConfig struct {
-	LogDir     string                        `yaml:"log_dir"`
-	Redis      *yamlRedisConfig              `yaml:"redis"`
-	Name       string                        `yaml:"name"`
-	MultiAgent *MultiAgentConfig             `yaml:"multi-agent"`
-	LogLevel   LogLevel                      `yaml:"log_level"`
-	Base       *yamlAgentSettings            `yaml:"base"`
-	Agents     map[string]*yamlAgentSettings `yaml:"agents"`
+	ExecNetwork          string                        `yaml:"exec_network"`
+	ExecEnv              []string                      `yaml:"exec_env"`
+	DiscoverHostCommands bool                          `yaml:"discover_host_commands"`
+	ExecCommands         []string                      `yaml:"exec_commands"`
+	RuntimeDirs          []string                      `yaml:"runtime_dirs"`
+	LogDir               string                        `yaml:"log_dir"`
+	Redis                *yamlRedisConfig              `yaml:"redis"`
+	Name                 string                        `yaml:"name"`
+	MultiAgent           *MultiAgentConfig             `yaml:"multi-agent"`
+	LogLevel             LogLevel                      `yaml:"log_level"`
+	Base                 *yamlAgentSettings            `yaml:"base"`
+	Agents               map[string]*yamlAgentSettings `yaml:"agents"`
 }
 type yamlAgentSettings struct {
 	Instruction *string        `yaml:"instruction"`

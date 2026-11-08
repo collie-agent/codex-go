@@ -19,7 +19,7 @@ func newLifecycleExecutor(t *testing.T) *mcp.CommandExecutor {
 	return executor
 }
 
-func TestExecutePreservesBothStreamsAndBoundsCombinedOutput(t *testing.T) {
+func TestExecutePreservesBothStreamsInFull(t *testing.T) {
 	executor := newLifecycleExecutor(t)
 	result, err := executor.Execute(context.Background(), t.TempDir(), "python3", []string{"-c", `import os,threading
 def write(fd, data): os.write(fd, data)
@@ -28,16 +28,16 @@ t1.start(); t2.start(); t1.join(); t2.join()`})
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if result.ExitCode != 0 || len(result.Stdout)+len(result.Stderr) != 1<<20 || !result.Truncated {
-		t.Fatalf("unexpected result: exit=%d stdout=%d stderr=%d truncated=%v", result.ExitCode, len(result.Stdout), len(result.Stderr), result.Truncated)
+	if result.ExitCode != 0 || len(result.Stdout) != 700000 || len(result.Stderr) != 700000 {
+		t.Fatalf("unexpected result: exit=%d stdout=%d stderr=%d", result.ExitCode, len(result.Stdout), len(result.Stderr))
 	}
 }
 
-func TestExecuteDoesNotMarkExactlyOneMiBAsTruncated(t *testing.T) {
+func TestExecutePreservesExactlyOneMiB(t *testing.T) {
 	executor := newLifecycleExecutor(t)
 	result, err := executor.Execute(context.Background(), t.TempDir(), "python3", []string{"-c", `import os
 os.write(1, b'x' * (1 << 20))`})
-	if err != nil || result.ExitCode != 0 || len(result.Stdout) != 1<<20 || result.Stderr != "" || result.Truncated {
+	if err != nil || result.ExitCode != 0 || len(result.Stdout) != 1<<20 || result.Stderr != "" {
 		t.Fatalf("unexpected exact-limit result: result=%+v err=%v", result, err)
 	}
 }
@@ -51,7 +51,7 @@ sys.exit(23)`})
 	if err != nil {
 		t.Fatalf("ordinary command failure returned executor error: %v", err)
 	}
-	if result.ExitCode != 23 || result.Stdout != "out\n" || result.Stderr != "err\n" || result.Truncated {
+	if result.ExitCode != 23 || result.Stdout != "out\n" || result.Stderr != "err\n" {
 		t.Fatalf("unexpected result: %+v", result)
 	}
 }
@@ -134,7 +134,7 @@ func TestExecuteKeepsCallsIndependent(t *testing.T) {
 	workspace := t.TempDir()
 	for _, want := range []string{"first", "second"} {
 		result, err := executor.Execute(context.Background(), workspace, "python3", []string{"-c", "print('" + want + "')"})
-		if err != nil || result.ExitCode != 0 || result.Stdout != want+"\n" || result.Stderr != "" || result.Truncated {
+		if err != nil || result.ExitCode != 0 || result.Stdout != want+"\n" || result.Stderr != "" {
 			t.Fatalf("unexpected %s result: result=%+v err=%v", want, result, err)
 		}
 	}

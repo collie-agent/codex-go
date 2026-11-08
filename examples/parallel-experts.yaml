@@ -1,4 +1,10 @@
 name: multi-agent
+# 可选的宿主运行时授权（顶层全局配置）；命令行显式参数优先。
+# discover_host_commands: true
+# exec_commands: [poetry, python3]
+# runtime_dirs: [/home/user/go]
+# 列表参数整项替换 YAML；--discover-host-commands=false 可关闭发现。
+# 调用命令还需在执行代理的 allow_tools 中启用 exec；详见 README 的运行时配置。
 multi-agent:
   entry: coordinator
   # 包括协调者首次分发、专家调用和协调者汇总；预留补充取证的调用次数。

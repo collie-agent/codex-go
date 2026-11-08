@@ -184,7 +184,7 @@ for p in [sys.argv[2], 'outside']:
  else: raise AssertionError('host secret visible')
 for key in ['SANDBOX_SECRET', 'SSH_AUTH_SOCK', 'HTTPS_PROXY']:
  assert key not in os.environ, key
-assert os.environ['PATH'].split(':')[:2] == ['/usr/bin', '/bin']
+assert os.environ['PATH'].split(':')[:3] == ['/usr/local/bin', '/usr/bin', '/bin']
 assert sys.argv[1] not in os.environ['PATH'].split(':')
 assert pathlib.Path(os.environ['HOME']).is_dir()
 assert not list(pathlib.Path(os.environ['HOME']).iterdir())
@@ -250,14 +250,14 @@ time.sleep(20)`})
 	}
 }
 
-func TestCommandExecutorBoundsCapturedOutput(t *testing.T) {
+func TestCommandExecutorPreservesLargeOutput(t *testing.T) {
 	executor, err := mcp.NewCommandExecutor()
 	if err != nil {
 		t.Fatal(err)
 	}
 	result, err := executor.Execute(context.Background(), t.TempDir(), "python3", []string{"-c", `import os; os.write(1,b'x'*1048576); os.write(2,b'y'*1048576)`})
-	if err != nil || result.ExitCode != 0 || !result.Truncated || len(result.Stdout)+len(result.Stderr) != 1<<20 {
-		t.Fatalf("stdout=%d stderr=%d truncated=%v exit=%d err=%v", len(result.Stdout), len(result.Stderr), result.Truncated, result.ExitCode, err)
+	if err != nil || result.ExitCode != 0 || len(result.Stdout) != 1048576 || len(result.Stderr) != 1048576 {
+		t.Fatalf("stdout=%d stderr=%d exit=%d err=%v", len(result.Stdout), len(result.Stderr), result.ExitCode, err)
 	}
 }
 
@@ -336,5 +336,14 @@ assert subprocess.check_output(['git','config','example.key']) == b'workspace\n'
 assert pathlib.Path('.git/config').is_file()`})
 	if err != nil || result.ExitCode != 0 {
 		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	result, err = executor.Execute(context.Background(), workspace, "python3", []string{"-c", `import pathlib,subprocess
+pathlib.Path('tracked.txt').write_text('workspace git metadata is writable\n')
+subprocess.run(['git','add','tracked.txt'],check=True)
+subprocess.run(['git','-c','user.name=Sandbox Test','-c','user.email=sandbox@example.invalid','-c','commit.gpgsign=false','commit','--quiet','-m','test workspace write'],check=True)
+assert subprocess.check_output(['git','show','HEAD:tracked.txt']) == b'workspace git metadata is writable\n'
+assert subprocess.check_output(['git','status','--porcelain']) == b''`})
+	if err != nil || result.ExitCode != 0 {
+		t.Fatalf("git add/commit result=%+v err=%v", result, err)
 	}
 }

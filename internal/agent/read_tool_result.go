@@ -12,7 +12,7 @@ import (
 func readToolResultDefinition() *sdk.Tool {
 	return &sdk.Tool{
 		Name:        string(config.ReadToolResultMCPToolName),
-		Description: `Read original tool output from this execution instance by call_id, including records covered by the execution summary. offset is a zero-based Unicode character offset, limit is the maximum character count (1..65536). Continue with next_offset when has_more is true. Returns original tool_name, status, arguments, content and error. Does not execute the original tool again.`,
+		Description: `Read stored tool output from this execution instance by call_id, including records covered by the execution summary. Long exec outputs are stored as summaries; their raw output is discarded and cannot be recovered. offset is a zero-based Unicode character offset, limit is the maximum character count (1..65536). Continue with next_offset when has_more is true. Returns tool_name, status, arguments, stored content and error. Does not execute the original tool again.`,
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{
 			"call_id": map[string]any{"type": "string", "minLength": 1},
 			"offset":  map[string]any{"type": "integer", "minimum": 0},

@@ -2,11 +2,13 @@ package mcp_test
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	mcp "github.com/collie-agent/codex-go/internal/mcp"
@@ -44,6 +46,10 @@ func TestCommandExecutorBlocksMountedHostSockets(t *testing.T) {
 		socketPath := filepath.Join(dir, "host.sock")
 		listener, err := net.Listen("unix", socketPath)
 		if err != nil {
+			// An outer sandbox may prohibit creating the host socket fixture.
+			if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+				t.Skipf("environment prohibits Unix socket creation: %v", err)
+			}
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = listener.Close() })
@@ -72,15 +78,7 @@ print('blocked')`, socketPath})
 }
 
 func TestCommandExecutorUsesConfiguredRuntimeReadOnly(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtimeDir, err := os.MkdirTemp(home, ".codex-go-runtime-")
-	if err != nil {
-		t.Skipf("cannot create host runtime directory: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })
+	runtimeDir := t.TempDir()
 	workspace := t.TempDir()
 	entrypoint := filepath.Join(runtimeDir, "poetry")
 	if err := os.WriteFile(entrypoint, []byte("#!/bin/sh\nprintf runtime > \"$1\"\nprintf workspace > \"$2\"\nif printf denied > \"$3\"; then exit 41; fi\n"), 0700); err != nil {
@@ -128,15 +126,7 @@ func TestCommandExecutorUsesConfiguredRuntimeUnderTmp(t *testing.T) {
 }
 
 func TestCommandExecutorCanonicalizesRelativeRuntimeDirectory(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtimeDir, err := os.MkdirTemp(home, ".codex-go-runtime-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })
+	runtimeDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(runtimeDir, "poetry"), []byte("#!/bin/sh\nprintf relative > \"$1\"\n"), 0700); err != nil {
 		t.Fatal(err)
 	}

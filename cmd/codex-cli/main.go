@@ -31,12 +31,24 @@ func main() {
 	runID := flag.String("run-id", "", "resume an existing agent run")
 	mcpCommand := flag.String("mcp-command", "codex-mcp", "path to MCP server executable")
 	mode := flag.String("mode", "", "execution mode: react, plan-execute or multi-agent (inferred for multi-agent YAML)")
+	discoverHostCommands := flag.Bool("discover-host-commands", false, "discover whitelisted exec runtimes from host PATH at startup")
+	execNetwork := flag.String("exec-network", "", "exec network: none or host (overrides YAML; default none)")
+	var execEnv []string
+	flag.Func("exec-env", "host environment variable name exposed to exec (repeatable; replaces YAML list)", func(name string) error { execEnv = append(execEnv, name); return nil })
+	var execCommands []string
+	flag.Func("exec-command", "allowed exec entrypoint (repeatable; defaults to built-in whitelist)", func(name string) error { execCommands = append(execCommands, name); return nil })
 	var runtimeDirs []string
 	flag.Func("runtime-dir", "host-authorized read-only exec runtime directory (repeatable)", func(dir string) error {
 		runtimeDirs = append(runtimeDirs, dir)
 		return nil
 	})
+	var discoverHostCommandsSet bool
 	logging.ParseFlags()
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "discover-host-commands" {
+			discoverHostCommandsSet = true
+		}
+	})
 	if err := logging.Setup(*logDir, *configPath); err != nil {
 		log.Printf("[ERROR] %v", err)
 		os.Exit(1)
@@ -70,9 +82,9 @@ func main() {
 	}
 	var results []agent.ReactResult
 	if *runID != "" {
-		results, err = application.Resume(ctx, application.Options{ConfigPath: *configPath, RunID: *runID, Workspace: *workspace, Mode: *mode, MCPCommand: *mcpCommand, Timeout: *timeout, RuntimeDirs: runtimeDirs, Skills: skills, LogDir: *logDir, Interrupt: interrupt})
+		results, err = application.Resume(ctx, application.Options{ConfigPath: *configPath, RunID: *runID, Workspace: *workspace, Mode: *mode, MCPCommand: *mcpCommand, Timeout: *timeout, RuntimeDirs: runtimeDirs, DiscoverHostCommands: *discoverHostCommands, DiscoverHostCommandsSet: discoverHostCommandsSet, ExecCommands: execCommands, ExecNetwork: *execNetwork, ExecEnv: execEnv, Skills: skills, LogDir: *logDir, Interrupt: interrupt})
 	} else {
-		results, err = application.Run(ctx, application.Options{ConfigPath: *configPath, Task: *task, Workspace: *workspace, ConvID: *convID, Mode: *mode, MCPCommand: *mcpCommand, Timeout: *timeout, RuntimeDirs: runtimeDirs, Skills: skills, LogDir: *logDir, Interrupt: interrupt})
+		results, err = application.Run(ctx, application.Options{ConfigPath: *configPath, Task: *task, Workspace: *workspace, ConvID: *convID, Mode: *mode, MCPCommand: *mcpCommand, Timeout: *timeout, RuntimeDirs: runtimeDirs, DiscoverHostCommands: *discoverHostCommands, DiscoverHostCommandsSet: discoverHostCommandsSet, ExecCommands: execCommands, ExecNetwork: *execNetwork, ExecEnv: execEnv, Skills: skills, LogDir: *logDir, Interrupt: interrupt})
 	}
 	if err != nil {
 		if errors.Is(err, application.ErrInterrupted) {

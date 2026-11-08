@@ -422,6 +422,12 @@ func (r *BaseReactProcess[T]) batchToolCallings(toolParams []*mcpSdk.CallToolPar
 }
 
 func (r *BaseReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, toolParam *mcpSdk.CallToolParams, rc *fileContext.ReactContext, err error, agentConfig *config.AgentConfig) {
+	var summaryErr error
+	if rc != nil && rc.DurableState != nil {
+		// Summarize before entering the persistence lock; raw exec output is never checkpointed.
+		callResult, summaryErr = r.summarizeExecResult(callResult, toolParam, agentConfig, rc.DurableState)
+	}
+
 	r.executionMu.Lock()
 	defer r.executionMu.Unlock()
 	if rc == nil || toolParam == nil {
@@ -510,6 +516,7 @@ func (r *BaseReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, t
 			r.executionErr = errors.Join(r.executionErr, r.checkpointErr)
 		}
 	}
+	r.executionErr = errors.Join(r.executionErr, summaryErr)
 	if r.executionErr != nil {
 		return
 	}
@@ -528,7 +535,7 @@ func (r *BaseReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, t
 		log.Printf("[INFO] [react] tool calling result: %+v", result)
 	}
 	if shouldObserveTool(toolParam) {
-		// exec 的参数和原始结果随快照交给观察器，由 LLM 筛选影响后续决策的新增信息。
+		// exec 的参数和已记录结果随快照交给观察器，由 LLM 筛选影响后续决策的新增信息。
 		// Observation is a separate processor and must use its own resolved
 		// settings rather than inheriting ReAct's model or custom prompt.
 		observerConfig := agentConfig.ForAgent("observe")

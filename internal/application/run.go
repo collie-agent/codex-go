@@ -21,20 +21,26 @@ import (
 )
 
 type Options struct {
-	LogDir      string
-	ConfigPath  string
-	Task        string
-	Workspace   string
-	ConvID      string
-	RunID       string
-	Mode        string
-	MCPCommand  string
-	Timeout     time.Duration
-	RuntimeDirs []string
-	Skills      []agent.Skill
-	Stderr      io.Writer
-	Output      provider.Outputer
-	Interrupt   *Interrupt
+	ExecNetwork          string
+	ExecEnv              []string
+	LogDir               string
+	ConfigPath           string
+	Task                 string
+	Workspace            string
+	ConvID               string
+	RunID                string
+	Mode                 string
+	MCPCommand           string
+	Timeout              time.Duration
+	RuntimeDirs          []string
+	DiscoverHostCommands bool
+	// DiscoverHostCommandsSet distinguishes an explicit false override from an omitted option.
+	DiscoverHostCommandsSet bool
+	ExecCommands            []string
+	Skills                  []agent.Skill
+	Stderr                  io.Writer
+	Output                  provider.Outputer
+	Interrupt               *Interrupt
 	// OnRunLocked registers external interruption while this execution owns the run lock.
 	OnRunLocked func(context.Context, string, *Interrupt) (func(), error)
 }
@@ -56,6 +62,10 @@ func Run(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 	}
 	loaded, err := config.LoadAgentConfig(opts.ConfigPath)
 	if err != nil {
+		return nil, err
+	}
+	opts = resolveExecOptions(opts, loaded)
+	if err := config.ValidateExecPolicy(opts.ExecNetwork, opts.ExecEnv); err != nil {
 		return nil, err
 	}
 	if opts.Mode != "" && opts.Mode != "react" && opts.Mode != "plan-execute" && opts.Mode != "multi-agent" {
@@ -300,4 +310,28 @@ func (o Options) outputLogDir(loaded *config.AgentConfig) string {
 		return o.LogDir
 	}
 	return loaded.LogDir
+}
+
+// resolveExecOptions applies host configuration once before constructing either MCP transport.
+// Explicit lists replace configured lists; nil retains the YAML value and its default semantics.
+func resolveExecOptions(opts Options, loaded *config.AgentConfig) Options {
+	if loaded.Global == nil {
+		return opts
+	}
+	if !opts.DiscoverHostCommandsSet && !opts.DiscoverHostCommands {
+		opts.DiscoverHostCommands = loaded.Global.DiscoverHostCommands
+	}
+	if opts.ExecNetwork == "" {
+		opts.ExecNetwork = loaded.Global.ExecNetwork
+	}
+	if opts.ExecEnv == nil {
+		opts.ExecEnv = loaded.Global.ExecEnv
+	}
+	if opts.ExecCommands == nil {
+		opts.ExecCommands = loaded.Global.ExecCommands
+	}
+	if opts.RuntimeDirs == nil {
+		opts.RuntimeDirs = loaded.Global.RuntimeDirs
+	}
+	return opts
 }

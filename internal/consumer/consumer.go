@@ -41,6 +41,17 @@ func RunWithConcurrency(ctx context.Context, opts application.Options, concurren
 	if err != nil {
 		return err
 	}
+	// Reject invalid host policy before taking any queued task.
+	network, environment := opts.ExecNetwork, opts.ExecEnv
+	if network == "" {
+		network = loaded.Global.ExecNetwork
+	}
+	if environment == nil {
+		environment = loaded.Global.ExecEnv
+	}
+	if err := config.ValidateExecPolicy(network, environment); err != nil {
+		return err
+	}
 	if opts.Stderr == nil {
 		dir := opts.LogDir
 		if dir == "" {

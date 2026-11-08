@@ -1,6 +1,12 @@
 # 同一份配置可通过 codex-cli 的 --mode 选择 ReAct 或 plan-execute。
 # name 必填，但实际运行模式由 --mode 决定。
 name: react
+# 可选的宿主运行时授权（顶层全局配置）；命令行显式参数优先。
+# discover_host_commands: true
+# exec_commands: [poetry, python3]
+# runtime_dirs: [/home/user/go]
+# 列表参数整项替换 YAML；--discover-host-commands=false 可关闭发现。
+# 调用命令还需在执行代理的 allow_tools 中启用 exec；详见 README 的运行时配置。
 log_level: info
 base:
   llm:

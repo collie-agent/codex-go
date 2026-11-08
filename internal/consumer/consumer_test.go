@@ -800,3 +800,12 @@ func TestHTTPInterruptExecutionModes(t *testing.T) {
 		})
 	}
 }
+
+func TestConsumerRejectsInvalidExecNetworkBeforeQueueAccess(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	err := consumer.Run(ctx, application.Options{ConfigPath: configuration(t, "127.0.0.1:1", "http://127.0.0.1:1"), Workspace: t.TempDir(), Timeout: time.Second, Stderr: io.Discard, ExecNetwork: "bridge"})
+	if err == nil || !strings.Contains(err.Error(), "exec_network") {
+		t.Fatalf("expected exec policy validation before queue access, got %v", err)
+	}
+}

@@ -84,6 +84,7 @@ Status: ready-for-agent
 - 使用 bwrap 构建 sandbox，入口命令仅允许 `find`、`git`、`grep`、`npm`、`poetry`、`python`、`python3`、`rg`、`sed`、`ts-node`、`tsx`。
 - 白名单只约束入口命令；允许入口命令启动其他程序，整个子进程树受同一 sandbox 边界约束。
 - sandbox 内允许读写整个 Workspace，包括删除文件、修改 `.git` 和在工作区内安装依赖。
+- Workspace 根目录下已存在的 `.git` 目录额外以 bwrap `--bind` 显式读写挂载，避免继承只读子挂载；不跟随 `.git` 符号链接，也不额外暴露工作区外的 Git 元数据。
 - 禁止访问工作区外的用户数据；运行必需的系统文件只读暴露，临时目录单独隔离。
 - 默认完全禁网，包括访问宿主机网络服务；在线依赖下载与 Git 远程操作不可用。
 - 上述 sandbox 保证适用于新增执行器，不代表现有文件工具或 Go 进程中的 `apply_patch` 已由 bwrap 隔离。
@@ -94,7 +95,7 @@ Status: ready-for-agent
 - 非 Linux、bwrap 缺失、所需隔离不可用或 sandbox 创建失败均返回错误，绝不退回宿主执行；相关检查仅影响新增执行器。
 - 入口命令是否安装在调用时检查，不要求预先安装全部 11 个入口命令。
 - 默认超时 30 秒并支持 context 取消；超时、取消或入口命令退出后清理全部子进程，不支持跨调用存活的后台任务。
-- 非交互执行，stdin 关闭并呈现 EOF；分别返回 stdout、stderr、退出码及截断标记。两路输出合计最多保留 1 MiB，超出后继续排空并丢弃，避免因输出管道阻塞而挂起。
+- 非交互执行，stdin 关闭并呈现 EOF；分别完整返回 stdout、stderr 和退出码，不返回截断标记，不限制捕获或响应大小。
 - 普通非零退出码作为执行结果返回；参数错误、sandbox 启动失败、超时和取消返回可区分的错误，并保留已捕获输出。
 - 第一版只限制执行时间和捕获输出，不设置 CPU、内存、进程数或工作区磁盘配额；用户接受超时前仍可能耗尽这些宿主资源，不能将此版本描述为具备恶意代码资源隔离能力。
 - 执行器初始化时固定受控 PATH 的目录集合，包含必要系统目录和宿主显式配置的运行时目录；入口命令仅从该集合解析，不搜索 Workspace。子进程使用同一初始 PATH，仍允许项目脚本显式运行工作区内的程序。
@@ -116,7 +117,7 @@ Status: ready-for-agent
 - Workspace 固定为启动时配置；宿主可通过 `Config.RuntimeDirs` 或可重复的 `--runtime-dir` 指定只读运行时目录，工具调用不能扩大挂载范围。三个 CLI 入口均支持该参数。
 - 返回 `stdout`、`stderr`、`exit_code`、`truncated`；普通非零退出仍为成功的工具调用。执行错误设置 MCP `isError`，另返回 `error_kind`（`parameter`、`sandbox_startup`、`timeout`、`canceled`）及 `error`，保留已有输出；未运行命令时 `exit_code=-1`。Schema 校验失败由 MCP SDK 返回工具错误。
 - 执行时限为服务端 `--timeout` 与内部 30 秒上限中的较短者，同时支持请求取消；不提供工具级超时参数。
-- 先遵守内部两路合计 1 MiB 捕获上限，再按完整 MCP 响应的 JSON 字节上限进一步截断，包含结构化结果、JSON 文本及 SDK 元数据空间；标记 `truncated=true`，没有继续读取或重新执行机制。非法 UTF-8 字节在文本表示中替换为 U+FFFD。
+- exec 完整返回两路输出，结构化结果和 JSON 文本保持一致，不适用文件工具的 1 MiB 响应上限，不返回 `truncated` 字段。非法 UTF-8 字节在文本表示中替换为 U+FFFD。
 - Linux、bwrap、seccomp 或宿主运行时配置不可用时，仅 `exec` 返回启动错误；文件工具及 MCP 工具发现仍可用，绝不退回宿主执行。
 - 任务见 `issues/10-register-exec-mcp-tool.md`。
 
@@ -142,3 +143,15 @@ Status: ready-for-agent
 - 第二轮：用户确认注册函数与 stdio 入口、目录递归、glob 和 grep 接口、输出上限与命令执行约定。
 - 第三轮：用户确认 Go 移植补丁规则、写入失败保证、分页、特殊文件处理和启动错误处理；明确移除工具级 `cwd`。
 - 第四轮：用户确认完整参数表、相对路径和结果顺序、响应格式与字节上限、统一超时配置。
+
+
+### Agent 对超长 exec 结果的保存
+
+exec MCP 工具本身不截断输出。Agent 对超过约 8192 token 的 content 按预算分块累计总结，将摘要作为同一调用的工具结果保存，不保留原始 stdout、stderr；退出码、工具错误、调用标识及参数由程序保留。read_tool_result 只能读到保存的摘要。总结失败保存错误说明及已确认的执行状态，停止本轮调度，不重新执行命令。恢复直接复用已保存的结果。
+
+
+### 宿主网络与环境授权
+
+- `--exec-network none|host` / YAML 顶层 `exec_network`：默认 none；host 允许整个命令进程树使用宿主网络。Unix socket 的 seccomp 限制不变。
+- 可重复的 `--exec-env NAME` / YAML 顶层 `exec_env: [NAME]`：只授权变量名，初始化时固定已设置的宿主值；其余宿主环境不透传，不允许覆盖执行器管理的环境变量。
+- 命令行显式设置优先；环境变量列表替换 YAML 列表。新建、恢复、consumer、进程内和外部 MCP 均传递策略；exec 工具参数不提供网络或环境覆盖。

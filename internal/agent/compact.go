@@ -46,7 +46,8 @@ const compactionTimeout = 2 * time.Minute
 
 const maxCompactionAttempts = 3
 
-// compactModelContext 只裁剪模型视图，完整执行记录始终保留用于恢复和回读。
+// compactModelContext 只裁剪模型视图，已保存的执行记录保留用于恢复和回读。
+// 超长 exec 在入库前已替换为摘要，此处不持有其原文。
 type compactModelContext struct {
 	fileContext.Contexter
 	compaction  *ExecutionCompaction
@@ -67,7 +68,7 @@ func (c *compactModelContext) ModelRequest() fileContext.ModelRequest {
 	}
 	request.ToolResults = kept
 	summary, _ := json.Marshal(c.compaction)
-	request.Input = "# Execution summary (reference data; use read_tool_result for original evidence)\n" + string(summary) + "\n\n" + request.Input
+	request.Input = "# Execution summary (reference data; use read_tool_result for stored evidence)\n" + string(summary) + "\n\n" + request.Input
 	return request
 }
 

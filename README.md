@@ -82,9 +82,61 @@ ReAct 通过 MCP stdio 连接独立工具进程，从服务获取工具定义，
 
 文件工具以 Workspace 为路径边界，校验相对路径和符号链接，拒绝越界访问。`exec` 在 Linux 上使用 bwrap 与 seccomp 隔离整个命令进程树：工作目录可读写，必要运行时目录只读挂载，临时目录独立，默认禁网，不继承宿主 HOME 或凭据环境。入口命令受白名单约束，允许的构建工具仍可启动项目脚本及子进程。
 
-默认只读挂载宿主程序的 GOROOT（目录及 bin/go 存在时），支持直接执行 Go 命令；不会从宿主 PATH 搜索 Go。其他外部工具链需在启动时通过 `--runtime-dir` 显式授权，例如 `--runtime-dir /home/user/go`。该目录只读挂载，目录本身及其 `bin` 子目录会加入受控 PATH；Go 需要授权完整的 GOROOT，而不只是 `bin`。修改配置或程序后需重启提供工具的进程。
+默认只读挂载宿主程序的 GOROOT（目录及 bin/go 存在时），支持直接执行 Go 命令；不会从宿主 PATH 搜索 Go。其他外部工具链可在启动时通过 `--runtime-dir` 或 YAML 顶层 `runtime_dirs` 显式授权，例如 `--runtime-dir /home/user/go`。该目录只读挂载，目录本身及其 `bin` 子目录会加入受控 PATH；Go 需要授权完整的 GOROOT，而不只是 `bin`。修改配置或程序后需重启提供工具的进程。
 
-seccomp 进一步限制命名 Unix socket、io_uring 和非本机 ABI；隔离不可用时拒绝执行，不回退宿主。命令退出、超时或取消时清理整个沙箱。当前限制执行时间和输出量，`exec` 最长 5 分钟、两路输出合计最多 1 MiB；没有 CPU、内存、进程数或磁盘配额，也不会自动撤销工作目录中的文件修改。
+可显式开启 `--discover-host-commands`，在初始化时从宿主 PATH 发现受控 PATH 中缺少的白名单命令。例如：
+
+```sh
+codex-mcp --workspace /path/to/project --discover-host-commands --exec-command poetry --exec-command python3
+```
+
+#### 宿主命令与运行时配置
+
+Agent、CLI 和 consumer 通过 `--config` 加载的 YAML 支持以下顶层字段，适用于新建和恢复运行，包含内置工具及外部 MCP：
+
+| YAML 字段 | 命令行参数 | 省略时的行为 |
+| --- | --- | --- |
+| `discover_host_commands` | `--discover-host-commands` | `false`，不从宿主 PATH 发现命令 |
+| `exec_commands` | `--exec-command`（可重复） | 使用内置入口白名单 |
+| `runtime_dirs` | `--runtime-dir`（可重复） | 不添加额外运行时目录；仍保留默认 Go 运行时策略 |
+
+```yaml
+discover_host_commands: true
+exec_commands: [poetry, python3]
+runtime_dirs: [/home/user/go]
+```
+
+命令行显式参数优先于对应配置；重复的 `--exec-command`、`--runtime-dir` 分别替换 YAML 中的列表。使用 `--discover-host-commands=false` 可覆盖 YAML 的 `true`。省略配置时保持原有默认行为：不开启宿主命令发现、使用内置入口白名单、不添加额外运行时目录。运行时授权属于顶层全局配置，不能由 agent 独立配置覆盖。
+
+上述 YAML 片段需合入包含 `name`、`base.llm` 等必填字段的 Agent 配置。要让代理调用命令，还需在 `base.allow_tools` 或代理独立配置的 `allow_tools` 中启用 `exec`；宿主入口白名单与代理工具允许列表分别控制命令入口和工具调用权限。完整配置示例见 [`examples/react-agent.yaml`](examples/react-agent.yaml)。
+
+例如，保留 YAML 中的运行时目录，仅关闭自动发现并将命令白名单替换为 `git`：
+
+```sh
+./bin/codex-cli --config agent.yaml --workspace /path/to/project \
+  --task '检查 Git 工作区状态' \
+  --discover-host-commands=false --exec-command git
+```
+
+独立启动 `codex-mcp` 时使用命令行参数；它不直接加载 Agent YAML。CLI 会将合并后的设置传给该子进程。
+
+`--exec-command` 可重复，提供时替换 YAML 或默认入口白名单；命令行与 YAML 均省略时沿用内置白名单。上述参数同样适用于 Agent、CLI 和 consumer 入口，并传递给外部 MCP 进程。发现结果在初始化后固定，工具调用不能追加授权。发现器解析符号链接，只读挂载入口真实目录；若入口位于含 `pyvenv.cfg` 的 `bin` 目录，则只读挂载该虚拟环境以包含 Python 依赖。工作区中的入口、整个 HOME、工作区祖先和不安全目录不会自动授权。宿主 PATH 应由操作者控制；授权目录的完整内容会对沙箱可读。
+
+自动发现不安装依赖、不继承宿主 HOME 或凭据环境。复杂工具链的额外解释器、模块或项目环境仍需通过 `--runtime-dir` 显式授权，或预先准备在工作区内；默认禁网保持不变。
+
+MySQL 等集成测试可通过 `--exec-network host` 允许命令及其子进程使用宿主网络，配合可重复的 `--exec-env CODEX_TEST_MYSQL_URL` 传入指定宿主环境变量。默认 `none` 保持独立网络命名空间。`host` 授权整个宿主网络，并非仅开放数据库端口；Unix socket 的 seccomp 限制仍保留，不需要挂载 Docker socket。连接 Docker 发布到宿主的端口时使用宿主地址，例如 `127.0.0.1:3307`。
+
+Agent YAML 顶层同样支持：
+
+```yaml
+exec_network: host
+exec_env:
+  - CODEX_TEST_MYSQL_URL
+```
+
+在启动 consumer/CLI 前 export `CODEX_TEST_MYSQL_URL`，变量值不会写入 YAML 或 MCP 启动参数。`--exec-network none` 可显式覆盖 YAML 的 `host`；命令行提供 `--exec-env` 时替换 YAML 列表，YAML 的 `exec_env: []` 表示不透传。只接受变量名，不接受 `NAME=value`；未设置的变量不传入，已设置的空值保留。授权值在执行器初始化时固定，更改宿主环境需要重启。`PATH`、`HOME`、`LANG`、`TMPDIR`、`XDG_CACHE_HOME` 和执行器管理的 Go 环境变量不能覆盖。网络/环境授权在新建、恢复、consumer、进程内工具和外部 MCP 中一致生效，工具调用无法追加授权。仅提供 MCP 工具的 `codex-mcp` 直接使用上述启动参数，Agent YAML 由 consumer/CLI 解析并传递。
+
+seccomp 进一步限制命名 Unix socket、io_uring 和非本机 ABI；隔离不可用时拒绝执行，不回退宿主。命令退出、超时或取消时清理整个沙箱。当前限制执行时间，`exec` 最长 5 分钟，stdout 和 stderr 完整返回且不截断；Agent 对超过约 8K token 的 exec 结果分块总结，只保存摘要及执行状态（见 [上下文压缩](docs/react-compaction.md)）；没有 CPU、内存、进程数或磁盘配额，也不会自动撤销工作目录中的文件修改。
 
 实现入口：[`internal/mcp/exec_runtime.go`](internal/mcp/exec_runtime.go)、[`exec_seccomp_linux.go`](internal/mcp/exec_seccomp_linux.go)、[命令隔离 ADR](docs/adr/0002-command-sandbox-boundary.md)。
 

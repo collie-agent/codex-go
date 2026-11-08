@@ -2,6 +2,18 @@
 
 `glob`、`list_dir` 的原生工具调用与结果只保留在紧接着的一轮决策请求中，同轮格式纠错重试仍可使用；之后从模型视图移除，其他工具记录不受影响。恢复时最新工具批次供首次决策使用。完整执行记录不删除，仍可通过 `read_tool_result` 回读，并作为压缩和恢复的依据。
 
+## 超长 exec 结果
+
+exec 工具本身完整返回 stdout、stderr。Agent 在写入工具结果和发布结果事件之前检查序列化 content 的估算长度；超过 8 × 1024 token 时，使用 `agents.compact` 的模型及输出格式按序分块总结。每块最多约 4096 token，连同目标、命令参数和上一块摘要序列化后的请求正文最多约 8192 token；JSON 转义导致超限时缩小分块，不跳过原文。累计摘要最多约 1024 token，整个总结过程限时 2 分钟，并支持运行取消。
+
+总结提示词包含 JSON 和 Line Protocol 各自的业务 few-shot：首次总结保留失败测试及定位信息，后续分块累计保留此前失败证据，并区分 ERROR 日志与测试失败。每个分块的格式异常最多重试 3 次（首次请求加 3 次重试）；语法解析失败、空摘要、摘要超过 1024 token 以及意外工具调用都进入纠错。每次重试保持该分块的输入不变，在末尾累计追加独立 user 消息，携带具体格式问题和被拒绝的响应，要求按声明格式修正。进入下一分块时清空这些纠错消息。网络、HTTP 等非格式错误不进入这套重试；连续第 4 次格式异常则停止总结，沿用下述总结失败处理。纠错消息额外计入模型上下文，不属于基础分块正文的 8192 token 预算。
+
+生成的摘要替换同一 exec 调用的结果，保留 call_id、工具名、参数、批次、位置、退出码及执行错误元数据；结果包含 `summarized: true` 和 `summary`，不再保存 stdout、stderr。总结请求关闭 info/debug 上下文日志，避免另存原文。原始长输出不保存在工具历史或检查点中，也不能通过 `read_tool_result` 找回。短输出保持原样。此规则适用于新完成的工具调用，不追溯改写已有检查点。
+
+总结失败时保存已确认的命令状态、`summarized: false` 和 `summary_error`，说明原文已丢弃，并停止本轮调度；不能把总结失败当作命令未执行或自动重跑命令。恢复沿用已保存的结果，不重新总结或执行原命令。
+
+这一处理先于下述执行历史压缩。执行历史压缩仍只改变模型视图，其输入、恢复及回读依据是已经保存的工具结果（超长 exec 为摘要）。
+
 `internal/agent/compact.go` 在每次 ReAct 模型请求前检查 token 阈值（`exceedTokenThreshold`，24 × 1024）。上一请求报告的输入 token 数或当前模型上下文估算超过阈值时，启动异步压缩。估算将 ASCII 按约四字符一个 token、其他字符按一个 token 计算，不是模型 tokenizer 的精确计数。累计的格式和工具调用纠错消息也计入预算，包括其中引用的非法输出；这些消息不属于可压缩工具记录，摘要生成后仍须纳入预算复检。
 
 压缩任务处理启动时的独立快照，覆盖快照中的全部工具批次。同一执行实例同时最多有一个压缩任务。期间上下文低于同步阈值（`syncTokenThreshold`，32 × 1024）时，ReAct 继续推理，工具调用及结果继续追加到实时上下文和完整执行记录。达到或超过同步阈值时，在下一次模型请求前等待已有压缩任务完成；应用摘要后清除旧 usage 并重新估算。若仍达到同步阈值，则继续压缩并等待，最多应用 3 次摘要，仍超限返回错误，禁止继续推理。每个后台压缩任务限时 2 分钟，等待支持运行上下文取消及截止时间；压缩失败直接返回错误。
@@ -43,11 +55,11 @@ task compact-run: [compact] applied execution_id="compact-instance" through_batc
 {"call_id":"call_18","offset":0,"limit":4000}
 ```
 
-返回 call_id、tool_name、status、arguments、content、next_offset 和 has_more；原调用有错误时附带 error。content 是执行记录中的原始结果片段，offset 和 limit 按 Unicode 字符计算，避免截断中文。offset 从 0 开始，limit 范围为 1～65536；超过末尾返回空片段。不存在的 call_id 或非法参数作为工具错误反馈。回读只限当前执行实例，可以重复读取，不会重新执行原工具。
+返回 call_id、tool_name、status、arguments、content、next_offset 和 has_more；原调用有错误时附带 error。content 是执行记录中已保存结果的片段（超长 exec 为摘要），offset 和 limit 按 Unicode 字符计算，避免截断中文。offset 从 0 开始，limit 范围为 1～65536；超过末尾返回空片段。不存在的 call_id 或非法参数作为工具错误反馈。回读只限当前执行实例，可以重复读取，不会重新执行原工具。
 
 ## 恢复
 
-摘要是完整执行记录的派生视图，不能替代执行记录。检查点同时保留完整 ToolExecutions 和 ExecutionCompaction；摘要按 ExecutionID 隔离，恢复沿用覆盖批次，新计划步骤清空前一实例摘要。即使未知执行结果已经位于摘要覆盖范围内，也必须停止自动恢复。
+ExecutionCompaction 是已保存执行记录的派生视图，不能替代 ToolExecutions；超长 exec 的 ToolExecutions.Result 已在保存前替换为摘要。检查点同时保留完整 ToolExecutions 和 ExecutionCompaction；摘要按 ExecutionID 隔离，恢复沿用覆盖批次，新计划步骤清空前一实例摘要。即使未知执行结果已经位于摘要覆盖范围内，也必须停止自动恢复。
 
 数据库新增 `execution_instance.compaction` JSON 列。已有数据库在运行新版程序前执行仓库迁移命令：
 

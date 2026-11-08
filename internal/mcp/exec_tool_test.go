@@ -6,9 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -61,7 +61,7 @@ func TestExecToolRunsAtWorkspaceAndReturnsNonzeroExit(t *testing.T) {
 pathlib.Path('artifact').write_text('created')
 print('out'); print('err',file=sys.stderr); sys.exit(7)`}})
 	out := decodeExecResult(t, result)
-	if result.IsError || out.ExitCode != 7 || out.Stdout != "out\n" || out.Stderr != "err\n" || out.Truncated || out.ErrorKind != "" {
+	if result.IsError || out.ExitCode != 7 || out.Stdout != "out\n" || out.Stderr != "err\n" || out.ErrorKind != "" {
 		t.Fatalf("unexpected result: %+v isError=%v", out, result.IsError)
 	}
 	if data, err := os.ReadFile(filepath.Join(workspace, "artifact")); err != nil || string(data) != "created" {
@@ -135,17 +135,65 @@ func TestExecToolTimeoutPreservesOutput(t *testing.T) {
 	}
 }
 
-func TestExecToolFitsEscapedOutputIntoWireLimit(t *testing.T) {
+func TestExecToolReturnsCompleteEscapedOutput(t *testing.T) {
 	session := execToolSession(t, Config{Workspace: t.TempDir()})
 	result := fileToolCall(t, session, "exec", map[string]any{"command": "python3", "args": []string{"-c", `import os
 os.write(1, ('界\x00"\\'*200000).encode())
 os.write(2, b'err')`}})
 	out := decodeExecResult(t, result)
+	if _, exists := result.StructuredContent.(map[string]any)["truncated"]; exists {
+		t.Fatal("exec response still contains truncated")
+	}
 	encoded, err := json.Marshal(result)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.IsError || out.ExitCode != 0 || !out.Truncated || out.Stdout == "" || !utf8.ValidString(out.Stdout) || len(encoded) > maxResponseBytes {
-		t.Fatalf("unexpected large output: isError=%v exit=%d truncated=%v stdout=%d bytes=%d", result.IsError, out.ExitCode, out.Truncated, len(out.Stdout), len(encoded))
+	if result.IsError || out.ExitCode != 0 || out.Stdout != strings.Repeat("界\x00\"\\", 200000) || out.Stderr != "err" || len(encoded) <= maxResponseBytes {
+		t.Fatalf("unexpected large output: isError=%v exit=%d stdout=%d bytes=%d", result.IsError, out.ExitCode, len(out.Stdout), len(encoded))
+	}
+}
+
+func TestExecToolDiscoversWhitelistedHostCommand(t *testing.T) {
+	runtimeDir := t.TempDir()
+	launcher := filepath.Join(runtimeDir, "poetry")
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\nprintf discovered"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", runtimeDir)
+	session := execToolSession(t, Config{Workspace: t.TempDir(), DiscoverHostCommands: true, ExecCommands: []string{"poetry"}})
+	result := fileToolCall(t, session, "exec", map[string]any{"command": "poetry"})
+	out := decodeExecResult(t, result)
+	if result.IsError || out.ExitCode != 0 || out.Stdout != "discovered" {
+		t.Fatalf("result=%+v", out)
+	}
+}
+
+func TestExecToolReportsAndEnforcesHostPolicy(t *testing.T) {
+	t.Setenv("CODEX_TDD_EXEC_ENV", "private-test-value")
+	session := execToolSession(t, Config{Workspace: t.TempDir(), ExecNetwork: "host", ExecEnv: []string{"CODEX_TDD_EXEC_ENV"}})
+	listed, err := session.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range listed.Tools {
+		if tool.Name != "exec" {
+			continue
+		}
+		if !strings.Contains(tool.Description, "Network mode: host") || !strings.Contains(tool.Description, "CODEX_TDD_EXEC_ENV") || strings.Contains(tool.Description, "private-test-value") {
+			t.Fatalf("exec policy missing or value exposed in tool description")
+		}
+	}
+	result := fileToolCall(t, session, "exec", map[string]any{"command": "python3", "args": []string{"-c", `import os; assert os.environ['CODEX_TDD_EXEC_ENV'] == 'private-test-value'; print('authorized')`}})
+	out := decodeExecResult(t, result)
+	if result.IsError || out.ExitCode != 0 || out.Stdout != "authorized\n" {
+		t.Fatalf("result=%+v", out)
+	}
+	for _, override := range []map[string]any{
+		{"command": "python3", "exec_network": "host"},
+		{"command": "python3", "exec_env": []string{"HOME"}},
+	} {
+		if result := fileToolCall(t, session, "exec", override); !result.IsError {
+			t.Fatal("tool call changed host authorization")
+		}
 	}
 }
