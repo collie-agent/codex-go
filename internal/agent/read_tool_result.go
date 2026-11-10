@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
@@ -8,6 +9,55 @@ import (
 	state "github.com/collie-agent/codex-go/internal/context"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// ToolResultReader 按运行和执行实例隔离查询，避免相同 call_id 串读其他任务。
+type ToolResultReader interface {
+	ToolResult(context.Context, string, string, string) (*state.ToolResult, error)
+}
+
+type toolResultReaderKey struct{}
+
+// 限制重复调用的缓存预览长度，避免大结果挤占上下文。
+const duplicateResultPreviewLimit = 4096
+
+// cachedDuplicateResult 用新的 call_id 配对回传历史结果，不登记或执行新的工具调用。
+func (r *BaseReactProcess[T]) cachedDuplicateResult(durable *state.DurableState, original, id, name, arguments string) *state.ToolResult {
+	result := &state.ToolResult{ToolCallId: id, ToolName: name, Arguments: arguments}
+	stored := r.readToolResult(&sdk.CallToolParams{Arguments: map[string]any{"call_id": original, "offset": 0, "limit": duplicateResultPreviewLimit}}, durable)
+	for _, content := range stored.Content {
+		text, ok := content.(*sdk.TextContent)
+		if !ok {
+			continue
+		}
+		if stored.IsError {
+			result.Error = text.Text
+			return result
+		}
+		var preview struct {
+			Content    string `json:"content"`
+			Error      string `json:"error"`
+			NextOffset int    `json:"next_offset"`
+			HasMore    bool   `json:"has_more"`
+		}
+		if err := json.Unmarshal([]byte(text.Text), &preview); err != nil {
+			result.Error = fmt.Sprintf("decode cached tool result: %v", err)
+			return result
+		}
+		// 解开回读接口的 JSON 信封，原结果以工具输出回传，避免多层转义。
+		result.Result, result.Error = preview.Content, preview.Error
+		if preview.HasMore {
+			result.Result += fmt.Sprintf("\n\nCached output truncated. Continue with read_tool_result using call_id=%q, offset=%d, limit=%d.", original, preview.NextOffset, duplicateResultPreviewLimit)
+		}
+		return result
+	}
+	result.Error = "cached tool result contained no text"
+	return result
+}
+
+// WithToolResultReader 为本次运行及其子执行提供持久化结果读取能力。
+func WithToolResultReader(ctx context.Context, reader ToolResultReader) context.Context {
+	return context.WithValue(ctx, toolResultReaderKey{}, reader)
+}
 
 func readToolResultDefinition() *sdk.Tool {
 	return &sdk.Tool{
@@ -21,7 +71,7 @@ func readToolResultDefinition() *sdk.Tool {
 	}
 }
 
-// readToolResult 在执行记录锁内读取快照，避免与同批其他工具的完成写入竞争。
+// readToolResult 优先查询持久化结果；未接入存储的独立执行使用内存快照。
 func (r *BaseReactProcess[T]) readToolResult(param *sdk.CallToolParams, durable *state.DurableState) *sdk.CallToolResult {
 	fail := func(err error) *sdk.CallToolResult {
 		return &sdk.CallToolResult{IsError: true, Content: []sdk.Content{&sdk.TextContent{Text: err.Error()}}}
@@ -44,7 +94,15 @@ func (r *BaseReactProcess[T]) readToolResult(param *sdk.CallToolParams, durable 
 	r.executionMu.Lock()
 	defer r.executionMu.Unlock()
 	if durable != nil {
-		for _, call := range durable.ToolExecutions {
+		calls := durable.ToolExecutions
+		if reader, ok := r.ctx.Value(toolResultReaderKey{}).(ToolResultReader); ok {
+			call, err := reader.ToolResult(r.ctx, durable.RunId, durable.ExecutionID, args.CallID)
+			if err != nil {
+				return fail(fmt.Errorf("read stored tool result: %w", err))
+			}
+			calls = []*state.ToolResult{call}
+		}
+		for _, call := range calls {
 			if call == nil || call.ToolCallId != args.CallID {
 				continue
 			}

@@ -68,13 +68,15 @@ ReAct 通过 MCP stdio 连接独立工具进程，从服务获取工具定义，
 
 内置 `read_file`、`list_dir`、`glob`、`grep`、`apply_patch` 和 `exec`，分别负责读取、浏览、匹配、搜索、补丁修改及命令执行。另有技能加载工具 `load_skill`，以及由执行流程开放的完成标准和模式切换控制工具。启动时扫描 `~/.agents/skills` 的技能名称与描述，正文按需加载到工具历史中。文件工具的路径边界与命令沙箱分别实施。
 
+需要启动服务、根据日志和接口响应逐步验证时，使用 `exec_start`、`exec_poll` 和 `exec_stop` 管理进程会话；验证命令继续通过 `exec` 执行。须在 `allow_tools` 中显式启用这些工具。进程会话随所属 ReAct 执行结束清理，完整配置和调用示例见 [服务启动与逐步验证](docs/exec-sessions.md)。
+
 实现入口：[`internal/agent/base_react.go`](internal/agent/base_react.go)、[`tool_validation.go`](internal/agent/tool_validation.go)、[`skills.go`](internal/agent/skills.go)、[`internal/mcp/`](internal/mcp/)。
 
 ### Memory（记忆系统）
 
 当前记忆由执行实例内的工具交互、结构化观察、计划步骤记录和同一会话的历史运行组成。新建或恢复运行时，应用层按运行顺序加载此前记录：已完成运行提供目标与结果，失败或主动中断的运行还提供执行进度、工具交互及错误。历史仅作为当前任务的参考，不恢复旧任务的调度状态，也不代表当前任务已经完成。
 
-工具历史完整保留调用参数、结果及错误。`list_dir`、`glob` 的调用与结果仅在紧接着的一轮决策及该轮格式纠错中保留，之后从模型视图移除；恢复时最新工具批次供首次决策使用。完整执行记录仍用于恢复、压缩及原文回读。当前没有独立的向量数据库、语义检索或自动提炼跨会话长期记忆；技能文件提供显式知识和流程复用。
+工具历史完整保留调用参数、结果及错误。`list_dir`、`glob` 的调用与结果在紧接着的三轮决策及各轮格式纠错中保留，之后从模型视图移除；恢复时最近三个工具批次供首次决策使用。完整执行记录仍用于恢复、压缩及原文回读。当前没有独立的向量数据库、语义检索或自动提炼跨会话长期记忆；技能文件提供显式知识和流程复用。
 
 实现入口：[`internal/application/history.go`](internal/application/history.go)、[`run.go`](internal/application/run.go)、[`internal/context/history.go`](internal/context/history.go)。
 
@@ -135,6 +137,32 @@ exec_env:
 ```
 
 在启动 consumer/CLI 前 export `CODEX_TEST_MYSQL_URL`，变量值不会写入 YAML 或 MCP 启动参数。`--exec-network none` 可显式覆盖 YAML 的 `host`；命令行提供 `--exec-env` 时替换 YAML 列表，YAML 的 `exec_env: []` 表示不透传。只接受变量名，不接受 `NAME=value`；未设置的变量不传入，已设置的空值保留。授权值在执行器初始化时固定，更改宿主环境需要重启。`PATH`、`HOME`、`LANG`、`TMPDIR`、`XDG_CACHE_HOME` 和执行器管理的 Go 环境变量不能覆盖。网络/环境授权在新建、恢复、consumer、进程内工具和外部 MCP 中一致生效，工具调用无法追加授权。仅提供 MCP 工具的 `codex-mcp` 直接使用上述启动参数，Agent YAML 由 consumer/CLI 解析并传递。
+
+#### 依赖代理与持久缓存
+
+需要让 exec 下载 Go 依赖时，使用专用代理配置和可写缓存，不要将 `GOPROXY` 放进 `exec_env`：
+
+```yaml
+exec_network: host
+exec_go_proxy: https://goproxy.io,direct
+exec_caches:
+  - name: go-mod
+    # 宿主目录
+    directory: /home/user/.cache/codex-exec/go-mod
+    env: [GOMODCACHE]
+  - name: pip
+    directory: /home/user/.cache/codex-exec/pip
+    env: [PIP_CACHE_DIR]
+  - name: npm
+    directory: /home/user/.cache/codex-exec/npm
+    env: [npm_config_cache]
+```
+
+`exec_caches` 是语言无关的宿主授权：每项把一个专用绝对目录可写挂载到 `/run/caches/<name>`，并将 `env` 中的变量设为该沙箱路径。目录不存在时创建；缓存跨工具调用、进程会话和服务重启保留。接入其他语言只需增加目录与缓存变量映射，无需添加执行器分支。缓存名只能包含字母、数字、下划线和连字符，且以字母或数字开头。拒绝重复名称、重复变量、与 `exec_env` 冲突，以及与工作目录、系统目录、运行时或其他缓存重叠的目录；不能授权整个 HOME。所有沙箱命令都能修改授权缓存，请按信任范围分配目录；缓存没有自动清理或配额。
+
+CLI、consumer 和独立 MCP 支持 `--exec-go-proxy VALUE`，以及可重复的 `--exec-cache '{"name":"go-mod","directory":"/home/user/.cache/codex-exec/go-mod","env":["GOMODCACHE"]}'`。显式 CLI 缓存列表替换 YAML 列表；`--exec-cache '[]'` 清空列表。`exec_caches: []` 同样不授权持久可写缓存。
+
+省略配置时保留原有离线策略及宿主 Go 模块缓存只读挂载。host 网络模式只读提供系统公开 CA 证书目录以支持 HTTPS 校验。`exec_go_proxy` 只设置 `GOPROXY`，不开放网络；下载需要同时配置 `exec_network: host` 和 `GOMODCACHE` 可写缓存。可用 `exec_go_proxy: off` 显式关闭代理。`GOSUMDB=off`、`GOTOOLCHAIN=local` 保持原有设置，不自动下载 Go 工具链；更改配置后需重启提供工具的进程。
 
 seccomp 进一步限制命名 Unix socket、io_uring 和非本机 ABI；隔离不可用时拒绝执行，不回退宿主。命令退出、超时或取消时清理整个沙箱。当前限制执行时间，`exec` 最长 5 分钟，stdout 和 stderr 完整返回且不截断；Agent 对超过约 8K token 的 exec 结果分块总结，只保存摘要及执行状态（见 [上下文压缩](docs/react-compaction.md)）；没有 CPU、内存、进程数或磁盘配额，也不会自动撤销工作目录中的文件修改。
 

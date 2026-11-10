@@ -106,3 +106,17 @@ func (s *RunStore) ExecutionByID(ctx context.Context, runID, executionID string)
 	}
 	return durable, nil
 }
+
+// ToolResult 只读取当前执行中的一条记录，不加载完整工具历史。
+func (s *RunStore) ToolResult(ctx context.Context, runID, executionID, callID string) (*state.ToolResult, error) {
+	defer s.lockConnection()()
+	var call ToolExecution
+	if err := s.db.WithContext(ctx).Where("run_id = ? AND execution_id = ? AND call_id = ?", runID, executionID, callID).Order("position ASC").First(&call).Error; err != nil {
+		return nil, err
+	}
+	var result state.ToolResult
+	if err := json.Unmarshal(call.Payload, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}

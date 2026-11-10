@@ -11,6 +11,8 @@ import (
 // GlobalConfig 保存整个运行共用的设置，加载后按只读配置使用。
 // agent 的独立配置不能覆盖这里的值。
 type GlobalConfig struct {
+	ExecGoProxy          string
+	ExecCaches           []ExecCache
 	ExecNetwork          string
 	ExecEnv              []string
 	DiscoverHostCommands bool

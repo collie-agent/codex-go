@@ -79,6 +79,9 @@ func TestAllToolSchemasRejectWrongArgumentTypes(t *testing.T) {
 		"grep":                       {map[string]any{"pattern": "TODO", "literal": "true", "limit": "200"}, "literal must be a JSON boolean"},
 		"apply_patch":                {map[string]any{"patch": 123}, "invalid arguments"},
 		"exec":                       {map[string]any{"command": "git", "args": "status"}, "invalid arguments"},
+		"exec_start":                 {map[string]any{"command": "go", "args": "run ."}, "invalid arguments"},
+		"exec_poll":                  {map[string]any{"session_id": "id", "cursor": "0"}, "cursor must be a JSON integer"},
+		"exec_stop":                  {map[string]any{"session_id": 123}, "invalid arguments"},
 	}
 	for tool, err := range r.mcpClientSess.Tools(t.Context(), nil) {
 		if err != nil {

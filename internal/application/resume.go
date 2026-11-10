@@ -30,6 +30,9 @@ func Resume(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 		return nil, err
 	}
 	opts = resolveExecOptions(opts, loaded)
+	if err := config.ValidateExecCaches(opts.ExecCaches, opts.ExecEnv); err != nil {
+		return nil, err
+	}
 	if err := config.ValidateExecPolicy(opts.ExecNetwork, opts.ExecEnv); err != nil {
 		return nil, err
 	}
@@ -132,6 +135,7 @@ func Resume(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 	}
 	executionCtx, cancelExecution := executionContext(outputCtx, opts.Interrupt)
 	defer cancelExecution()
+	executionCtx = agent.WithToolResultReader(executionCtx, lockedStore)
 	orchestrator := newOrchestrator(executionCtx, workspace, opts)
 	// 恢复始终沿用已保存的模式，尚未生成计划时直接进入 planner。
 	if err := orchestrator.SetMode(mode); err != nil {
@@ -209,9 +213,10 @@ func newOrchestrator(ctx context.Context, workspace string, opts Options) runOrc
 	if opts.Mode == "multi-agent" {
 		var multi *agent.MultiAgentProcessorOrchestrator
 		if opts.MCPCommand == "" {
-			multi = agent.NewMultiAgentProcessorOrchestrator(ctx, filemcp.Config{Workspace: workspace, Timeout: opts.Timeout, RuntimeDirs: opts.RuntimeDirs, DiscoverHostCommands: opts.DiscoverHostCommands, ExecCommands: opts.ExecCommands, ExecNetwork: opts.ExecNetwork, ExecEnv: opts.ExecEnv})
+			multi = agent.NewMultiAgentProcessorOrchestrator(ctx, filemcp.Config{Workspace: workspace, Timeout: opts.Timeout, RuntimeDirs: opts.RuntimeDirs, DiscoverHostCommands: opts.DiscoverHostCommands, ExecCommands: opts.ExecCommands, ExecGoProxy: opts.ExecGoProxy, ExecCaches: opts.ExecCaches, ExecNetwork: opts.ExecNetwork, ExecEnv: opts.ExecEnv})
 		} else {
 			args := []string{"--workspace", workspace, "--timeout", opts.Timeout.String()}
+			args = append(args, config.ExecDependencyArgs(opts.ExecGoProxy, opts.ExecCaches)...)
 			if opts.ExecNetwork != "" {
 				args = append(args, "--exec-network", opts.ExecNetwork)
 			}
@@ -234,9 +239,10 @@ func newOrchestrator(ctx context.Context, workspace string, opts Options) runOrc
 	}
 	var orchestrator *agent.ProcessorOrchestrator
 	if opts.MCPCommand == "" {
-		orchestrator = agent.NewProcessorOrchestrator(ctx, filemcp.Config{Workspace: workspace, Timeout: opts.Timeout, RuntimeDirs: opts.RuntimeDirs, DiscoverHostCommands: opts.DiscoverHostCommands, ExecCommands: opts.ExecCommands, ExecNetwork: opts.ExecNetwork, ExecEnv: opts.ExecEnv})
+		orchestrator = agent.NewProcessorOrchestrator(ctx, filemcp.Config{Workspace: workspace, Timeout: opts.Timeout, RuntimeDirs: opts.RuntimeDirs, DiscoverHostCommands: opts.DiscoverHostCommands, ExecCommands: opts.ExecCommands, ExecGoProxy: opts.ExecGoProxy, ExecCaches: opts.ExecCaches, ExecNetwork: opts.ExecNetwork, ExecEnv: opts.ExecEnv})
 	} else {
 		args := []string{"--workspace", workspace, "--timeout", opts.Timeout.String()}
+		args = append(args, config.ExecDependencyArgs(opts.ExecGoProxy, opts.ExecCaches)...)
 		if opts.ExecNetwork != "" {
 			args = append(args, "--exec-network", opts.ExecNetwork)
 		}

@@ -46,6 +46,7 @@ func NewCommandExecutorWithConfig(config Config) (*CommandExecutor, error) {
 	if err != nil {
 		return nil, err
 	}
+	e.goProxy = config.ExecGoProxy
 	e.network = config.ExecNetwork
 	// Resolve authorized values once; tool calls cannot change the environment grant.
 	for _, name := range config.ExecEnv {
@@ -62,6 +63,9 @@ func NewCommandExecutorWithConfig(config Config) (*CommandExecutor, error) {
 		e.allowed[name] = true
 	}
 	if !config.DiscoverHostCommands {
+		if err := e.configureCaches(config); err != nil {
+			return nil, err
+		}
 		return e, nil
 	}
 	workspace, err := resolveWorkspace(config.Workspace)
@@ -129,6 +133,10 @@ func NewCommandExecutorWithConfig(config Config) (*CommandExecutor, error) {
 		}
 		e.discovered[name] = resolved
 		e.path = append(e.path, pathDir)
+	}
+	// Validate writable grants after discovering all read-only runtimes.
+	if err := e.configureCaches(config); err != nil {
+		return nil, err
 	}
 	return e, nil
 }

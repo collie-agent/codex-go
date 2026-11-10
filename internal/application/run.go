@@ -21,6 +21,8 @@ import (
 )
 
 type Options struct {
+	ExecGoProxy          string
+	ExecCaches           []config.ExecCache
 	ExecNetwork          string
 	ExecEnv              []string
 	LogDir               string
@@ -65,6 +67,9 @@ func Run(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 		return nil, err
 	}
 	opts = resolveExecOptions(opts, loaded)
+	if err := config.ValidateExecCaches(opts.ExecCaches, opts.ExecEnv); err != nil {
+		return nil, err
+	}
 	if err := config.ValidateExecPolicy(opts.ExecNetwork, opts.ExecEnv); err != nil {
 		return nil, err
 	}
@@ -117,6 +122,7 @@ func Run(ctx context.Context, opts Options) ([]agent.ReactResult, error) {
 	defer cleanupOutput()
 	executionCtx, cancelExecution := executionContext(outputCtx, opts.Interrupt)
 	defer cancelExecution()
+	executionCtx = agent.WithToolResultReader(executionCtx, lockedStore)
 	orchestrator := newOrchestrator(executionCtx, workspace, opts)
 	if err := orchestrator.SetMode(opts.Mode); err != nil {
 		return nil, err
@@ -320,6 +326,12 @@ func resolveExecOptions(opts Options, loaded *config.AgentConfig) Options {
 	}
 	if !opts.DiscoverHostCommandsSet && !opts.DiscoverHostCommands {
 		opts.DiscoverHostCommands = loaded.Global.DiscoverHostCommands
+	}
+	if opts.ExecGoProxy == "" {
+		opts.ExecGoProxy = loaded.Global.ExecGoProxy
+	}
+	if opts.ExecCaches == nil {
+		opts.ExecCaches = loaded.Global.ExecCaches
 	}
 	if opts.ExecNetwork == "" {
 		opts.ExecNetwork = loaded.Global.ExecNetwork

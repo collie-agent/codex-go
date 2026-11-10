@@ -5,6 +5,9 @@ import (
 	state "github.com/collie-agent/codex-go/internal/context"
 )
 
+// discoveryResultDecisionTurns 是目录检索结果在后续决策中的保留轮数。
+const discoveryResultDecisionTurns = 3
+
 // transientResultsContext 仅裁剪决策视图，原始记录继续用于恢复、压缩和回读。
 type transientResultsContext struct {
 	state.Contexter

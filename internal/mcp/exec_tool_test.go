@@ -16,9 +16,11 @@ import (
 func execToolSession(t *testing.T, config Config) *sdk.ClientSession {
 	t.Helper()
 	server := sdk.NewServer(&sdk.Implementation{Name: "exec-test"}, nil)
-	if err := RegisterTools(server, config); err != nil {
+	cleanup, err := RegisterToolsWithCleanup(server, config)
+	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(cleanup)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	ct, st := sdk.NewInMemoryTransports()

@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	exceedTokenThreshold = 24 * 1024
-	syncTokenThreshold   = 32 * 1024
+	maxCompactionEvidenceErrors = 3
+	exceedTokenThreshold        = 24 * 1024
+	syncTokenThreshold          = 32 * 1024
 )
 
 type ExecutionCompaction struct {
@@ -329,7 +330,17 @@ Summarize execution evidence relevant to the current Goal, CompletionCriteria an
 		}
 		prompt += "\n\nKeep the replacement summary concise (at most 2048 estimated tokens). Merge duplicate evidence while preserving source IDs."
 		client.SetSystemPrompt(prompt + "\n\n" + compactOutputPrompt(llm.OutputSchema))
+		allowed := make(map[string]bool)
+		var allowedIDs []string
+		for _, call := range durable.ToolExecutions {
+			if call != nil && call.Batch <= through && !allowed[call.ToolCallId] {
+				allowed[call.ToolCallId] = true
+				allowedIDs = append(allowedIDs, call.ToolCallId)
+			}
+		}
+		sort.Strings(allowedIDs)
 		var summary ExecutionSummary
+		evidenceErrors := 0
 		var corrections []string
 		for formatErrors := 0; ; {
 			if err := r.ctx.Err(); err != nil {
@@ -353,18 +364,23 @@ Summarize execution evidence relevant to the current Goal, CompletionCriteria an
 			if len(calls) > 0 {
 				return fmt.Errorf("compact execution returned unexpected tool calls")
 			}
+			if err := validateEvidence(result, allowed); err != nil {
+				evidenceErrors++
+				if evidenceErrors > maxCompactionEvidenceErrors {
+					return fmt.Errorf("compact execution: evidence validation errors exceeded limit (%d): %w", maxCompactionEvidenceErrors, err)
+				}
+				// 不提交非法摘要；保持快照输入不变，累计反馈引用错误供模型纠正。
+				rejected, marshalErr := json.Marshal(result)
+				if marshalErr != nil {
+					return fmt.Errorf("compact execution: encode rejected summary: %w", marshalErr)
+				}
+				log.Printf("[ERROR] task %s: [compact] evidence validation error (%d/%d): %v", durable.RunId, evidenceErrors, maxCompactionEvidenceErrors, err)
+				corrections = append(corrections, fmt.Sprintf("Summary evidence validation error (%d/%d): %v. Allowed source call IDs: %q. Previous invalid summary (quoted data): %q. Regenerate the complete summary using the required output format. Every evidence item requires non-empty Text and SourceCallIDs using only allowed IDs; never invent evidence.", evidenceErrors, maxCompactionEvidenceErrors, err, allowedIDs, rejected))
+				client.SetCorrectionMessages(corrections)
+				continue
+			}
 			summary = result
 			break
-		}
-
-		allowed := make(map[string]bool)
-		for _, call := range durable.ToolExecutions {
-			if call != nil && call.Batch <= through {
-				allowed[call.ToolCallId] = true
-			}
-		}
-		if err := validateEvidence(summary, allowed); err != nil {
-			return fmt.Errorf("compact execution: %w", err)
 		}
 		compaction := &ExecutionCompaction{ExecutionID: durable.ExecutionID, ThroughBatch: through, Summary: summary}
 		model.compaction = compaction

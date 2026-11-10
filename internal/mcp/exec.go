@@ -25,6 +25,8 @@ type CommandExecutor struct {
 	mounts      []string
 	runtime     []string
 	goModCache  string
+	caches      []cacheMount
+	goProxy     string
 	allowed     map[string]bool
 	discovered  map[string]string
 }
@@ -41,6 +43,7 @@ type CommandResult struct {
 var (
 	ErrCommandParameter = errors.New("invalid command parameter")
 	ErrSandboxStartup   = errors.New("sandbox startup failed")
+	ErrCommandCleanup   = errors.New("sandbox cleanup failed")
 )
 
 // Keep runtime validation and actual system mounts on the same directory list.
@@ -117,6 +120,11 @@ func NewCommandExecutor(runtimeDirs ...string) (*CommandExecutor, error) {
 // Nonzero command exits are results; startup failures and interruption are errors.
 // Captured output is retained on errors, and interruption wraps ctx.Err().
 func (e *CommandExecutor) Execute(ctx context.Context, workspace, name string, args []string) (CommandResult, error) {
+	return e.execute(ctx, workspace, name, args, nil)
+}
+
+// output streams session logs without retaining a second, unbounded copy.
+func (e *CommandExecutor) execute(ctx context.Context, workspace, name string, args []string, output func(bool, []byte)) (CommandResult, error) {
 	// Only entrypoint names are accepted; paths must never bypass controlled resolution.
 	if !e.commandAllowed(name) {
 		return CommandResult{}, fmt.Errorf("%w: unapproved command %q", ErrCommandParameter, name)
@@ -131,6 +139,11 @@ func (e *CommandExecutor) Execute(ctx context.Context, workspace, name string, a
 	for _, dir := range append(append([]string{}, e.mounts...), "/etc", "/proc", "/dev", "/sys", "/run") {
 		if containsDirectory(root, dir) || containsDirectory(dir, root) {
 			return CommandResult{}, fmt.Errorf("%w: workspace overlaps system runtime %s", ErrCommandParameter, dir)
+		}
+	}
+	for _, cache := range e.caches {
+		if containsDirectory(root, cache.source) || containsDirectory(cache.source, root) {
+			return CommandResult{}, fmt.Errorf("%w: workspace overlaps persistent cache", ErrCommandParameter)
 		}
 	}
 	// Resolve only from the immutable system PATH, never the caller's PATH or Workspace.
@@ -172,6 +185,26 @@ func (e *CommandExecutor) Execute(ctx context.Context, workspace, name string, a
 		}
 	}
 	sandboxArgs = append(sandboxArgs, "--proc", "/proc", "--dev", "/dev", "--bind", "/tmp", "/tmp", "--tmpfs", "/run", "--dir", "/run/home", "--dir", "/run/cache", "--dir", "/etc")
+	if e.network == "host" {
+		// Resolve host symlinks before mounting: systemd-resolved commonly keeps
+		// the target under /run, which is replaced by the sandbox's private tmpfs.
+		resolver, err := filepath.EvalSymlinks("/etc/resolv.conf")
+		if err != nil {
+			return CommandResult{}, fmt.Errorf("%w: resolve host DNS configuration: %v", ErrSandboxStartup, err)
+		}
+		sandboxArgs = append(sandboxArgs, "--ro-bind", resolver, "/etc/resolv.conf")
+		// Outbound HTTPS needs public trust roots, never private keys or all of /etc.
+		for _, certificates := range []string{"/etc/ssl/certs", "/etc/pki/tls/certs", "/etc/pki/ca-trust/extracted"} {
+			resolved, err := filepath.EvalSymlinks(certificates)
+			if os.IsNotExist(err) {
+				continue
+			}
+			if err != nil {
+				return CommandResult{}, fmt.Errorf("%w: resolve system certificates: %v", ErrSandboxStartup, err)
+			}
+			sandboxArgs = append(sandboxArgs, "--ro-bind", resolved, certificates)
+		}
+	}
 	// Mount runtime directories last so they remain read-only even under /tmp.
 	// Each host supplied directory remains read-only at its canonical path.
 	for _, dir := range e.runtime {
@@ -182,11 +215,18 @@ func (e *CommandExecutor) Execute(ctx context.Context, workspace, name string, a
 			sandboxArgs = append(sandboxArgs, "--ro-bind", file, file)
 		}
 	}
-	// Keep shared dependencies immutable; build artifacts stay in sandbox cache.
+	// Keep the default host module cache immutable; explicit cache grants below
+	// override the cache location with a dedicated writable directory.
 	if e.goModCache != "" {
 		sandboxArgs = append(sandboxArgs, "--ro-bind", e.goModCache, "/run/go-mod-cache", "--setenv", "GOMODCACHE", "/run/go-mod-cache")
 	}
-	sandboxArgs = append(sandboxArgs, "--setenv", "GOPROXY", "off", "--setenv", "GOSUMDB", "off", "--setenv", "GOTOOLCHAIN", "local")
+	for _, cache := range e.caches {
+		sandboxArgs = append(sandboxArgs, "--bind", cache.source, cache.target)
+		for _, name := range cache.env {
+			sandboxArgs = append(sandboxArgs, "--setenv", name, cache.target)
+		}
+	}
+	sandboxArgs = append(sandboxArgs, "--setenv", "GOPROXY", defaultGoProxy(e.goProxy), "--setenv", "GOSUMDB", "off", "--setenv", "GOTOOLCHAIN", "local")
 	for _, value := range e.environment {
 		name, value, _ := strings.Cut(value, "=")
 		sandboxArgs = append(sandboxArgs, "--setenv", name, value)
@@ -228,13 +268,24 @@ func (e *CommandExecutor) Execute(ctx context.Context, workspace, name string, a
 	// Killing bwrap triggers --die-with-parent; exiting the PID namespace's init
 	// kills every remaining descendant, including detached background processes.
 	cmd.WaitDelay = time.Second
-	capture := &commandCapture{}
+	var awaitCleanup func() error
+	if output != nil {
+		awaitCleanup = configureSessionStop(cmd, status)
+	}
+	capture := &commandCapture{output: output}
 	cmd.Stdout = commandStream{capture, false}
 	cmd.Stderr = commandStream{capture, true}
 	err = cmd.Run()
+	var cleanupErr error
+	if awaitCleanup != nil {
+		cleanupErr = awaitCleanup()
+	}
 	result := CommandResult{Stdout: capture.stdout.String(), Stderr: capture.stderr.String(), ExitCode: -1}
 	if cmd.ProcessState != nil {
 		result.ExitCode = cmd.ProcessState.ExitCode()
+	}
+	if cleanupErr != nil {
+		return result, fmt.Errorf("%w: %v", ErrCommandCleanup, cleanupErr)
 	}
 	if ctx.Err() != nil {
 		return result, fmt.Errorf("command interrupted: %w", ctx.Err())
@@ -275,6 +326,7 @@ func containsDirectory(parent, child string) bool {
 type commandCapture struct {
 	mu             sync.Mutex
 	stdout, stderr bytes.Buffer
+	output         func(bool, []byte)
 }
 type commandStream struct {
 	capture *commandCapture
@@ -286,6 +338,10 @@ func (s commandStream) Write(data []byte) (int, error) {
 	// stdout and stderr are copied concurrently; retain both streams in full.
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.output != nil {
+		c.output(s.stderr, data)
+		return len(data), nil
+	}
 	if s.stderr {
 		return c.stderr.Write(data)
 	}

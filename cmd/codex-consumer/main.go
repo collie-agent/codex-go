@@ -14,12 +14,14 @@ import (
 	"time"
 
 	"github.com/collie-agent/codex-go/internal/application"
+	"github.com/collie-agent/codex-go/internal/config"
 	"github.com/collie-agent/codex-go/internal/consumer"
 	"github.com/collie-agent/codex-go/internal/logging"
 )
 
 func main() {
 	var opts application.Options
+	config.RegisterExecDependencyFlags(flag.CommandLine, &opts.ExecGoProxy, &opts.ExecCaches)
 	var concurrency int
 	flag.StringVar(&opts.ExecNetwork, "exec-network", "", "exec network: none or host (overrides YAML; default none)")
 	flag.Func("exec-env", "host environment variable name exposed to exec (repeatable; replaces YAML list)", func(name string) error { opts.ExecEnv = append(opts.ExecEnv, name); return nil })

@@ -246,7 +246,7 @@ func TestReactCanGatherContextBeforeSettingCompletionCriteria(t *testing.T) {
 			if len(durable.CompletionCriteria) != 0 {
 				t.Error("exploration must not invent completion criteria")
 			}
-			criteriaResponse(w, "", map[string]any{"type": "function_call", "id": fmt.Sprintf("fc_read_%d", turns), "call_id": fmt.Sprintf("read_%d", turns), "name": "read_file", "arguments": `{"path":"architecture.txt"}`})
+			criteriaResponse(w, "", map[string]any{"type": "function_call", "id": fmt.Sprintf("fc_read_%d", turns), "call_id": fmt.Sprintf("read_%d", turns), "name": "read_file", "arguments": fmt.Sprintf(`{"path":"architecture.txt","limit":%d}`, turns)})
 		case turns == 5:
 			criteriaResponse(w, "", map[string]any{"type": "function_call", "id": "fc_criteria", "call_id": "criteria", "name": "update_completion_criteria", "arguments": `{"completion_criteria":["Explain how Worker delegates tool execution to MCP"]}`})
 		default:

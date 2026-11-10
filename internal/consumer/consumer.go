@@ -49,6 +49,13 @@ func RunWithConcurrency(ctx context.Context, opts application.Options, concurren
 	if environment == nil {
 		environment = loaded.Global.ExecEnv
 	}
+	caches := opts.ExecCaches
+	if caches == nil {
+		caches = loaded.Global.ExecCaches
+	}
+	if err := config.ValidateExecCaches(caches, environment); err != nil {
+		return err
+	}
 	if err := config.ValidateExecPolicy(network, environment); err != nil {
 		return err
 	}

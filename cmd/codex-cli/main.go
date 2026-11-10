@@ -14,6 +14,7 @@ import (
 
 	"github.com/collie-agent/codex-go/internal/agent"
 	"github.com/collie-agent/codex-go/internal/application"
+	"github.com/collie-agent/codex-go/internal/config"
 	"github.com/collie-agent/codex-go/internal/logging"
 )
 
@@ -33,6 +34,9 @@ func main() {
 	mode := flag.String("mode", "", "execution mode: react, plan-execute or multi-agent (inferred for multi-agent YAML)")
 	discoverHostCommands := flag.Bool("discover-host-commands", false, "discover whitelisted exec runtimes from host PATH at startup")
 	execNetwork := flag.String("exec-network", "", "exec network: none or host (overrides YAML; default none)")
+	var execGoProxy string
+	var execCaches []config.ExecCache
+	config.RegisterExecDependencyFlags(flag.CommandLine, &execGoProxy, &execCaches)
 	var execEnv []string
 	flag.Func("exec-env", "host environment variable name exposed to exec (repeatable; replaces YAML list)", func(name string) error { execEnv = append(execEnv, name); return nil })
 	var execCommands []string
@@ -82,9 +86,9 @@ func main() {
 	}
 	var results []agent.ReactResult
 	if *runID != "" {
-		results, err = application.Resume(ctx, application.Options{ConfigPath: *configPath, RunID: *runID, Workspace: *workspace, Mode: *mode, MCPCommand: *mcpCommand, Timeout: *timeout, RuntimeDirs: runtimeDirs, DiscoverHostCommands: *discoverHostCommands, DiscoverHostCommandsSet: discoverHostCommandsSet, ExecCommands: execCommands, ExecNetwork: *execNetwork, ExecEnv: execEnv, Skills: skills, LogDir: *logDir, Interrupt: interrupt})
+		results, err = application.Resume(ctx, application.Options{ConfigPath: *configPath, RunID: *runID, Workspace: *workspace, Mode: *mode, MCPCommand: *mcpCommand, Timeout: *timeout, RuntimeDirs: runtimeDirs, DiscoverHostCommands: *discoverHostCommands, DiscoverHostCommandsSet: discoverHostCommandsSet, ExecCommands: execCommands, ExecGoProxy: execGoProxy, ExecCaches: execCaches, ExecNetwork: *execNetwork, ExecEnv: execEnv, Skills: skills, LogDir: *logDir, Interrupt: interrupt})
 	} else {
-		results, err = application.Run(ctx, application.Options{ConfigPath: *configPath, Task: *task, Workspace: *workspace, ConvID: *convID, Mode: *mode, MCPCommand: *mcpCommand, Timeout: *timeout, RuntimeDirs: runtimeDirs, DiscoverHostCommands: *discoverHostCommands, DiscoverHostCommandsSet: discoverHostCommandsSet, ExecCommands: execCommands, ExecNetwork: *execNetwork, ExecEnv: execEnv, Skills: skills, LogDir: *logDir, Interrupt: interrupt})
+		results, err = application.Run(ctx, application.Options{ConfigPath: *configPath, Task: *task, Workspace: *workspace, ConvID: *convID, Mode: *mode, MCPCommand: *mcpCommand, Timeout: *timeout, RuntimeDirs: runtimeDirs, DiscoverHostCommands: *discoverHostCommands, DiscoverHostCommandsSet: discoverHostCommandsSet, ExecCommands: execCommands, ExecGoProxy: execGoProxy, ExecCaches: execCaches, ExecNetwork: *execNetwork, ExecEnv: execEnv, Skills: skills, LogDir: *logDir, Interrupt: interrupt})
 	}
 	if err != nil {
 		if errors.Is(err, application.ErrInterrupted) {

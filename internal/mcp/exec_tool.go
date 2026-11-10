@@ -23,10 +23,11 @@ type execToolResult struct {
 	Error     string `json:"error,omitempty"`
 }
 
-func registerExecTool(server *sdk.Server, workspace string, config Config) {
+func registerExecTool(server *sdk.Server, workspace string, config Config) func() {
 	// Pin host-authorized runtime configuration at registration. A missing
 	// sandbox makes only exec fail; existing file tools remain available.
 	executor, startupErr := NewCommandExecutorWithConfig(config)
+	cleanup := registerExecSessionTools(server, workspace, config, executor, startupErr)
 	commands := execCommands(config.ExecCommands)
 	network := config.ExecNetwork
 	if network == "" {
@@ -34,7 +35,7 @@ func registerExecTool(server *sdk.Server, workspace string, config Config) {
 	}
 	sdk.AddTool(server, &sdk.Tool{
 		Name: string(mcpconfig.ExecMCPToolName), InputSchema: toolInputSchema[execToolArgs](),
-		Description: `Execute a command at the workspace root inside a fresh sandbox using the host-configured network and environment policy. Example arguments: {"command":"git","args":["status","--short"]}. command must be in the host-configured entrypoint whitelist; executable paths and shell strings are rejected. args is an optional JSON array of strings, never a quoted array or null.
+		Description: `Execute a command synchronously at the workspace root inside a fresh sandbox using the host-configured network and environment policy. Waits for exit and returns final output; it does not return a process session. For a server that you need to inspect and verify in later calls, use exec_start, exec_poll and exec_stop instead when those tools are enabled. Example arguments: {"command":"git","args":["status","--short"]}. command must be in the host-configured entrypoint whitelist; executable paths and shell strings are rejected. args is an optional JSON array of strings, never a quoted array or null.
 
 Available commands (each example is a complete tool arguments object):
 - find: locate files and directories by path, name, or type. Example: {"command":"find","args":[".","-type","f","-name","*.go"]}. -type f selects files; -type d selects directories; -name matches a filename pattern. Pass patterns literally as individual args.
@@ -53,7 +54,7 @@ Available commands (each example is a complete tool arguments object):
 
 Entrypoint approval does not guarantee that a command, runtime, or dependency is installed. Prefer read_file, list_dir, glob, grep, and apply_patch for ordinary file operations when those tools are available. Arguments are passed directly, so shell pipes, redirects, &&, environment-variable expansion, and wildcard expansion are not interpreted. Command-specific patterns such as find -name and rg --glob still work. The entrypoint allowlist does not restrict subcommands or child processes; interpreters and project scripts can launch children under the same sandbox boundary.
 
- No cwd, environment, runtime mount, or stdin overrides are accepted. Commands and their children can read and write the whole workspace, including .git and deleting files; external user files are inaccessible; host network services are accessible only in host network mode. Host-configured runtimes are read-only. Named Unix sockets and io_uring are unavailable. stdin is EOF; all descendants are cleaned up after execution. The server tool timeout applies, with a maximum of 5 minutes. Returns complete stdout, stderr and exit_code; exit_code is -1 when no command ran. Ordinary nonzero exits are results, not tool errors. Parameter, sandbox startup, timeout and cancellation errors set isError and error_kind while retaining captured output. Output is returned in full without a capture or response size limit. Allowed entrypoints for this server: ` + strings.Join(commands, ", ") + ". Network mode: " + network + ". Authorized host environment names: " + strings.Join(config.ExecEnv, ", "),
+ No cwd, environment, runtime mount, or stdin overrides are accepted. Commands and their children can read and write the whole workspace, including .git and deleting files; external user files are inaccessible; host network services are accessible only in host network mode. Host-configured runtimes are read-only. Host-authorized persistent caches are writable and shared across calls and process sessions. Named Unix sockets and io_uring are unavailable. stdin is EOF; all descendants are cleaned up after execution. The server tool timeout applies, with a maximum of 5 minutes. Returns complete stdout, stderr and exit_code; exit_code is -1 when no command ran. Ordinary nonzero exits are results, not tool errors. Parameter, sandbox startup, timeout and cancellation errors set isError and error_kind while retaining captured output. Output is returned in full without a capture or response size limit. Allowed entrypoints for this server: ` + strings.Join(commands, ", ") + ". Network mode: " + network + ". Authorized host environment names: " + strings.Join(config.ExecEnv, ", "),
 	}, func(ctx context.Context, _ *sdk.CallToolRequest, args execToolArgs) (*sdk.CallToolResult, execToolResult, error) {
 		result := CommandResult{ExitCode: -1}
 		err := startupErr
@@ -78,6 +79,7 @@ Entrypoint approval does not guarantee that a command, runtime, or dependency is
 		}
 		return execToolResponse(out)
 	})
+	return cleanup
 }
 
 func execToolResponse(result execToolResult) (*sdk.CallToolResult, execToolResult, error) {

@@ -17,3 +17,10 @@ Go 离线依赖：启动时读取宿主 Go 的 GOMODCACHE，将存在且通过�
 
 
 宿主网络及环境显式授权：新增 `--exec-network none|host`（YAML 顶层 `exec_network`）和可重复的 `--exec-env NAME`（YAML 顶层 `exec_env`）。默认仍使用独立网络命名空间且不继承宿主凭据环境；`host` 显式省略 `--unshare-net`，命令进程树共享宿主网络，使测试可访问 Docker 发布的 MySQL TCP 端口。此授权开放整个宿主网络，不提供按地址或端口的限制；Unix socket/seccomp、文件挂载和进程清理边界不变。环境授权仅保存变量名，在执行器初始化时解析已设置的宿主值；不继承其余环境，保留执行器管理的环境变量。命令行显式值覆盖 YAML，新建与恢复、进程内与外部 MCP 共用策略，工具调用不能改变授权。
+
+`host` 模式额外将宿主 `/etc/resolv.conf` 的真实目标只读挂载到沙箱同一路径，避免指向 `/run` 的符号链接因沙箱私有 tmpfs 而失效。无法解析宿主 DNS 配置时拒绝执行并返回沙箱启动错误；默认及 `none` 模式不暴露该文件。
+
+
+依赖下载与通用持久缓存（显式授权）：扩展上述 Go 离线缓存约定，新增 `exec_go_proxy` / `--exec-go-proxy` 设置 GOPROXY；默认仍为 off，且网络策略独立，下载必须显式开启 host 网络。新增语言无关的 `exec_caches` / `--exec-cache`，以名称、宿主专用绝对目录及环境变量列表描述缓存；宿主目录可写挂载到 `/run/caches/<name>`，环境变量指向该路径。Go 使用 GOMODCACHE，pip/npm 等通过各自缓存变量接入，执行器无需按语言分支。缓存持久化由宿主目录承担，不随进程树清理；进程会话与同步执行共用此授权。缓存目录不能与 Workspace、系统或运行时目录、其他缓存重叠，不能授权整个 HOME；不允许覆盖执行器保留变量（GOMODCACHE 为专门支持的例外），也不允许与 exec_env 冲突。可写缓存内容对共享该目录的所有执行可见且可修改，不作为可信运行时。未配置持久缓存时继续使用只读宿主 Go 模块缓存，GOSUMDB=off 与 GOTOOLCHAIN=local 保持不变。此项授权不提供缓存配额或自动回收。
+
+host 网络模式同时只读挂载存在的系统公开 CA 证书目录（`/etc/ssl/certs`、`/etc/pki/tls/certs`、`/etc/pki/ca-trust/extracted`），供 Go 代理等 HTTPS 请求验证证书；不挂载私钥目录或整个 `/etc`。

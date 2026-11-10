@@ -8,11 +8,14 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
+	"syscall"
 	"time"
 
 	filemcp "github.com/collie-agent/codex-go/internal/mcp"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/collie-agent/codex-go/internal/config"
 	"github.com/collie-agent/codex-go/internal/logging"
 )
 
@@ -22,6 +25,9 @@ func main() {
 	timeout := flag.Duration("timeout", 5*time.Minute, "tool command timeout")
 	discoverHostCommands := flag.Bool("discover-host-commands", false, "discover whitelisted exec runtimes from host PATH at startup")
 	execNetwork := flag.String("exec-network", "", "exec network: none or host (overrides YAML; default none)")
+	var execGoProxy string
+	var execCaches []config.ExecCache
+	config.RegisterExecDependencyFlags(flag.CommandLine, &execGoProxy, &execCaches)
 	var execEnv []string
 	flag.Func("exec-env", "host environment variable name exposed to exec (repeatable; replaces YAML list)", func(name string) error { execEnv = append(execEnv, name); return nil })
 	var execCommands []string
@@ -47,11 +53,17 @@ func main() {
 		}
 	}
 	server := sdk.NewServer(&sdk.Implementation{Name: "codex-go-mcp", Version: "0.1.0"}, nil)
-	if err := filemcp.RegisterTools(server, filemcp.Config{Workspace: *workspace, Timeout: *timeout, RuntimeDirs: runtimeDirs, DiscoverHostCommands: *discoverHostCommands, ExecCommands: execCommands, ExecNetwork: *execNetwork, ExecEnv: execEnv}); err != nil {
+	cleanup, err := filemcp.RegisterToolsWithCleanup(server, filemcp.Config{Workspace: *workspace, Timeout: *timeout, RuntimeDirs: runtimeDirs, DiscoverHostCommands: *discoverHostCommands, ExecCommands: execCommands, ExecGoProxy: execGoProxy, ExecCaches: execCaches, ExecNetwork: *execNetwork, ExecEnv: execEnv})
+	if err != nil {
 		log.Printf("[ERROR] %v", err)
 		os.Exit(1)
 	}
-	err := server.Run(context.Background(), &sdk.StdioTransport{})
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	err = server.Run(ctx, &sdk.StdioTransport{})
+	// Stdio EOF and agent cancellation both wait for sandbox teardown before
+	// the MCP process exits; parent death remains the crash fallback.
+	cleanup()
 	if err != nil && !errors.Is(err, os.ErrClosed) {
 		log.Printf("[ERROR] %v", err)
 		os.Exit(1)

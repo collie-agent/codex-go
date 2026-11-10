@@ -13,4 +13,7 @@ const (
 	GrepMCPToolName                     McpToolName = "grep"
 	ApplyPatchMCPToolName               McpToolName = "apply_patch"
 	ExecMCPToolName                     McpToolName = "exec"
+	ExecStartMCPToolName                McpToolName = "exec_start"
+	ExecPollMCPToolName                 McpToolName = "exec_poll"
+	ExecStopMCPToolName                 McpToolName = "exec_stop"
 )

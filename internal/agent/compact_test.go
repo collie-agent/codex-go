@@ -106,6 +106,89 @@ func compactionConfig(t *testing.T, url string) *config.AgentConfig {
 	return cfg
 }
 
+func TestReactCorrectsUnknownCompactionSourceAndContinues(t *testing.T) {
+	durable := compactionHistory(11)
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		requests++
+		if requests == 3 {
+			writeObservationResponse(w, []any{observationMessage("BEGIN RESULT\nSTATUS=\"completed\"\nANSWER=\"done\"\nEND RESULT")})
+			return
+		}
+		var body struct {
+			Input string `json:"input"`
+		}
+		if err := decodeCorrectionRequest(t, req.Body, &body, requests-1, "summary references unknown source"); err != nil {
+			t.Error(err)
+		}
+		if requests == 2 {
+			for _, want := range []string{"call_22", "Allowed source call IDs:", "call_1", "call_11", "Regenerate", "original goal", "raw-batch-1:"} {
+				if !strings.Contains(body.Input, want) {
+					t.Errorf("correction missing %q", want)
+				}
+			}
+		}
+		id := "call_22"
+		if requests == 2 {
+			id = "call_1"
+		}
+		writeObservationResponse(w, []any{observationMessage(fmt.Sprintf(`{"Facts":[{"Text":"evidence","SourceCallIDs":[%q]}],"Actions":[],"OpenIssues":[],"Pending":[]}`, id))})
+	}))
+	defer server.Close()
+	process, err := NewReactProcess[ReactResult](t.Context(), filemcp.Config{Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, _, err := runAfterCompaction(t, process, compactionConfig(t, server.URL), durable)
+	if err != nil || result.Answer != "done" || requests != 3 {
+		t.Fatalf("result=%+v requests=%d err=%v", result, requests, err)
+	}
+}
+
+func TestReactPreservesCompactionWhenEvidenceRetriesExhausted(t *testing.T) {
+	durable := compactionHistory(11)
+	previous := `{"ExecutionID":"compact-instance","ThroughBatch":1,"Summary":{"Facts":[{"Text":"prior evidence","SourceCallIDs":["call_1"]}],"Actions":[],"OpenIssues":[],"Pending":[]}}`
+	durable.ExecutionCompaction = []byte(previous)
+	history, err := json.Marshal(durable.ToolExecutions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		requests++
+		if requests > 4 {
+			t.Error("retry limit exceeded")
+			http.Error(w, "too many retries", 400)
+			return
+		}
+		var body struct {
+			Input string `json:"input"`
+		}
+		if err := decodeCorrectionRequest(t, req.Body, &body, requests-1, "Summary evidence validation error"); err != nil {
+			t.Error(err)
+		}
+		for i := 1; i < requests; i++ {
+			if !strings.Contains(body.Input, fmt.Sprintf("Summary evidence validation error (%d/3)", i)) {
+				t.Error("previous correction lost")
+			}
+		}
+		writeObservationResponse(w, []any{observationMessage(`{"Facts":[{"Text":"invented","SourceCallIDs":["call_22"]}],"Actions":[],"OpenIssues":[],"Pending":[]}`)})
+	}))
+	defer server.Close()
+	process, err := NewReactProcess[ReactResult](t.Context(), filemcp.Config{Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = runAfterCompaction(t, process, compactionConfig(t, server.URL), durable)
+	if err == nil || !strings.Contains(err.Error(), "evidence validation errors exceeded limit (3)") || !strings.Contains(err.Error(), "call_22") || requests != 4 {
+		t.Fatalf("requests=%d err=%v", requests, err)
+	}
+	after, marshalErr := json.Marshal(durable.ToolExecutions)
+	if marshalErr != nil || string(after) != string(history) || string(durable.ExecutionCompaction) != previous {
+		t.Fatal("failed compaction changed saved summary or execution history")
+	}
+}
+
 func TestReactRejectsUnverifiableCompaction(t *testing.T) {
 	for _, evidence := range []string{`{"Text":"unattributed","SourceCallIDs":[]}`, `{"Text":"invented","SourceCallIDs":["call_missing"]}`} {
 		t.Run(evidence, func(t *testing.T) {
@@ -121,7 +204,7 @@ func TestReactRejectsUnverifiableCompaction(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, _, err = runAfterCompaction(t, process, compactionConfig(t, server.URL), durable)
-			if err == nil || !strings.Contains(err.Error(), "summary") || requests != 1 || len(durable.ExecutionCompaction) != 0 {
+			if err == nil || !strings.Contains(err.Error(), "summary") || requests != 4 || len(durable.ExecutionCompaction) != 0 {
 				t.Fatalf("requests=%d compact=%s err=%v", requests, durable.ExecutionCompaction, err)
 			}
 		})

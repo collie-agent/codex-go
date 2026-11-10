@@ -1,12 +1,10 @@
 name: react
 # 可选的宿主运行时授权（顶层全局配置）；命令行显式参数优先。
-# discover_host_commands: true
-# exec_commands: [poetry, python3]
-# runtime_dirs: [/home/user/go]
-# 列表参数整项替换 YAML；--discover-host-commands=false 可关闭发现。
-# 调用命令还需在执行代理的 allow_tools 中启用 exec；详见 README 的运行时配置。
-# exec_network: none  # host 可访问宿主发布的 MySQL TCP 端口
-# exec_env: [CODEX_TEST_MYSQL_URL]  # 只填变量名，值由宿主环境提供
+discover_host_commands: true
+exec_commands: [poetry, python3, make, go]
+runtime_dirs: [/home/xzp/.cache/pypoetry/virtualenvs/atom-mcp-1GWcgsa5-py3.12,/home/xzp/workspace/atom-mcp]
+exec_network: host  # host 可访问宿主发布的 MySQL TCP 端口
+exec_env: [CODEX_MYSQL_URL,CODEX_TEST_MYSQL_URL]  # 只填变量名，值由宿主环境提供
 # Provider 日志目录，默认 ./logs；命令行 --log-dir 可覆盖。
 # log_dir: ./logs
 # debug 额外显示流式文本片段；info 显示上下文和工具结果；error 仍显示工具调用和完整响应文本。
@@ -30,6 +28,10 @@ base:
     - glob
     - grep
     - apply_patch
+    - exec
+    - exec_start
+    - exec_poll
+    - exec_stop
   sys_prompt: |
     保持任务范围清晰：只修改工作目录中的目标文件，并在完成时简要说明验证结果。
 agents:
@@ -42,3 +44,14 @@ agents:
   observe:
     # 空提示词覆盖 base 的提示词，只保留观察器内置提示词。
     sys_prompt: ""
+
+# 可选：允许 exec 下载依赖并跨调用复用缓存。目录须为工作目录外的专用绝对路径。
+# exec_network: host
+# exec_go_proxy: https://proxy.golang.org,direct
+# exec_caches:
+#   - name: go-mod
+#     directory: /home/user/.cache/codex-exec/go-mod
+#     env: [GOMODCACHE]
+#   - name: pip
+#     directory: /home/user/.cache/codex-exec/pip
+#     env: [PIP_CACHE_DIR]

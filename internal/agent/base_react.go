@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/collie-agent/codex-go/internal/config"
 	fileContext "github.com/collie-agent/codex-go/internal/context"
@@ -31,6 +33,7 @@ type BaseReactProcess[T LLMSchema] struct {
 	toolConfig    filemcp.Config
 	mcpClientSess *mcpSdk.ClientSession
 	serverSess    *mcpSdk.ServerSession
+	closeTools    func()
 	checkpoint    func() error
 	executionMu   sync.Mutex
 	executionErr  error
@@ -55,6 +58,14 @@ func newBaseReactProcessWithCommand[T LLMSchema](ctx context.Context, command *e
 	if command == nil {
 		return nil, fmt.Errorf("MCP command is required")
 	}
+	if command.Cancel != nil {
+		// CommandContext must allow MCP to reap its process sessions before
+		// dying. WaitDelay still bounds shutdown if the server is unresponsive.
+		command.Cancel = func() error { return command.Process.Signal(os.Interrupt) }
+		if command.WaitDelay == 0 {
+			command.WaitDelay = 8 * time.Second
+		}
+	}
 	client := mcpSdk.NewClient(&mcpSdk.Implementation{Name: "codex-go-responses", Version: "0.1.0"}, nil)
 	session, err := client.Connect(ctx, &mcpSdk.CommandTransport{Command: command}, nil)
 	if err != nil {
@@ -68,17 +79,20 @@ func connectBaseReactProcess[T LLMSchema](ctx context.Context, toolConfig filemc
 		return nil, fmt.Errorf("agent context is required")
 	}
 	server := mcpSdk.NewServer(&mcpSdk.Implementation{Name: "codex-go-agent", Version: "0.1.0"}, nil)
-	if err := filemcp.RegisterTools(server, toolConfig); err != nil {
+	closeTools, err := filemcp.RegisterToolsWithCleanup(server, toolConfig)
+	if err != nil {
 		return nil, fmt.Errorf("register MCP tools: %w", err)
 	}
 	serverSess, err := server.Connect(ctx, serverTransport, nil)
 	if err != nil {
+		closeTools()
 		return nil, fmt.Errorf("connect MCP server: %w", err)
 	}
 	mcpClient := mcpSdk.NewClient(&mcpSdk.Implementation{Name: "codex-go-responses", Version: "0.1.0"}, nil)
 	mcpClientSess, err := mcpClient.Connect(ctx, clientTransport, nil)
 	if err != nil {
 		_ = serverSess.Close()
+		closeTools()
 		return nil, fmt.Errorf("connect MCP client: %w", err)
 	}
 	return &BaseReactProcess[T]{
@@ -87,6 +101,7 @@ func connectBaseReactProcess[T LLMSchema](ctx context.Context, toolConfig filemc
 		toolConfig:    toolConfig,
 		mcpClientSess: mcpClientSess,
 		serverSess:    serverSess,
+		closeTools:    closeTools,
 	}, nil
 }
 
@@ -118,6 +133,9 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 	}
 	if r.serverSess != nil {
 		defer r.serverSess.Close()
+	}
+	if r.closeTools != nil {
+		defer r.closeTools()
 	}
 	// 未确认的调用可能已经产生副作用，恢复必须在任何模型请求之前停止。
 	for _, call := range durableState.ToolExecutions {
@@ -157,7 +175,17 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 	worker.localTools = []*mcpSdk.Tool{readToolResultDefinition()}
 	// 每个执行实例独立去重；恢复时沿用已登记的调用标识。
 	seenCalls := make(map[string]string)
+	lastWorkspaceChange := -1
 	for _, call := range durableState.ToolExecutions {
+		if changesWorkspace(call.ToolName) && call.Batch > lastWorkspaceChange {
+			lastWorkspaceChange = call.Batch
+		}
+	}
+	for _, call := range durableState.ToolExecutions {
+		// 同批工具并行执行，读取可能早于写入；恢复时也不能复用这一批及更早的观察。
+		if isWorkspaceObservation(call.ToolName) && call.Batch <= lastWorkspaceChange {
+			continue
+		}
 		seenCalls[toolInvocationKey(call.ToolName, call.Arguments)] = call.ToolCallId
 	}
 	transient := &transientResultsContext{Contexter: modelContext}
@@ -176,6 +204,18 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 	defer compaction.close()
 	formatErrors := 0
 	toolCallErrors := 0
+	consecutiveDuplicates := 0
+	failedExecs := make(failedCommands)
+	// 恢复沿用原执行的失败证据；按登记批次恢复失效边界。
+	for start := 0; start < len(durableState.ToolExecutions); {
+		end := start + 1
+		for end < len(durableState.ToolExecutions) && durableState.ToolExecutions[end].Batch == durableState.ToolExecutions[start].Batch {
+			end++
+		}
+		failedExecs.observe(durableState.ToolExecutions[start:end])
+		start = end
+	}
+	var cachedDuplicates []*fileContext.ToolResult
 	batchOffset := 0
 	for _, call := range durableState.ToolExecutions {
 		if call.Batch > batchOffset {
@@ -183,8 +223,8 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 		}
 	}
 	for i := 1; i <= r.maxTurn; i++ {
-		// 同轮纠错不推进过期边界；恢复时最新一批仍供首次决策使用。
-		transient.minimumBatch = batchOffset + i - 1
+		// 同轮纠错不推进过期边界；恢复时保留最近三批目录检索结果。
+		transient.minimumBatch = batchOffset + i - discoveryResultDecisionTurns
 		var result T
 		var toolParams []*mcpSdk.CallToolParams
 		// 格式纠错留在当前轮，避免最后一轮的可恢复错误直接耗尽执行预算。
@@ -199,7 +239,14 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 			} else if applied {
 				worker.inputTokens = 0 // 旧模型视图的 usage 不再用于触发压缩。
 			}
-			result, _, toolParams, err = worker.Run(modelContext)
+			decisionContext := modelContext
+			if len(cachedDuplicates) > 0 {
+				// 缓存回传属于上一轮的协议响应，放在裁剪和压缩之后，且不写入实际执行历史。
+				request := modelContext.ModelRequest()
+				request.ToolResults = append(slices.Clone(request.ToolResults), cachedDuplicates...)
+				decisionContext = frozenCompactContext{Contexter: modelContext, request: request}
+			}
+			result, _, toolParams, err = worker.Run(decisionContext)
 			if err == nil {
 				break
 			}
@@ -225,6 +272,7 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 			// 纠错仅属于本次运行的消息历史，不混入工具观察的 ReportedErrors。
 			worker.corrections = append(worker.corrections, outputFormatCorrection(durableState.RunId, "react", formatErrors, err, parseErr))
 		}
+		cachedDuplicates = nil
 		if len(toolParams) == 0 {
 			validationErr := validate(result)
 			terminal := validationErr == nil
@@ -253,8 +301,27 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 		// 在登记和执行前移除重复项，也覆盖模型同一批返回的重复调用。
 		pending := toolParams[:0]
 		for _, param := range toolParams {
-			// 摘要可能已替换此前回读的上下文，纯只读查询允许重新获取同一页。
-			if param.Name == string(config.ReadToolResultMCPToolName) {
+			if param.Name == string(config.ExecMCPToolName) {
+				args, err := json.Marshal(param.Arguments)
+				if err != nil {
+					return zero, nil, err
+				}
+				key := toolInvocationKey(param.Name, string(args))
+				if failure, exists := failedExecs[key]; exists && (!failure.transient || failure.attempts >= 2) {
+					id, _ := param.Meta[toolCallIDMetaKey].(string)
+					message := fmt.Sprintf("Repeated failed command was not executed (previous call_id=%q). No intervening repair or state-changing tool call was observed. Inspect the cached error and repair the source, dependencies or environment before retrying. Transient failures allow only one retry.", failure.call.ToolCallId)
+					cached := r.cachedDuplicateResult(durableState, failure.call.ToolCallId, id, param.Name, string(args))
+					cached.Error = strings.TrimSpace(message + "\n" + cached.Error)
+					cachedDuplicates = append(cachedDuplicates, cached)
+					r.publishToolResult(durableState.RunId, &fileContext.ToolResult{ToolName: param.Name, ToolCallId: id, Error: message})
+					continue
+				}
+			}
+			// exec 同样依赖实时工作区和网络状态；修复文件后必须允许重跑
+			// 相同命令（例如 go mod tidy），不能复用此前失败的结果。
+			// 进程会话操作依赖实时状态：修复后可重启同一命令，也可重复
+			// 轮询和停止。恢复后的新连接不继承旧进程，不能沿用命令去重。
+			if param.Name == string(config.ExecMCPToolName) || param.Name == string(config.ReadToolResultMCPToolName) || param.Name == string(config.ExecStartMCPToolName) || param.Name == string(config.ExecPollMCPToolName) || param.Name == string(config.ExecStopMCPToolName) {
 				pending = append(pending, param)
 				continue
 			}
@@ -268,8 +335,10 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 			key := toolInvocationKey(param.Name, string(args))
 			id, _ := param.Meta[toolCallIDMetaKey].(string)
 			if original, exists := seenCalls[key]; exists {
-				message := fmt.Sprintf("Tool %q with these arguments was already called (previous call_id=%q). Duplicate call_id=%q was not executed. Refer to the previous call and its result instead of repeating it.", param.Name, original, id)
-				worker.corrections = append(worker.corrections, message)
+				message := fmt.Sprintf("Tool %q with these arguments was already called (previous call_id=%q). Duplicate call_id=%q was not executed; its native tool response contains the cached result. Use that result to choose your next action instead of repeating the original tool.", param.Name, original, id)
+				cached := r.cachedDuplicateResult(durableState, original, id, param.Name, string(args))
+				cached.Error = strings.TrimSpace(message + "\n" + cached.Error)
+				cachedDuplicates = append(cachedDuplicates, cached)
 				r.publishToolResult(durableState.RunId, &fileContext.ToolResult{ToolName: param.Name, ToolCallId: id, Error: message})
 				continue
 			}
@@ -278,8 +347,14 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 		}
 		toolParams = pending
 		if len(toolParams) == 0 {
+			// 纠错提示不能保证模型收敛；连续三轮没有实际工作时及时终止。
+			consecutiveDuplicates++
+			if consecutiveDuplicates >= 3 {
+				return zero, nil, fmt.Errorf("ReAct stopped after %d consecutive duplicate tool batches", consecutiveDuplicates)
+			}
 			continue
 		}
+		consecutiveDuplicates = 0
 		if durableState.ExecutionID != "" {
 			for position, param := range toolParams {
 				args, err := json.Marshal(param.Arguments)
@@ -330,7 +405,54 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 				continue
 			}
 		}
+		historyOffset := len(durableState.ToolExecutions)
 		r.batchToolCallings(toolParams, rc, agentConfig)
+		// 有执行实例时，调用已预登记；否则结果由上下文直接追加。
+		var completed []*fileContext.ToolResult
+		ids := make(map[string]bool)
+		for _, param := range toolParams {
+			id, _ := param.Meta[toolCallIDMetaKey].(string)
+			ids[id] = true
+		}
+		if durableState.ExecutionID != "" {
+			historyOffset = 0
+		}
+		for _, call := range durableState.ToolExecutions[historyOffset:] {
+			if ids[call.ToolCallId] {
+				completed = append(completed, call)
+			}
+		}
+		failedExecs.observe(completed)
+		for _, param := range toolParams {
+			if changesWorkspace(param.Name) {
+				// 命令或补丁失败也可能留下部分修改；进程轮询期间同样可能产生文件变更。
+				for key := range seenCalls {
+					name, _, _ := strings.Cut(key, "\x00")
+					if isWorkspaceObservation(name) {
+						delete(seenCalls, key)
+					}
+				}
+				break
+			}
+		}
+		// 服务启动或停止改变了命令观察的外部状态，旧验证结果不可复用。
+		// 命令验证缓存另按成功的生命周期调用失效，文件观察已在上方失效。
+		for _, param := range toolParams {
+			if param.Name != string(config.ExecStartMCPToolName) && param.Name != string(config.ExecStopMCPToolName) {
+				continue
+			}
+			id, _ := param.Meta[toolCallIDMetaKey].(string)
+			for _, call := range durableState.ToolExecutions {
+				if call.ToolCallId == id && call.Status == filemcp.ToolCallSuceessStatus {
+					for key := range seenCalls {
+						if strings.HasPrefix(key, string(config.ExecMCPToolName)+"\x00") {
+							delete(seenCalls, key)
+						}
+					}
+					break
+				}
+			}
+		}
 		if r.executionErr != nil {
 			return zero, nil, r.executionErr
 		}
@@ -628,6 +750,25 @@ func (r *BaseReactProcess[T]) publishControlToolResult(param *mcpSdk.CallToolPar
 }
 
 // toolInvocationKey 规范化 JSON 对象键顺序与空白，保留数字精度。
+func isWorkspaceObservation(name string) bool {
+	switch config.McpToolName(name) {
+	case config.ReadFileMCPToolName, config.ListDirMCPToolName, config.GlobMCPToolName, config.GrepMCPToolName:
+		return true
+	default:
+		return false
+	}
+}
+
+// 无法从命令参数可靠判断写入范围，因此保守地让文件观察整体失效。
+func changesWorkspace(name string) bool {
+	switch config.McpToolName(name) {
+	case config.ApplyPatchMCPToolName, config.ExecMCPToolName, config.ExecStartMCPToolName, config.ExecPollMCPToolName, config.ExecStopMCPToolName:
+		return true
+	default:
+		return false
+	}
+}
+
 func toolInvocationKey(name, arguments string) string {
 	decoder := json.NewDecoder(strings.NewReader(arguments))
 	decoder.UseNumber()

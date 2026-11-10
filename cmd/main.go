@@ -8,9 +8,12 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/collie-agent/codex-go/internal/application"
+	"github.com/collie-agent/codex-go/internal/config"
 	"github.com/collie-agent/codex-go/internal/logging"
 	filemcp "github.com/collie-agent/codex-go/internal/mcp"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -19,12 +22,15 @@ import (
 var discoverHostCommands bool
 var discoverHostCommandsSet bool
 var execCommands []string
+var execGoProxy string
+var execCaches []config.ExecCache
 var execNetwork string
 var execEnv []string
 
 var logDirectory = flag.String("log-dir", "", "output log directory (overrides YAML log_dir; default ./logs)")
 
 func main() {
+	config.RegisterExecDependencyFlags(flag.CommandLine, &execGoProxy, &execCaches)
 	flag.Usage = func() {
 		fmt.Fprintln(flag.CommandLine.Output(), "Agent runs require CODEX_MYSQL_URL and an explicit migration (codex-migrate or go run ./cmd/migrate).")
 		flag.PrintDefaults()
@@ -76,7 +82,7 @@ func main() {
 func resumeAgent(configPath, runID, workspace string, timeout time.Duration, runtimeDirs ...string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	results, err := application.Resume(ctx, application.Options{ConfigPath: configPath, RunID: runID, Workspace: workspace, Timeout: timeout, RuntimeDirs: runtimeDirs, DiscoverHostCommands: discoverHostCommands, DiscoverHostCommandsSet: discoverHostCommandsSet, ExecCommands: execCommands, ExecNetwork: execNetwork, ExecEnv: execEnv, LogDir: *logDirectory})
+	results, err := application.Resume(ctx, application.Options{ConfigPath: configPath, RunID: runID, Workspace: workspace, Timeout: timeout, RuntimeDirs: runtimeDirs, DiscoverHostCommands: discoverHostCommands, DiscoverHostCommandsSet: discoverHostCommandsSet, ExecCommands: execCommands, ExecGoProxy: execGoProxy, ExecCaches: execCaches, ExecNetwork: execNetwork, ExecEnv: execEnv, LogDir: *logDirectory})
 	if err != nil {
 		return err
 	}
@@ -94,7 +100,7 @@ func runAgentInConversation(configPath, task, workspace, convID string, timeout 
 	// 工具超时不限制整个模型运行；返回后取消异步观察器。
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	results, err := application.Run(ctx, application.Options{ConfigPath: configPath, Task: task, Workspace: workspace, ConvID: convID, Timeout: timeout, RuntimeDirs: runtimeDirs, DiscoverHostCommands: discoverHostCommands, DiscoverHostCommandsSet: discoverHostCommandsSet, ExecCommands: execCommands, ExecNetwork: execNetwork, ExecEnv: execEnv, LogDir: *logDirectory})
+	results, err := application.Run(ctx, application.Options{ConfigPath: configPath, Task: task, Workspace: workspace, ConvID: convID, Timeout: timeout, RuntimeDirs: runtimeDirs, DiscoverHostCommands: discoverHostCommands, DiscoverHostCommandsSet: discoverHostCommandsSet, ExecCommands: execCommands, ExecGoProxy: execGoProxy, ExecCaches: execCaches, ExecNetwork: execNetwork, ExecEnv: execEnv, LogDir: *logDirectory})
 	if err != nil {
 		return err
 	}
@@ -117,10 +123,14 @@ func run(workspace string, timeout time.Duration, runtimeDirs ...string) error {
 		}
 	}
 	server := sdk.NewServer(&sdk.Implementation{Name: "codex-go", Version: "0.1.0"}, nil)
-	if err := filemcp.RegisterTools(server, filemcp.Config{Workspace: workspace, Timeout: timeout, RuntimeDirs: runtimeDirs, DiscoverHostCommands: discoverHostCommands, ExecCommands: execCommands, ExecNetwork: execNetwork, ExecEnv: execEnv}); err != nil {
+	cleanup, err := filemcp.RegisterToolsWithCleanup(server, filemcp.Config{Workspace: workspace, Timeout: timeout, RuntimeDirs: runtimeDirs, DiscoverHostCommands: discoverHostCommands, ExecCommands: execCommands, ExecGoProxy: execGoProxy, ExecCaches: execCaches, ExecNetwork: execNetwork, ExecEnv: execEnv})
+	if err != nil {
 		return err
 	}
-	err := server.Run(context.Background(), &sdk.StdioTransport{})
+	defer cleanup()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	err = server.Run(ctx, &sdk.StdioTransport{})
 	if err != nil && !errors.Is(err, os.ErrClosed) {
 		return err
 	}

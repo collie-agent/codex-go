@@ -109,6 +109,9 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 	if err := strict.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("parse config %q: %w", path, err)
 	}
+	if err := ValidateExecCaches(raw.ExecCaches, raw.ExecEnv); err != nil {
+		return nil, err
+	}
 	if err := ValidateExecPolicy(raw.ExecNetwork, raw.ExecEnv); err != nil {
 		return nil, err
 	}
@@ -187,7 +190,7 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 	}
 	out := cloneAgentConfig(resolved[entry])
 	out.Name = raw.Name
-	out.Global = &GlobalConfig{ExecNetwork: raw.ExecNetwork, ExecEnv: raw.ExecEnv, Redis: redisConfig, DiscoverHostCommands: raw.DiscoverHostCommands, ExecCommands: raw.ExecCommands, RuntimeDirs: raw.RuntimeDirs}
+	out.Global = &GlobalConfig{ExecGoProxy: raw.ExecGoProxy, ExecCaches: raw.ExecCaches, ExecNetwork: raw.ExecNetwork, ExecEnv: raw.ExecEnv, Redis: redisConfig, DiscoverHostCommands: raw.DiscoverHostCommands, ExecCommands: raw.ExecCommands, RuntimeDirs: raw.RuntimeDirs}
 	out.configs = resolved
 	out.MultiAgent = raw.MultiAgent
 	for name := range raw.Agents {
@@ -287,6 +290,8 @@ func rejectNull(node *yaml.Node) error {
 }
 
 type yamlAgentConfig struct {
+	ExecGoProxy          string                        `yaml:"exec_go_proxy"`
+	ExecCaches           []ExecCache                   `yaml:"exec_caches"`
 	ExecNetwork          string                        `yaml:"exec_network"`
 	ExecEnv              []string                      `yaml:"exec_env"`
 	DiscoverHostCommands bool                          `yaml:"discover_host_commands"`
@@ -320,6 +325,7 @@ var knownMCPTools = map[McpToolName]bool{
 	LoadSkillMCPToolName: true,
 	ReadFileMCPToolName:  true, ListDirMCPToolName: true, GlobMCPToolName: true,
 	GrepMCPToolName: true, ApplyPatchMCPToolName: true, ExecMCPToolName: true,
+	ExecStartMCPToolName: true, ExecPollMCPToolName: true, ExecStopMCPToolName: true,
 }
 
 // MultiAgentConfig 描述允许的执行图，模型只能在图内委派任务。

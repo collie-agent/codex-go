@@ -23,6 +23,8 @@ const (
 
 // Config contains settings shared by the tools registered on an MCP server.
 type Config struct {
+	ExecGoProxy string
+	ExecCaches  []mcpconfig.ExecCache
 	// ExecNetwork is none (default) or host; tool arguments cannot change it.
 	ExecNetwork string
 	// ExecEnv authorizes host variable names, resolved once when exec is registered.
@@ -52,9 +54,16 @@ type ReadFileResult struct {
 // RegisterTools registers workspace tools on server. The workspace is resolved
 // once so all relative paths share the same root.
 func RegisterTools(server *sdk.Server, config Config) error {
+	_, err := RegisterToolsWithCleanup(server, config)
+	return err
+}
+
+// RegisterToolsWithCleanup lets the execution owner await process cleanup
+// before returning a final result. Disconnect also triggers cleanup.
+func RegisterToolsWithCleanup(server *sdk.Server, config Config) (func(), error) {
 	workspace, err := resolveWorkspace(config.Workspace)
 	if err != nil {
-		return fmt.Errorf("workspace: %w", err)
+		return nil, fmt.Errorf("workspace: %w", err)
 	}
 	if config.Timeout <= 0 {
 		config.Timeout = 5 * time.Minute
@@ -80,16 +89,16 @@ func RegisterTools(server *sdk.Server, config Config) error {
 				func(line ReadFileLine) string { return fmt.Sprintf("%d: %s", line.Line, line.Text) })
 		})
 	if err := registerListDirTool(server, workspace, config.Timeout); err != nil {
-		return err
+		return nil, err
 	}
 	registerGlobTool(server, workspace, config.Timeout)
 	registerGrepTool(server, workspace, config.Timeout)
 	registerApplyPatchTool(server, workspace, config.Timeout)
-	registerExecTool(server, workspace, config)
+	cleanup := registerExecTool(server, workspace, config)
 	registerSwitchToPlanExecuteTool(server)
 	registerLoadSkillTool(server)
 	registerUpdateCompletionCriteriaTool(server)
-	return nil
+	return cleanup, nil
 }
 
 func ReadFile(ctx context.Context, workspace, path string, offset, limit int) (ReadFileResult, error) {

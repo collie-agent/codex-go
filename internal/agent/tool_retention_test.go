@@ -48,7 +48,7 @@ func TestReactExpiresDiscoveryResultsAndRetainsOtherToolHistory(t *testing.T) {
 				}
 			}
 			want := 0
-			if turn == 2 {
+			if turn >= 2 && turn <= 4 {
 				want = 1
 			}
 			if calls != want || outputs != want {

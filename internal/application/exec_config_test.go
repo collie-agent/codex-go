@@ -2,6 +2,7 @@ package application_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/collie-agent/codex-go/internal/application"
+	"github.com/collie-agent/codex-go/internal/config"
 	"github.com/collie-agent/codex-go/internal/testutil"
 )
 
@@ -29,17 +31,20 @@ func TestRunAndResumePassExecConfigurationToExternalMCP(t *testing.T) {
 					t.Fatal(err)
 				}
 				path := agentConfig(t, "http://127.0.0.1:1")
-				appendExecConfig(t, path)
+				cacheDir := appendExecConfig(t, path)
 				opts := application.Options{ConfigPath: path, Task: "report", Workspace: t.TempDir(), Timeout: time.Second, MCPCommand: command, Stderr: io.Discard}
-				want := "--exec-network\nhost\n--exec-env\nCODEX_TDD_EXEC_ENV\n--discover-host-commands\n--exec-command\npoetry\n--runtime-dir\n/opt/configured-runtime\n"
+				want := "--exec-go-proxy\nhttps://proxy.example.invalid\n--exec-cache\n{\"name\":\"go-mod\",\"directory\":\"/tmp/codex-test-cache\",\"env\":[\"GOMODCACHE\"]}\n--exec-network\nhost\n--exec-env\nCODEX_TDD_EXEC_ENV\n--discover-host-commands\n--exec-command\npoetry\n--runtime-dir\n/opt/configured-runtime\n"
 				if override {
+					opts.ExecGoProxy = "off"
+					opts.ExecCaches = []config.ExecCache{}
 					opts.ExecNetwork = "none"
 					opts.ExecEnv = []string{"CODEX_TDD_OVERRIDE_ENV"}
 					opts.DiscoverHostCommandsSet = true
 					opts.ExecCommands = []string{"git"}
 					opts.RuntimeDirs = []string{"/opt/override-runtime"}
-					want = "--exec-network\nnone\n--exec-env\nCODEX_TDD_OVERRIDE_ENV\n--exec-command\ngit\n--runtime-dir\n/opt/override-runtime\n"
+					want = "--exec-go-proxy\noff\n--exec-cache\n[]\n--exec-network\nnone\n--exec-env\nCODEX_TDD_OVERRIDE_ENV\n--exec-command\ngit\n--runtime-dir\n/opt/override-runtime\n"
 				}
+				want = strings.ReplaceAll(want, "/tmp/codex-test-cache", cacheDir)
 				ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 				defer cancel()
 				if resume {
@@ -78,13 +83,14 @@ func testName(resume, override bool) string {
 	return name
 }
 
-func appendExecConfig(t *testing.T, path string) {
+func appendExecConfig(t *testing.T, path string) string {
+	cacheDir := filepath.Join(t.TempDir(), "go-mod")
 	t.Helper()
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = f.WriteString("exec_network: host\nexec_env: [CODEX_TDD_EXEC_ENV]\ndiscover_host_commands: true\nexec_commands: [poetry]\nruntime_dirs: [/opt/configured-runtime]\n")
+	_, err = f.WriteString(fmt.Sprintf("exec_go_proxy: https://proxy.example.invalid\nexec_caches: [{name: go-mod, directory: %s, env: [GOMODCACHE]}]\nexec_network: host\nexec_env: [CODEX_TDD_EXEC_ENV]\ndiscover_host_commands: true\nexec_commands: [poetry]\nruntime_dirs: [/opt/configured-runtime]\n", cacheDir))
 	closeErr := f.Close()
 	if err != nil {
 		t.Fatal(err)
@@ -92,6 +98,7 @@ func appendExecConfig(t *testing.T, path string) {
 	if closeErr != nil {
 		t.Fatal(closeErr)
 	}
+	return cacheDir
 }
 
 // The model-visible tool description is the public contract for the in-process tool allowlist.
