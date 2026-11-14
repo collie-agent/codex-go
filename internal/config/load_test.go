@@ -330,3 +330,32 @@ func TestLoadCompactModelConfiguration(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadAgentConfigMaxOutputTokens(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test")
+	for _, value := range []string{"32768", "0", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "agent.yaml")
+			data := "name: react\nbase:\n  llm:\n    model: test\n    max_output_tokens: " + value + "\n"
+			if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadAgentConfig(path)
+			if value == "-1" {
+				if err == nil || !strings.Contains(err.Error(), "max_output_tokens") {
+					t.Fatalf("error = %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			} else {
+				want := int64(0)
+				if value == "32768" {
+					want = 32768
+				}
+				if cfg.ForAgent("react").LLMConfig.MaxOutputTokens != want {
+					t.Fatalf("max_output_tokens was not inherited: want %d", want)
+				}
+			}
+		})
+	}
+}

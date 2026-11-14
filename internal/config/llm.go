@@ -8,6 +8,8 @@ const (
 )
 
 type LLMConfig struct {
+	// MaxOutputTokens 为零时使用服务端默认值，正数显式限制单次响应预算。
+	MaxOutputTokens int64
 	// Stream enables SSE transport; omitted configurations keep non-streaming behavior.
 	Stream       bool
 	BaseUrl      string

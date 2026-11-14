@@ -248,6 +248,9 @@ func resolveConfig(name string, raw yamlAgentSettings, base *AgentConfig) (*Agen
 }
 
 func resolveLLM(raw yamlLLMConfig) (*LLMConfig, error) {
+	if raw.MaxOutputTokens < 0 {
+		return nil, fmt.Errorf("llm.max_output_tokens must be non-negative")
+	}
 	if raw.Model == "" {
 		return nil, fmt.Errorf("llm.model is required")
 	}
@@ -274,7 +277,7 @@ func resolveLLM(raw yamlLLMConfig) (*LLMConfig, error) {
 	if baseURL == "" {
 		baseURL = "https://api.openai.com/v1"
 	}
-	return &LLMConfig{Stream: raw.Stream, BaseUrl: baseURL, ApiKey: key, Model: raw.Model, OutputSchema: LLMOutputSchema(output)}, nil
+	return &LLMConfig{MaxOutputTokens: raw.MaxOutputTokens, Stream: raw.Stream, BaseUrl: baseURL, ApiKey: key, Model: raw.Model, OutputSchema: LLMOutputSchema(output)}, nil
 }
 
 func rejectNull(node *yaml.Node) error {
@@ -313,12 +316,13 @@ type yamlAgentSettings struct {
 	SysPrompt   *string        `yaml:"sys_prompt"`
 }
 type yamlLLMConfig struct {
-	Stream       bool   `yaml:"stream"`
-	BaseURL      string `yaml:"base_url"`
-	ApiKey       string `yaml:"api_key"`
-	ApiKeyEnv    string `yaml:"api_key_env"`
-	Model        string `yaml:"model"`
-	OutputSchema string `yaml:"output_schema"`
+	MaxOutputTokens int64  `yaml:"max_output_tokens"`
+	Stream          bool   `yaml:"stream"`
+	BaseURL         string `yaml:"base_url"`
+	ApiKey          string `yaml:"api_key"`
+	ApiKeyEnv       string `yaml:"api_key_env"`
+	Model           string `yaml:"model"`
+	OutputSchema    string `yaml:"output_schema"`
 }
 
 var knownMCPTools = map[McpToolName]bool{

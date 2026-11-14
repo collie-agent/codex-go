@@ -58,6 +58,8 @@ agents:
       保留与当前目标有关的关键证据。
 ```
 
+`llm.max_output_tokens` 可设置单次响应的输出预算，例如 `32768`（需在模型和网关允许的范围内）；省略或设为 `0` 时使用服务端默认值，负数不合法。遇到 `status=incomplete`、`incomplete reason=max_output_tokens` 时，可调高此值，并检查网关的输出限制，将大型文件写入拆成多次工具调用。此设置与输入上下文压缩阈值独立；配置了代理专用 `llm` 时需在该块设置。截断响应仍作为失败处理，避免执行不完整的工具参数。
+
 `sys_prompt` 追加到内置压缩指令，省略时继承 `base.sys_prompt`。已有数据库升级后需先执行 `./bin/codex-migrate`，添加 `execution_instance.compaction` 列。完整预算规则、同步等待日志、输出纠错和回读参数见 [ReAct 上下文压缩](docs/react-compaction.md)。
 
 实现入口：[`internal/agent/compact.go`](internal/agent/compact.go)、[`read_tool_result.go`](internal/agent/read_tool_result.go)。

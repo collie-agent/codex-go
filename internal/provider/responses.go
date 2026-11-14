@@ -120,6 +120,9 @@ func NewResponsesApiClient[T any](llmConfig *config.LLMConfig, allowTools map[co
 	if llmConfig == nil {
 		return nil, fmt.Errorf("LLM config is required")
 	}
+	if llmConfig.MaxOutputTokens < 0 {
+		return nil, fmt.Errorf("llm.max_output_tokens must be non-negative")
+	}
 	client := openai.NewClient(
 		option.WithAPIKey(llmConfig.ApiKey),
 		option.WithBaseURL(llmConfig.BaseUrl),
@@ -221,6 +224,10 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 		Text:  textConfig,
 		// 当前请求不重放 reasoning 项，显式关闭思考模式以支持后续工具结果回传。
 		Reasoning: shared.ReasoningParam{Effort: shared.ReasoningEffortNone},
+	}
+	// 省略零值，保留现有服务端默认行为；流式和非流式共享此预算。
+	if c.agentConfig.LLMConfig.MaxOutputTokens > 0 {
+		params.MaxOutputTokens = openai.Int(c.agentConfig.LLMConfig.MaxOutputTokens)
 	}
 	if len(messages) > 0 || c.systemPrompt != "" || len(c.corrections) > 0 {
 		items := make(responses.ResponseInputParam, 0, 2*len(messages)+2+len(c.corrections))
