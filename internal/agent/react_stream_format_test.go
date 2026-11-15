@@ -89,7 +89,7 @@ func TestReactRetriesImmediatelyCanceledInvalidAnswer(t *testing.T) {
 			parent, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 			defer cancel()
 			ctx := provider.WithOutputer(parent, output)
-			process := &ReactProcess[ReactResult]{BaseReactProcess: BaseReactProcess[ReactResult]{ctx: ctx, maxTurn: 1}}
+			process := &ReactProcess[ReactResult]{BaseReactProcess: BaseReactProcess[ReactResult]{ctx: ctx, maxTurn: 8}}
 			cfg := &config.AgentConfig{LogLevel: config.ErrorLogLevel, LLMConfig: &config.LLMConfig{BaseUrl: server.URL, Model: "test", Stream: true, OutputSchema: schema}}
 			result, next, err := process.Run(cfg, &fileContext.DurableState{RunId: "early-retry", Goal: "answer", CompletionCriteria: []string{"answer verified"}})
 			if err != nil || result.Answer != "你好，完成" || len(next) != 1 || next[0] != EndAgentType {

@@ -95,7 +95,7 @@ func TestReactLogLevels(t *testing.T) {
 				if strings.Contains(logs, "JSON schema=") != (schema == config.JsonLLMOutputSchema && level != "error") {
 					t.Errorf("unexpected JSON schema visibility: %s", logs)
 				}
-				for _, text := range []string{`tool calling name=list_dir call_id=call_list arguments={"path":".","depth":1,"offset":0,"limit":20}`, "LLM response text=Inspecting the workspace.", "LLM response text=", "done"} {
+				for _, text := range []string{"observe progress input=", "output=", `"correction_triggered":false`, `tool calling name=list_dir call_id=call_list arguments={"path":".","depth":1,"offset":0,"limit":20}`, "LLM response text=Inspecting the workspace.", "LLM response text=", "done"} {
 					if !strings.Contains(logs, text) {
 						t.Errorf("missing log %q: %s", text, logs)
 					}

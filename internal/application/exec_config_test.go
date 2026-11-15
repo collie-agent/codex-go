@@ -2,6 +2,7 @@ package application_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -108,8 +109,20 @@ func TestRunAndResumeUseConfiguredExecAllowlist(t *testing.T) {
 		if testutil.RespondWithCriteria(t, w, r) {
 			return
 		}
-		data, _ := io.ReadAll(r.Body)
-		if !strings.Contains(string(data), "Allowed entrypoints for this server: poetry") {
+		var request struct {
+			Tools []struct{ Name, Description string }
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+			return
+		}
+		found := false
+		for _, tool := range request.Tools {
+			if tool.Name == "exec" && strings.Contains(tool.Description, "Allowed entrypoints for this server:") && strings.Contains(tool.Description, "poetry") {
+				found = true
+			}
+		}
+		if !found {
 			t.Errorf("configured exec allowlist missing from model tools")
 		}
 		writeResult(w, `{"status":"completed","answer":"done"}`)

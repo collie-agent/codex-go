@@ -50,8 +50,11 @@ func TestGlobFindsSortedFilesAndPaginates(t *testing.T) {
 		"items":     []any{map[string]any{"path": "a.txt"}, map[string]any{"path": "nested/m.txt"}},
 		"truncated": true, "next_offset": float64(2),
 	}
-	if !reflect.DeepEqual(result.StructuredContent, want) {
-		t.Fatalf("structured result = %#v, want %#v", result.StructuredContent, want)
+	got := result.StructuredContent.(map[string]any)
+	for key, expected := range want {
+		if !reflect.DeepEqual(got[key], expected) {
+			t.Fatalf("structured result %s = %#v, want %#v", key, got[key], expected)
+		}
 	}
 }
 

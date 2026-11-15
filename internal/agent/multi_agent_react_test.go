@@ -118,15 +118,33 @@ func TestMultiAgentReactExecutesToolsThroughMCPCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkpoints := 0
-	process.SetCheckpoint(func() error { checkpoints++; return nil })
+	durable := &state.DurableState{RunId: "worker-tools", Goal: "read evidence.txt"}
+	pending, confirmed, completed := false, false, false
+	process.SetCheckpoint(func() error {
+		if durable.ExecutionID == "" {
+			t.Error("checkpoint omitted execution identity")
+		}
+		for _, call := range durable.ToolExecutions {
+			if call.ToolCallId == "read-source" {
+				if call.Status == "" {
+					pending = true
+				} else if call.Status == filemcp.ToolCallSuceessStatus {
+					confirmed = true
+				}
+			}
+		}
+		if len(durable.ExecutionResult) != 0 {
+			completed = true
+		}
+		return nil
+	})
 	cfg := multiConfig(t, server.URL).ForAgent("worker")
 	cfg.LLMConfig.OutputSchema = config.JsonLLMOutputSchema
 	cfg.AllowTools[config.ReadFileMCPToolName] = struct{}{}
-	result, _, err := process.Run(cfg, &state.DurableState{RunId: "worker-tools", Goal: "read evidence.txt"})
+	result, _, err := process.Run(cfg, durable)
 	// Persist the execution identity, pending tool call, confirmed tool result,
 	// and final execution result so each recovery boundary is durable.
-	if err != nil || result.Result.Answer != "source verified" || checkpoints != 4 {
-		t.Fatalf("Run() = %+v, %v; checkpoints=%d", result, err, checkpoints)
+	if err != nil || result.Result.Answer != "source verified" || !pending || !confirmed || !completed {
+		t.Fatalf("Run() = %+v, %v; pending=%v confirmed=%v completed=%v", result, err, pending, confirmed, completed)
 	}
 }

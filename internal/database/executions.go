@@ -13,6 +13,7 @@ import (
 type ExecutionInstance struct {
 	ExecutionID string    `gorm:"column:execution_id;type:varchar(64);primaryKey"`
 	RunID       string    `gorm:"column:run_id;type:varchar(64);index"`
+	Progress    []byte    `gorm:"column:progress;type:json"`
 	Compaction  []byte    `gorm:"column:compaction;type:json"`
 	Result      []byte    `gorm:"column:result;type:json"`
 	CreateAt    time.Time `gorm:"column:create_at;autoCreateTime"`
@@ -64,7 +65,7 @@ func saveExecution(tx *gorm.DB, durable *state.DurableState) error {
 	if durable.ExecutionID == "" {
 		return nil
 	}
-	instance := ExecutionInstance{ExecutionID: durable.ExecutionID, RunID: durable.RunId, Result: durable.ExecutionResult, Compaction: durable.ExecutionCompaction}
+	instance := ExecutionInstance{ExecutionID: durable.ExecutionID, RunID: durable.RunId, Result: durable.ExecutionResult, Compaction: durable.ExecutionCompaction, Progress: durable.ExecutionProgress}
 	if err := tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&instance).Error; err != nil {
 		return err
 	}
@@ -96,7 +97,7 @@ func (s *RunStore) ExecutionByID(ctx context.Context, runID, executionID string)
 	if err := s.db.WithContext(ctx).Where("execution_id = ?", instance.ExecutionID).Order("position ASC").Find(&calls).Error; err != nil {
 		return nil, err
 	}
-	durable := &state.DurableState{RunId: runID, ExecutionID: instance.ExecutionID, ExecutionResult: instance.Result, ExecutionCompaction: instance.Compaction}
+	durable := &state.DurableState{RunId: runID, ExecutionID: instance.ExecutionID, ExecutionResult: instance.Result, ExecutionCompaction: instance.Compaction, ExecutionProgress: instance.Progress}
 	for _, call := range calls {
 		var result state.ToolResult
 		if err := json.Unmarshal(call.Payload, &result); err != nil {

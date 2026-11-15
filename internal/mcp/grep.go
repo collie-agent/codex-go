@@ -23,9 +23,10 @@ type grepItem struct {
 }
 
 type grepResult struct {
-	Items      []grepItem `json:"items"`
-	Truncated  bool       `json:"truncated"`
-	NextOffset *int       `json:"next_offset"`
+	Items          []grepItem      `json:"items"`
+	Truncated      bool            `json:"truncated"`
+	NextOffset     *int            `json:"next_offset"`
+	SearchEvidence *SearchEvidence `json:"search_evidence,omitempty"`
 }
 
 type grepArgs struct {
@@ -58,7 +59,7 @@ func registerGrepTool(server *sdk.Server, workspace string, timeout time.Duratio
 			}
 			return pageResponse(result.Items, args.Offset, result.Truncated, result.NextOffset,
 				func(items []grepItem, truncated bool, next *int) grepResult {
-					return grepResult{Items: items, Truncated: truncated, NextOffset: next}
+					return grepResult{Items: items, Truncated: truncated, NextOffset: next, SearchEvidence: grepPageEvidence(result.SearchEvidence, items, truncated)}
 				},
 				func(item grepItem) string { return fmt.Sprintf("%s:%d: %s", item.Path, item.Line, item.Text) })
 		})
@@ -76,6 +77,7 @@ func Grep(ctx context.Context, workspace string, args grepArgs) (grepResult, err
 	if isGitPath(rel) {
 		return grepResult{Items: []grepItem{}}, nil
 	}
+	before := searchSnapshot(ctx, workspace, rel, args.IncludeIgnored, true)
 	var eligible map[string]bool
 	if args.Glob != "" && !args.IncludeIgnored {
 		eligible, err = searchableFiles(ctx, workspace, rel)
@@ -158,7 +160,8 @@ func Grep(ctx context.Context, workspace string, args grepArgs) (grepResult, err
 		return items[i].Line < items[j].Line
 	})
 	selected, truncated, next := selectPage(items, args.Offset, limit)
-	return grepResult{Items: selected, Truncated: truncated, NextOffset: next}, nil
+	evidence := &SearchEvidence{Query: searchQuery("grep", rel, args), Version: confirmedSearchVersion(before, searchSnapshot(ctx, workspace, rel, args.IncludeIgnored, true)), Offset: args.Offset}
+	return grepResult{Items: selected, Truncated: truncated, NextOffset: next, SearchEvidence: grepPageEvidence(evidence, selected, truncated)}, nil
 }
 
 func grepTarget(workspace, path string) (string, error) {

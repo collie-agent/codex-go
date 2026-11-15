@@ -69,16 +69,21 @@ func TestReactRejectsFinalResultWithToolCalls(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			checkpoints := 0
-			process.SetCheckpoint(func() error { checkpoints++; return nil })
+			durable := &state.DurableState{RunId: "mixed", Goal: "answer", CompletionCriteria: []string{"answer provided"}}
+			process.SetCheckpoint(func() error {
+				if len(durable.ToolExecutions) != 0 {
+					t.Error("rejected tool batch was registered")
+				}
+				return nil
+			})
 			cfg := &config.AgentConfig{LogLevel: config.ErrorLogLevel, AllowTools: map[config.McpToolName]struct{}{config.ApplyPatchMCPToolName: {}}, LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: schema}}
-			got, _, err := process.Run(cfg, &state.DurableState{RunId: "mixed", Goal: "answer", CompletionCriteria: []string{"answer provided"}})
+			got, _, err := process.Run(cfg, durable)
 			if err != nil || got.Answer != "done" || calls != 2 {
 				t.Fatalf("result=%+v err=%v requests=%d", got, err, calls)
 			}
 			contents, err := os.ReadFile(path)
-			if err != nil || string(contents) != "original\n" || checkpoints != 2 {
-				t.Fatalf("rejected batch changed workspace or passed execution checkpoint: contents=%q err=%v checkpoints=%d", contents, err, checkpoints)
+			if err != nil || string(contents) != "original\n" || len(durable.ToolExecutions) != 0 {
+				t.Fatalf("rejected batch changed workspace or passed execution checkpoint: contents=%q err=%v registered=%d", contents, err, len(durable.ToolExecutions))
 			}
 		})
 	}
@@ -105,16 +110,20 @@ func TestReactMixedOutputSharesFormatRetryLimit(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			checkpoints := 0
-			process.SetCheckpoint(func() error { checkpoints++; return nil })
 			durable := &state.DurableState{RunId: "mixed-limit", Goal: "answer"}
+			process.SetCheckpoint(func() error {
+				if len(durable.ToolExecutions) != 0 {
+					t.Error("rejected control tool was registered")
+				}
+				return nil
+			})
 			cfg := &config.AgentConfig{LogLevel: config.ErrorLogLevel, LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: schema}}
 			_, _, err = process.Run(cfg, durable)
 			if err == nil || !strings.Contains(err.Error(), "output format errors exceeded limit (3)") || !strings.Contains(err.Error(), "both a final result and tool calls") || calls != 4 {
 				t.Fatalf("expected shared format retry limit: requests=%d err=%v", calls, err)
 			}
-			if checkpoints != 1 || len(durable.CompletionCriteria) != 0 {
-				t.Fatalf("rejected control tool executed: checkpoints=%d criteria=%v", checkpoints, durable.CompletionCriteria)
+			if len(durable.ToolExecutions) != 0 || len(durable.CompletionCriteria) != 0 {
+				t.Fatalf("rejected control tool executed: registered=%d criteria=%v", len(durable.ToolExecutions), durable.CompletionCriteria)
 			}
 		})
 	}

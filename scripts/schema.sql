@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS execution_instance (
     run_id VARCHAR(64),
     result JSON,
     compaction JSON,
+    progress JSON,
     create_at DATETIME(3),
     update_at DATETIME(3),
     INDEX idx_execution_instance_run_id (run_id)

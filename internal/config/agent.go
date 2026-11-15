@@ -326,8 +326,9 @@ type yamlLLMConfig struct {
 }
 
 var knownMCPTools = map[McpToolName]bool{
-	LoadSkillMCPToolName: true,
-	ReadFileMCPToolName:  true, ListDirMCPToolName: true, GlobMCPToolName: true,
+	LoadSkillMCPToolName:           true,
+	SwitchToPlanExecuteMCPToolName: true,
+	ReadFileMCPToolName:            true, ListDirMCPToolName: true, GlobMCPToolName: true,
 	GrepMCPToolName: true, ApplyPatchMCPToolName: true, ExecMCPToolName: true,
 	ExecStartMCPToolName: true, ExecPollMCPToolName: true, ExecStopMCPToolName: true,
 }

@@ -167,7 +167,7 @@ func TestRunAgentUsesYAMLAllowedToolAndReturnsItsResultToModel(t *testing.T) {
 			names = append(names, tool.Name)
 		}
 		slices.Sort(names)
-		if !slices.Equal(names, []string{"load_skill", "read_file", "read_tool_result", "switch_to_plan_execute"}) {
+		if !slices.Equal(names, []string{"load_skill", "read_file", "read_tool_result"}) {
 			t.Errorf("model saw tools %v, want read_file and built-in tools", request.Tools)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -231,7 +231,7 @@ func TestRunAgentRejectsModelCallOutsideYAMLAllowedTools(t *testing.T) {
 			names = append(names, tool.Name)
 		}
 		slices.Sort(names)
-		if !slices.Equal(names, []string{"load_skill", "read_file", "read_tool_result", "switch_to_plan_execute"}) {
+		if !slices.Equal(names, []string{"load_skill", "read_file", "read_tool_result"}) {
 			t.Errorf("model saw tools %v, want read_file and built-in tools", request.Tools)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -412,7 +412,7 @@ func TestRunAgentWithEmptyYAMLAllowedToolsExposesOnlyBuiltInTools(t *testing.T) 
 			names = append(names, tool.Name)
 		}
 		slices.Sort(names)
-		if !slices.Equal(names, []string{"load_skill", "read_tool_result", "switch_to_plan_execute"}) {
+		if !slices.Equal(names, []string{"load_skill", "read_tool_result"}) {
 			t.Errorf("model saw tools %v, want built-in tools", request.Tools)
 		}
 		w.Header().Set("Content-Type", "application/json")

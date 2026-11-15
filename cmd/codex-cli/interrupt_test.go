@@ -47,7 +47,7 @@ func TestCLIInterruptSavesRun(t *testing.T) {
 	if err := os.WriteFile(config, []byte(yaml), 0600); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(binary, "--config", config, "--workspace", dir, "--task", "finish task", "--mcp-command", "")
+	cmd := exec.Command(binary, "--config", config, "--workspace", dir, "--task", "finish task", "--mcp-command", "", "--log-dir", dir)
 	cmd.Env = append(os.Environ(), "CODEX_MYSQL_URL="+raw)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -74,7 +74,8 @@ func TestCLIInterruptSavesRun(t *testing.T) {
 	if err := db.Where("workspace = ?", dir).First(&run).Error; err != nil {
 		t.Fatal(err)
 	}
-	if run.Status != "interrupted" || !strings.Contains(stderr.String(), "interrupted") {
-		t.Fatalf("status=%q stderr=%s", run.Status, stderr.String())
+	logData, err := os.ReadFile(filepath.Join(dir, "codex.log"))
+	if err != nil || run.Status != "interrupted" || !strings.Contains(string(logData), "interrupted state saved") {
+		t.Fatalf("status=%q stderr=%s log error=%v log=%s", run.Status, stderr.String(), err, logData)
 	}
 }

@@ -71,6 +71,7 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 		durableState.ExecutionResult = nil
 		durableState.ToolExecutions = nil
 		durableState.ExecutionCompaction = nil
+		durableState.ExecutionProgress = nil
 	}
 	agentConfig = agentConfig.ForAgent("react")
 	rc := r.newContext(agentConfig, durableState)
@@ -80,8 +81,9 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 	if modelContext.NeedsCompletionCriteria() {
 		agentConfig.AllowTools[config.UpdateCompletionCriteriaMCPToolName] = struct{}{}
 	}
-	if r.allowPlanSwitch && len(durableState.StepExecutions) == 0 {
-		agentConfig.AllowTools[config.SwitchToPlanExecuteMCPToolName] = struct{}{}
+	// 切换能力需显式配置，且只能在独立 ReAct 运行中使用。
+	if !r.allowPlanSwitch || len(durableState.StepExecutions) != 0 {
+		delete(agentConfig.AllowTools, config.SwitchToPlanExecuteMCPToolName)
 	}
 	validate := func(result T) error {
 		reactResult, ok := any(result).(ReactResult)
@@ -127,7 +129,7 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 		}
 		return nil, true, nil
 	}
-	return r.run(agentConfig, durableState, rc, modelContext, validate, control)
+	return r.run(agentConfig, durableState, rc, modelContext, validate, control, r.progressResult)
 }
 
 // switchToPlanExecute handles the MCP control tool and records the handoff context.
@@ -217,4 +219,10 @@ func (r *ReactProcess[T]) updateCompletionCriteria(param *mcpSdk.CallToolParams,
 	delete(cfg.AllowTools, config.UpdateCompletionCriteriaMCPToolName)
 
 	return nil
+}
+
+// progressResult 将普通 ReAct 的收尾结果映射到输出；ObserveResult 不支持失败收尾。
+func (r *ReactProcess[T]) progressResult(result *T) *ReactResult {
+	value, _ := any(result).(*ReactResult)
+	return value
 }

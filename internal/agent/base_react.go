@@ -28,22 +28,23 @@ const toolCallIDMetaKey = "call_id"
 // BaseReactProcess 复用 ReAct 执行机制；具体 Process 决定配置、上下文和结果契约。
 // MCP 会话归一次 Run 所有，结束时关闭；Process 不可并发运行或重复使用。
 type BaseReactProcess[T LLMSchema] struct {
-	ctx           context.Context
-	maxTurn       int
-	toolConfig    filemcp.Config
-	mcpClientSess *mcpSdk.ClientSession
-	serverSess    *mcpSdk.ServerSession
-	closeTools    func()
-	checkpoint    func() error
-	executionMu   sync.Mutex
-	executionErr  error
-	checkpointErr error
-	skills        []Skill
-	output        provider.Outputer
+	fileProgressPolicy FileProgressPolicy
+	ctx                context.Context
+	maxTurn            int
+	toolConfig         filemcp.Config
+	mcpClientSess      *mcpSdk.ClientSession
+	serverSess         *mcpSdk.ServerSession
+	closeTools         func()
+	checkpoint         func() error
+	executionMu        sync.Mutex
+	executionErr       error
+	checkpointErr      error
+	skills             []Skill
+	output             provider.Outputer
 }
 
 // 最大轮数固定在代码中，避免任务通过配置无限延长。
-const maxReactTurns = 100
+const maxReactTurns = 300
 
 func newBaseReactProcess[T LLMSchema](ctx context.Context, toolConfig filemcp.Config) (*BaseReactProcess[T], error) {
 	clientTransport, serverTransport := mcpSdk.NewInMemoryTransports()
@@ -117,7 +118,6 @@ func (r *BaseReactProcess[T]) SetSkills(skills []Skill) {
 func (r *BaseReactProcess[T]) newContext(cfg *config.AgentConfig, durable *fileContext.DurableState) *fileContext.ReactContext {
 	cfg.AllowTools[config.LoadSkillMCPToolName] = struct{}{}
 	cfg.AllowTools[config.ReadToolResultMCPToolName] = struct{}{}
-	delete(cfg.AllowTools, config.SwitchToPlanExecuteMCPToolName)
 	rc := fileContext.NewReactContext(durable)
 	rc.SetSysPrompt(cfg.SysPrompt)
 	addSkillsToReactContext(rc, r.skills)
@@ -125,8 +125,8 @@ func (r *BaseReactProcess[T]) newContext(cfg *config.AgentConfig, durable *fileC
 }
 
 // run 是模板方法：公共循环统一维护重试预算、checkpoint 和工具副作用顺序。
-// validate 与 control 分别提供结果校验和控制工具策略。
-func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState *fileContext.DurableState, rc *fileContext.ReactContext, modelContext fileContext.Contexter, validate func(T) error, control func([]*mcpSdk.CallToolParams) ([]AgentProcessorType, bool, error)) (T, []AgentProcessorType, error) {
+// validate、control 与 progressResult 分别提供结果校验、控制工具和收尾结果适配策略。
+func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState *fileContext.DurableState, rc *fileContext.ReactContext, modelContext fileContext.Contexter, validate func(T) error, control func([]*mcpSdk.CallToolParams) ([]AgentProcessorType, bool, error), progressResult func(*T) *ReactResult) (T, []AgentProcessorType, error) {
 	var zero T
 	if r.mcpClientSess != nil {
 		defer r.mcpClientSess.Close()
@@ -205,14 +205,60 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 	formatErrors := 0
 	toolCallErrors := 0
 	consecutiveDuplicates := 0
+	progress := newFileProgressGuard(r.fileProgressPolicy)
+	budget, err := restoreDecisionProgress(durableState, progress)
+	if err != nil {
+		return zero, nil, err
+	}
+	if budget.RecoveryActive && budget.Correction != "" {
+		worker.corrections = append(worker.corrections, budget.Correction)
+	}
+	finish := func(reason string) (T, []AgentProcessorType, error) {
+		if r.checkpointErr != nil {
+			return zero, nil, r.checkpointErr
+		}
+		return r.finishProgress(worker, modelContext, durableState, budget, reason, progressResult)
+	}
+	observeProgress := func(batch BatchEvidence, remaining int) error {
+		correction, err := progress.observe(batch, durableState, r.maxTurn-budget.UsedTurns-1)
+		budget.capture(progress)
+		if !progress.recoveryActive {
+			budget.Correction = ""
+			worker.corrections = slices.DeleteFunc(worker.corrections, func(value string) bool { return strings.HasPrefix(value, "File investigation recovery (") })
+		}
+		for _, call := range batch.Completed {
+			if call.Batch > budget.ObservedThroughBatch {
+				budget.ObservedThroughBatch = call.Batch
+			}
+		}
+		if correction != "" {
+			budget.Correction = correction
+		}
+		if saveErr := saveDecisionProgress(durableState, budget, r.checkpoint); saveErr != nil {
+			r.checkpointErr = saveErr
+			return saveErr
+		}
+		if correction != "" {
+			worker.corrections = append(worker.corrections, correction)
+		}
+		return err
+	}
+	// Confirmed batches may have reached storage just before a crash, while the
+	// progress checkpoint did not. Reconcile them before another model decision.
 	failedExecs := make(failedCommands)
-	// 恢复沿用原执行的失败证据；按登记批次恢复失效边界。
 	for start := 0; start < len(durableState.ToolExecutions); {
 		end := start + 1
 		for end < len(durableState.ToolExecutions) && durableState.ToolExecutions[end].Batch == durableState.ToolExecutions[start].Batch {
 			end++
 		}
-		failedExecs.observe(durableState.ToolExecutions[start:end])
+		batch := durableState.ToolExecutions[start:end]
+		if batch[0].Batch > budget.ObservedThroughBatch { //resume时只处理未observe progress的批次tool execution
+			if err := observeProgress(BatchEvidence{Completed: batch}, r.maxTurn-budget.UsedTurns-1); err != nil {
+				return finish(err.Error())
+			}
+		}
+		// 已分析过进展的批次也要恢复失败证据，并按登记批次恢复失效边界。
+		failedExecs.observe(batch)
 		start = end
 	}
 	var cachedDuplicates []*fileContext.ToolResult
@@ -245,6 +291,13 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 				request := modelContext.ModelRequest()
 				request.ToolResults = append(slices.Clone(request.ToolResults), cachedDuplicates...)
 				decisionContext = frozenCompactContext{Contexter: modelContext, request: request}
+			}
+			if budget.Finalizing || budget.UsedTurns >= r.maxTurn-1 {
+				return finish("maximum decision budget exhausted")
+			}
+			budget.UsedTurns++
+			if err := saveDecisionProgress(durableState, budget, r.checkpoint); err != nil {
+				return zero, nil, err
 			}
 			result, _, toolParams, err = worker.Run(decisionContext)
 			if err == nil {
@@ -347,7 +400,19 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 		}
 		toolParams = pending
 		if len(toolParams) == 0 {
-			// 纠错提示不能保证模型收敛；连续三轮没有实际工作时及时终止。
+			hasFile := false
+			for _, call := range cachedDuplicates {
+				if call.ToolName == string(config.ReadFileMCPToolName) || call.ToolName == string(config.ReadToolResultMCPToolName) || call.ToolName == string(config.GrepMCPToolName) || call.ToolName == string(config.GlobMCPToolName) || isCommandProgressTool(call.ToolName) {
+					hasFile = true
+				}
+			}
+			if hasFile {
+				if err := observeProgress(BatchEvidence{Cached: cachedDuplicates}, r.maxTurn-i); err != nil {
+					return finish(err.Error())
+				}
+				continue
+			}
+			// Preserve the existing duplicate guard for non-file tools.
 			consecutiveDuplicates++
 			if consecutiveDuplicates >= 3 {
 				return zero, nil, fmt.Errorf("ReAct stopped after %d consecutive duplicate tool batches", consecutiveDuplicates)
@@ -423,6 +488,11 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 			}
 		}
 		failedExecs.observe(completed)
+		if r.executionErr == nil {
+			if err := observeProgress(BatchEvidence{Completed: completed, Cached: cachedDuplicates}, r.maxTurn-i); err != nil {
+				return finish(err.Error())
+			}
+		}
 		for _, param := range toolParams {
 			if changesWorkspace(param.Name) {
 				// 命令或补丁失败也可能留下部分修改；进程轮询期间同样可能产生文件变更。
@@ -465,7 +535,7 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 			return zero, nil, r.ctx.Err()
 		}
 	}
-	return zero, nil, fmt.Errorf("ReAct exhausted maximum turns (%d)", r.maxTurn)
+	return finish(fmt.Sprintf("maximum decision budget exhausted (%d)", r.maxTurn))
 }
 
 func (r *BaseReactProcess[T]) observe(toolResult *fileContext.ToolResult, rc *fileContext.ReactContext, agentConfig *config.AgentConfig) {
@@ -578,6 +648,15 @@ func (r *BaseReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, t
 		executionErrors = append(executionErrors, fmt.Sprintf("%s: MCP returned no result and no error; execution outcome is unknown; verify side effects before retrying", callDescription))
 	}
 	if callResult != nil {
+		if !callResult.IsError && toolParam.Name == string(config.ReadFileMCPToolName) {
+			result.FileEvidence = evidenceFromResult(callResult.StructuredContent)
+		}
+		if !callResult.IsError && (toolParam.Name == string(config.GrepMCPToolName) || toolParam.Name == string(config.GlobMCPToolName)) {
+			result.SearchEvidence = searchEvidenceFromResult(callResult.StructuredContent)
+		}
+		if !callResult.IsError && toolParam.Name == string(config.ReadToolResultMCPToolName) {
+			result.HistoryEvidence = historyEvidenceFromResult(callResult.StructuredContent)
+		}
 		// 只保存 content，避免 structuredContent 的重复数据占用模型上下文。
 		encoded, marshalErr := json.Marshal(callResult.Content)
 		if marshalErr != nil {

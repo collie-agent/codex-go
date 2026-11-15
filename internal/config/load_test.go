@@ -111,6 +111,28 @@ base:
 	}
 }
 
+func TestLoadAgentConfigPlanSwitchOptIn(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test")
+	for _, enabled := range []bool{false, true} {
+		path := filepath.Join(t.TempDir(), "agent.yaml")
+		data := "name: react\nbase:\n  llm:\n    model: test\n"
+		if enabled {
+			data += "  allow_tools: [switch_to_plan_execute]\n"
+		}
+		if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := LoadAgentConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, got := cfg.ForAgent("react").AllowTools[SwitchToPlanExecuteMCPToolName]
+		if got != enabled {
+			t.Fatalf("enabled = %v, want %v", got, enabled)
+		}
+	}
+}
+
 func TestLoadAgentConfigAppliesIndependentOverrides(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "base-secret")
 	path := filepath.Join(t.TempDir(), "agents.yaml")

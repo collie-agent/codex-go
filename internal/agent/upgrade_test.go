@@ -50,7 +50,7 @@ func TestReactSwitchToPlanExecute(t *testing.T) {
 				writeObservationResponse(w, []any{map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": text}}}})
 			}))
 			defer server.Close()
-			cfg := &config.AgentConfig{LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema}}
+			cfg := &config.AgentConfig{LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema}, AllowTools: map[config.McpToolName]struct{}{config.SwitchToPlanExecuteMCPToolName: {}}}
 			o := NewProcessorOrchestrator(t.Context(), filemcp.Config{Workspace: t.TempDir()})
 			if err := o.SetMode("react"); err != nil {
 				t.Fatal(err)
@@ -85,10 +85,35 @@ func TestReactSwitchToPlanExecute(t *testing.T) {
 			if calls != 3 || !upgraded || len(results) != 1 || results[0].Answer != "done" || durable.StepExecutions[0].Status != CompletedExecutionStatus {
 				t.Fatalf("calls=%d upgraded=%v results=%+v state=%+v", calls, upgraded, results, durable)
 			}
-			if _, ok := cfg.AllowTools[config.SwitchToPlanExecuteMCPToolName]; ok {
+			if _, ok := cfg.AllowTools[config.SwitchToPlanExecuteMCPToolName]; !ok {
 				t.Error("caller configuration mutated")
 			}
 		})
+	}
+}
+
+func TestReactDoesNotExposePlanSwitchByDefault(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct{ Tools []struct{ Name string } }
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Error(err)
+			return
+		}
+		for _, tool := range req.Tools {
+			if tool.Name == string(config.SwitchToPlanExecuteMCPToolName) {
+				t.Error("plan switch exposed without configuration")
+			}
+		}
+		writeObservationResponse(w, []any{map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": `{"status":"completed","answer":"done"}`}}}})
+	}))
+	defer server.Close()
+	cfg := &config.AgentConfig{LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema}}
+	o := NewProcessorOrchestrator(t.Context(), filemcp.Config{Workspace: t.TempDir()})
+	if err := o.SetMode("react"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := o.Run(cfg, &state.DurableState{CompletionCriteria: []string{"done"}, Goal: "test", RunId: "default-switch"}); err != nil {
+		t.Fatal(err)
 	}
 }
 

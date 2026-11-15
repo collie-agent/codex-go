@@ -47,6 +47,7 @@ func (r *MultiAgentReactProcess) Run(agentConfig *config.AgentConfig, durableSta
 	}
 	// 配置已经由编排器按代理名称解析，不能重新选择 react 配置。
 	agentConfig = agentConfig.Copy()
+	delete(agentConfig.AllowTools, config.SwitchToPlanExecuteMCPToolName)
 	rc := r.newContext(agentConfig, durableState)
 	modelContext := fileContext.MultiAgentModelContext{ReactContext: rc, Delegation: r.multiAgentContext, GenerateEntryCompletionCriteria: r.generateEntryCompletionCriteria}
 	validate := func(result MultiAgentResult) error {
@@ -59,5 +60,10 @@ func (r *MultiAgentReactProcess) Run(agentConfig *config.AgentConfig, durableSta
 		}
 		return nil
 	}
-	return r.run(agentConfig, durableState, rc, modelContext, validate, nil)
+	return r.run(agentConfig, durableState, rc, modelContext, validate, nil, r.progressResult)
+}
+
+// progressResult 保留多代理输出结构，收尾摘要只写入内层业务结果。
+func (r *MultiAgentReactProcess) progressResult(result *MultiAgentResult) *ReactResult {
+	return &result.Result
 }

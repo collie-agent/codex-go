@@ -95,6 +95,12 @@ func TestReadFileEmptyResultIsAnArray(t *testing.T) {
 		if result.IsError {
 			t.Fatalf("empty read failed: %#v", result.Content)
 		}
+		data := result.StructuredContent.(map[string]any)
+		evidence := data["evidence"].(map[string]any)
+		if evidence["start_line"] != float64(0) || evidence["end_line"] != float64(0) {
+			t.Fatalf("empty range: %#v", evidence)
+		}
+		delete(data, "evidence")
 		want := map[string]any{"lines": []any{}, "truncated": false, "next_offset": nil}
 		if !reflect.DeepEqual(result.StructuredContent, want) {
 			t.Fatalf("result = %#v, want %#v", result.StructuredContent, want)
@@ -357,6 +363,12 @@ func TestResponsesTruncateWholeRecordsAndContinue(t *testing.T) {
 			}
 			if next != want {
 				t.Fatalf("next=%d, want=%d", next, want)
+			}
+			if name == "read_file" {
+				evidence := structured["evidence"].(map[string]any)
+				if evidence["start_line"] != float64(1) || evidence["end_line"] != float64(2) {
+					t.Fatalf("evidence must describe the capped page: %#v", evidence)
+				}
 			}
 			args["offset"] = next
 			following := fileToolCall(t, session, name, args)

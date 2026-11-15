@@ -62,7 +62,7 @@ func WithToolResultReader(ctx context.Context, reader ToolResultReader) context.
 func readToolResultDefinition() *sdk.Tool {
 	return &sdk.Tool{
 		Name:        string(config.ReadToolResultMCPToolName),
-		Description: `Read stored tool output from this execution instance by call_id, including records covered by the execution summary. Long exec outputs are stored as summaries; their raw output is discarded and cannot be recovered. offset is a zero-based Unicode character offset, limit is the maximum character count (1..65536). Continue with next_offset when has_more is true. Returns tool_name, status, arguments, stored content and error. Does not execute the original tool again.`,
+		Description: `Read stored tool output from this execution instance by call_id, including records covered by the execution summary. Long exec outputs are stored as summaries; their raw output is discarded and cannot be recovered. offset is a zero-based Unicode character offset, limit is the maximum character count (1..65536). Continue with next_offset when has_more is true. Returns source call_id, actual offset and next_offset, eof, has_more, tool_name, status, arguments, stored content and error. Does not execute the original tool again.`,
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{
 			"call_id": map[string]any{"type": "string", "minLength": 1},
 			"offset":  map[string]any{"type": "integer", "minimum": 0},
@@ -122,12 +122,14 @@ func (r *BaseReactProcess[T]) readToolResult(param *sdk.CallToolParams, durable 
 				Error      string `json:"error,omitempty"`
 				NextOffset int    `json:"next_offset"`
 				HasMore    bool   `json:"has_more"`
-			}{call.ToolCallId, call.ToolName, string(call.Status), call.Arguments, string(content[offset:end]), call.Error, end, end < len(content)}
+				Offset     int    `json:"offset"`
+				EOF        bool   `json:"eof"`
+			}{call.ToolCallId, call.ToolName, string(call.Status), call.Arguments, string(content[offset:end]), call.Error, end, end < len(content), offset, end == len(content)}
 			encoded, err := json.Marshal(result)
 			if err != nil {
 				return fail(err)
 			}
-			return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: string(encoded)}}}
+			return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: string(encoded)}}, StructuredContent: &state.HistoryReadEvidence{SourceCallID: call.ToolCallId, Start: offset, End: end, EOF: end == len(content)}}
 		}
 	}
 	return fail(fmt.Errorf("tool result not found in current execution: call_id=%q", args.CallID))

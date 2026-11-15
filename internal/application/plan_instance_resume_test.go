@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -191,7 +192,8 @@ func TestPlanUpgradeResumesAfterPlannerFailure(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	opts := application.Options{RunID: run.RunID, ConfigPath: agentConfig(t, server.URL), Timeout: time.Second, Stderr: io.Discard}
+	path := agentConfigWithPlanSwitch(t, server.URL)
+	opts := application.Options{RunID: run.RunID, ConfigPath: path, Timeout: time.Second, Stderr: io.Discard}
 	_, err = application.Resume(ctx, opts)
 	if err == nil || calls != 2 {
 		t.Fatalf("err=%v calls=%d", err, calls)
@@ -204,6 +206,22 @@ func TestPlanUpgradeResumesAfterPlannerFailure(t *testing.T) {
 	if err != nil || len(results) != 1 || results[0].Answer != "finished" || calls != 4 {
 		t.Fatalf("results=%v err=%v calls=%d", results, err, calls)
 	}
+}
+
+func agentConfigWithPlanSwitch(t *testing.T, endpoint string) string {
+	t.Helper()
+	path := agentConfig(t, endpoint)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("  react:\n    allow_tools: [switch_to_plan_execute]\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func TestPlanUpgradeHandoffAndControlResultCommitTogether(t *testing.T) {
@@ -230,7 +248,7 @@ func TestPlanUpgradeHandoffAndControlResultCommitTogether(t *testing.T) {
 		io.WriteString(w, `{"id":"switch","status":"completed","output":[{"type":"function_call","id":"fc","call_id":"switch","name":"switch_to_plan_execute","arguments":"{\"reason\":\"dependent work\",\"summary\":\"implementation remains\"}"}]}`)
 	}))
 	defer server.Close()
-	_, err = application.Resume(ctx, application.Options{RunID: run.RunID, ConfigPath: agentConfig(t, server.URL), Timeout: time.Second, Stderr: io.Discard})
+	_, err = application.Resume(ctx, application.Options{RunID: run.RunID, ConfigPath: agentConfigWithPlanSwitch(t, server.URL), Timeout: time.Second, Stderr: io.Discard})
 	if err == nil || !strings.Contains(err.Error(), "switch result unavailable") || requests != 1 {
 		t.Fatalf("err=%v requests=%d", err, requests)
 	}

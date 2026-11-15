@@ -297,6 +297,7 @@ func (o *ProcessorOrchestrator) runProcessor(agentType AgentProcessorType, agent
 				state.ExecutionResult = nil
 				state.ToolExecutions = nil
 				state.ExecutionCompaction = nil
+				state.ExecutionProgress = nil
 			}
 			step.Status = RunningExecutionStatus
 			state.Error = ""

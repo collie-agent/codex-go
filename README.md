@@ -12,6 +12,8 @@
 
 `ProcessorOrchestrator` 按处理器返回的后继类型调度，支持直接 ReAct、planner 生成有序计划后由 ReAct 逐步执行，以及运行中通过 `switch_to_plan_execute` 升级为计划执行。同批分支可并发执行，结束后按调度顺序合并；计划步骤顺序推进，保存观察和完成证据。
 
+运行中切换默认关闭；需要时在 ReAct 的 `allow_tools` 中显式添加 `switch_to_plan_execute`，例如参见 [`examples/react-and-plan-execute.yaml`](examples/react-and-plan-execute.yaml)。该工具仅在独立 ReAct 且尚未进入计划步骤时可用。
+
 Multi-agent 模式由 `MultiAgentProcessorOrchestrator` 调度，每个代理复用 `MultiAgentReactProcess` 执行自己的 ReAct 循环。YAML 中通过 `name: multi-agent` 启用，以 `multi-agent.entry` 指定入口，在 `agents` 中定义各代理的职责、模型、工具权限和 `next_agents`，组成允许委派的有向图。可配置 supervisor/worker 分工，也支持 worker 继续向其他代理委派；模型只能选择当前代理的 `next_agents` 中的目标。
 
 代理通过结构化结果 `MultiAgentResult.next` 提出委派，每个新子任务携带目标、完成标准和相关上下文。调度器并发执行同批子任务，等待整批结束后按委派顺序收集报告，再交回调用者决定继续委派或汇总答案。子代理以空 `next` 结束时自动回报调用者，入口代理结束时返回最终结果；子任务的业务失败作为报告交回调用者处理，执行错误则中止运行。`max_rounds` 限制整条执行链的代理调用总数，`max_parallel` 限制同时执行的代理调用数，与单个 ReAct 实例的 100 轮上限分别计数。

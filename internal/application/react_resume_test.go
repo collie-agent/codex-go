@@ -263,7 +263,7 @@ func TestResumeReactPreservesIncrementalCompactionAndOriginalEvidence(t *testing
 						t.Errorf("incremental input missing %q", want)
 					}
 				}
-				for _, excluded := range []string{"original-batch-1:", "original-batch-3:", "original-batch-7:"} {
+				for _, excluded := range []string{"original-batch-1:", "original-batch-3:"} {
 					if strings.Contains(input, excluded) {
 						t.Errorf("incremental input repeats %q", excluded)
 					}

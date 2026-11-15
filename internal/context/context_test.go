@@ -103,3 +103,40 @@ func TestHistoricalResultDecodesJSONNewlines(t *testing.T) {
 		t.Fatalf("historical JSON text was not decoded exactly once: %s", prompt)
 	}
 }
+
+func TestStepReportsAreSeparatedFromModelConstraints(t *testing.T) {
+	state := &DurableState{Goal: "extract helpers", CurrentStepIndex: 1, StepExecutions: []StepExecution{
+		{StepId: "design", Status: CompletedExecutionStatus, Intent: "design helpers", Observation: []string{"sessions.Get exists"}, CompletionEvidence: []string{"proposed helper"}},
+		{StepId: "implement", Status: RunningExecutionStatus, Intent: "implement helpers", CompletionCriteria: "helpers compile"},
+	}}
+	before := state.Clone()
+	rc := NewReactContext(state)
+	model, _ := rc.FormatForModel()
+	for _, input := range []string{model, rc.currentStepContext()} {
+		_, block, ok := strings.Cut(input, "# StepExecutions\n\n> ")
+		if !ok {
+			t.Fatalf("missing model steps: %s", input)
+		}
+		encoded, _, _ := strings.Cut(block, "\n")
+		var steps []map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(encoded), &steps); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := steps[0]["Observation"]; ok {
+			t.Fatal("historical observation exposed as top-level step fact")
+		}
+		var report stepHistoricalReport
+		if err := json.Unmarshal(steps[0]["HistoricalReport"], &report); err != nil {
+			t.Fatal(err)
+		}
+		if report.Notice == "" || !reflect.DeepEqual(report.Observation, state.StepExecutions[0].Observation) || !reflect.DeepEqual(report.CompletionEvidence, state.StepExecutions[0].CompletionEvidence) {
+			t.Fatalf("lost or unlabeled historical report: %+v", report)
+		}
+		if string(steps[1]["CompletionCriteria"]) != `"helpers compile"` || steps[1]["HistoricalReport"] != nil {
+			t.Fatalf("current step constraints changed: %s", encoded)
+		}
+	}
+	if !reflect.DeepEqual(state.StepExecutions, before.StepExecutions) {
+		t.Fatal("model projection mutated durable state")
+	}
+}

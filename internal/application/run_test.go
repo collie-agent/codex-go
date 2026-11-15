@@ -383,7 +383,7 @@ func TestAgentRunsShareOnlyEarlierConversationOutcomes(t *testing.T) {
 	}
 }
 
-func TestConversationHistoryContextLimitReturnsProviderError(t *testing.T) {
+func TestConversationHistoryContextLimitStopsWithoutCompressibleHistory(t *testing.T) {
 	_, store := runStore(t)
 	ctx := context.Background()
 	workspace := t.TempDir()
@@ -400,24 +400,20 @@ func TestConversationHistoryContextLimitReturnsProviderError(t *testing.T) {
 	if err := store.Save(ctx, &prior); err != nil {
 		t.Fatal(err)
 	}
-	seen := false
+	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if testutil.RespondWithCriteria(t, w, r) {
-			return
-		}
-		body, _ := io.ReadAll(r.Body)
-		seen = strings.Contains(string(body), "history-tail")
+		requests++
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"error":{"message":"context length exceeded","type":"invalid_request_error","code":"context_length_exceeded"}}`))
 	}))
 	defer server.Close()
 	_, err = application.Run(ctx, application.Options{ConfigPath: agentConfig(t, server.URL), ConvID: prior.ConvID, Task: "new task", Workspace: workspace, Timeout: time.Second, Stderr: io.Discard})
-	if !seen {
-		t.Fatal("complete history was not sent to the provider")
+	if requests != 0 {
+		t.Fatal("oversized history reached the provider")
 	}
-	if err == nil || !strings.Contains(err.Error(), "context length exceeded") {
-		t.Fatalf("expected context limit error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "context exceeds token budget without compressible history") {
+		t.Fatalf("expected local context limit error, got %v", err)
 	}
 }
 

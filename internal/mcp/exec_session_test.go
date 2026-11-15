@@ -319,3 +319,31 @@ func TestExecSessionSharesPersistentCacheWithExec(t *testing.T) {
 	}
 	callSessionTool(t, client, "exec_stop", map[string]any{"session_id": started["session_id"]})
 }
+
+func TestExecSessionContinuousOutputDoesNotExtendDeadline(t *testing.T) {
+	client := execToolSession(t, Config{Workspace: t.TempDir(), Timeout: 200 * time.Millisecond})
+	started := callSessionTool(t, client, "exec_start", map[string]any{"command": "python3", "args": []string{"-u", "-c", "import time\nwhile True: print('tick'); time.sleep(.01)"}})
+	cursor := float64(0)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		result := fileToolCall(t, client, "exec_poll", map[string]any{"session_id": started["session_id"], "cursor": cursor, "wait_ms": 100})
+		var out map[string]any
+		for _, content := range result.Content {
+			if text, ok := content.(*sdk.TextContent); ok {
+				if err := json.Unmarshal([]byte(text.Text), &out); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		if c, ok := out["next_cursor"].(float64); ok {
+			cursor = c
+		}
+		if out["state"] == "exited" {
+			if !result.IsError || out["error_kind"] != "timeout" || out["elapsed_ms"].(float64) < 200 || out["lifetime_ms"] != float64(200) {
+				t.Fatalf("deadline evidence: %v error=%v", out, result.IsError)
+			}
+			return
+		}
+	}
+	t.Fatal("continuous output extended absolute deadline")
+}

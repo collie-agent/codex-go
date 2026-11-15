@@ -193,8 +193,8 @@ func TestReactRetriesOutputParseErrors(t *testing.T) {
 					writeObservationResponse(w, []any{observationMessage(text)})
 				}))
 				defer server.Close()
-				// 最后一轮也应允许纠正格式，不消耗工具执行的轮数预算。
-				process := &ReactProcess[ReactResult]{BaseReactProcess: BaseReactProcess[ReactResult]{ctx: t.Context(), maxTurn: 1}}
+				// 格式重试占用决策预算；预留重试及有界收尾空间。
+				process := &ReactProcess[ReactResult]{BaseReactProcess: BaseReactProcess[ReactResult]{ctx: t.Context(), maxTurn: 8}}
 				cfg := &config.AgentConfig{LogLevel: config.ErrorLogLevel, LLMConfig: &config.LLMConfig{
 					BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: schema,
 				}}
@@ -510,7 +510,7 @@ func TestReactRetriesInvalidToolCalls(t *testing.T) {
 				writeObservationResponse(w, []any{map[string]any{"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "BEGIN RESULT", "arguments": `{"status":"completed","answer":"done"}`}})
 			}))
 			defer server.Close()
-			process := &ReactProcess[ReactResult]{BaseReactProcess: BaseReactProcess[ReactResult]{ctx: t.Context(), maxTurn: 1}}
+			process := &ReactProcess[ReactResult]{BaseReactProcess: BaseReactProcess[ReactResult]{ctx: t.Context(), maxTurn: 8}}
 			cfg := &config.AgentConfig{LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.LineProtocolLLMOutputSchema}}
 			got, _, err := process.Run(cfg, &fileContext.DurableState{CompletionCriteria: []string{"original task verified"}, RunId: "retry-tool-task", Goal: "answer"})
 			if recover {

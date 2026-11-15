@@ -3,9 +3,10 @@ package mcp
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -45,7 +46,16 @@ type ReadFileLine struct {
 	Text string `json:"text"`
 }
 
+// FileEvidence describes exactly the snapshot and lines returned to the caller.
+type FileEvidence struct {
+	Path      string `json:"path"`
+	Version   string `json:"version"`
+	StartLine int    `json:"start_line"`
+	EndLine   int    `json:"end_line"`
+}
+
 type ReadFileResult struct {
+	Evidence   *FileEvidence  `json:"evidence,omitempty"`
 	Lines      []ReadFileLine `json:"lines"`
 	Truncated  bool           `json:"truncated"`
 	NextOffset *int           `json:"next_offset"`
@@ -84,7 +94,13 @@ func RegisterToolsWithCleanup(server *sdk.Server, config Config) (func(), error)
 			}
 			return pageResponse(result.Lines, intDefault(args.Offset, 1), result.Truncated, result.NextOffset,
 				func(lines []ReadFileLine, truncated bool, next *int) ReadFileResult {
-					return ReadFileResult{Lines: lines, Truncated: truncated, NextOffset: next}
+					evidence := *result.Evidence
+					evidence.StartLine, evidence.EndLine = 0, 0
+					if len(lines) > 0 {
+						evidence.StartLine = lines[0].Line
+						evidence.EndLine = lines[len(lines)-1].Line
+					}
+					return ReadFileResult{Lines: lines, Truncated: truncated, NextOffset: next, Evidence: &evidence}
 				},
 				func(line ReadFileLine) string { return fmt.Sprintf("%d: %s", line.Line, line.Text) })
 		})
@@ -123,36 +139,31 @@ func ReadFile(ctx context.Context, workspace, path string, offset, limit int) (R
 	if bytes.IndexByte(contents, 0) >= 0 || !utf8.Valid(contents) {
 		return ReadFileResult{}, fmt.Errorf("file is not UTF-8 text")
 	}
-	// sed is invoked with an argument vector, so the path is never interpreted
-	// by a shell. Its output is split into lines and numbered from offset.
-	cmd := exec.CommandContext(ctx, "sed", "-n", fmt.Sprintf("%d,%dp", offset, offset+limit), "--", resolved)
-	output, err := cmd.Output()
+	if err := ctx.Err(); err != nil {
+		return ReadFileResult{}, err
+	}
+	// 内容、版本和分页都来自同一次读取，避免文件并发变化造成错误的重复判断。
+	relative, err := filepath.Rel(workspace, resolved)
 	if err != nil {
-		return ReadFileResult{}, commandError("sed read failed", err, "")
+		return ReadFileResult{}, err
 	}
-	text := strings.TrimSuffix(string(output), "\n")
-	lines := make([]ReadFileLine, 0)
-	if len(output) > 0 {
-		values := strings.Split(text, "\n")
-		if len(values) > limit {
-			values = values[:limit]
-		}
-		for i, value := range values {
-			lines = append(lines, ReadFileLine{Line: offset + i, Text: value})
-		}
+	evidence := &FileEvidence{Path: filepath.ToSlash(relative), Version: fmt.Sprintf("%x", sha256.Sum256(contents))}
+	values := []string{}
+	if len(contents) > 0 {
+		values = strings.Split(strings.TrimSuffix(string(contents), "\n"), "\n")
 	}
-	result := ReadFileResult{Lines: lines}
-	if len(lines) == limit {
-		lookahead := exec.CommandContext(ctx, "sed", "-n", fmt.Sprintf("%dp", offset+limit), "--", resolved)
-		following, lookErr := lookahead.Output()
-		if lookErr != nil {
-			return ReadFileResult{}, commandError("sed read failed", lookErr, "")
-		}
-		if len(following) > 0 {
-			next := offset + len(lines)
-			result.Truncated = true
-			result.NextOffset = &next
-		}
+	page, truncated, next := selectPage(values, offset-1, limit)
+	lines := make([]ReadFileLine, 0, len(page))
+	for i, value := range page {
+		lines = append(lines, ReadFileLine{Line: offset + i, Text: value})
 	}
-	return result, nil
+	if len(lines) > 0 {
+		evidence.StartLine = lines[0].Line
+		evidence.EndLine = lines[len(lines)-1].Line
+	}
+	if next != nil {
+		value := *next + 1
+		next = &value
+	}
+	return ReadFileResult{Lines: lines, Truncated: truncated, NextOffset: next, Evidence: evidence}, nil
 }

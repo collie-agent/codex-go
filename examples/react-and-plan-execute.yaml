@@ -20,6 +20,8 @@ base:
     - glob
     - grep
     - apply_patch
+    # 允许 ReAct 在运行中切换到 plan-execute。
+    - switch_to_plan_execute
   sys_prompt: |
     只处理用户要求的任务，并在完成时简要说明结果。
 

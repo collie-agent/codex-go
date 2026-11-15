@@ -2,8 +2,10 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 
 	mcpconfig "github.com/collie-agent/codex-go/internal/config"
@@ -15,12 +17,19 @@ type execToolArgs struct {
 	Args    []string `json:"args,omitempty" jsonschema:"argument array of strings (default empty); no shell expansion is performed"`
 }
 
+// CommandEvidence keeps progress identity independent of output summarization.
+type CommandEvidence struct {
+	WorkspaceVersion string `json:"workspace_version"`
+	Fingerprint      string `json:"fingerprint"`
+}
+
 type execToolResult struct {
-	Stdout    string `json:"stdout"`
-	Stderr    string `json:"stderr"`
-	ExitCode  int    `json:"exit_code"`
-	ErrorKind string `json:"error_kind,omitempty"`
-	Error     string `json:"error,omitempty"`
+	Evidence  *CommandEvidence `json:"command_evidence,omitempty"`
+	Stdout    string           `json:"stdout"`
+	Stderr    string           `json:"stderr"`
+	ExitCode  int              `json:"exit_code"`
+	ErrorKind string           `json:"error_kind,omitempty"`
+	Error     string           `json:"error,omitempty"`
 }
 
 func registerExecTool(server *sdk.Server, workspace string, config Config) func() {
@@ -56,11 +65,12 @@ Entrypoint approval does not guarantee that a command, runtime, or dependency is
 
  No cwd, environment, runtime mount, or stdin overrides are accepted. Commands and their children can read and write the whole workspace, including .git and deleting files; external user files are inaccessible; host network services are accessible only in host network mode. Host-configured runtimes are read-only. Host-authorized persistent caches are writable and shared across calls and process sessions. Named Unix sockets and io_uring are unavailable. stdin is EOF; all descendants are cleaned up after execution. The server tool timeout applies, with a maximum of 5 minutes. Returns complete stdout, stderr and exit_code; exit_code is -1 when no command ran. Ordinary nonzero exits are results, not tool errors. Parameter, sandbox startup, timeout and cancellation errors set isError and error_kind while retaining captured output. Output is returned in full without a capture or response size limit. Allowed entrypoints for this server: ` + strings.Join(commands, ", ") + ". Network mode: " + network + ". Authorized host environment names: " + strings.Join(config.ExecEnv, ", "),
 	}, func(ctx context.Context, _ *sdk.CallToolRequest, args execToolArgs) (*sdk.CallToolResult, execToolResult, error) {
+		toolCtx, cancel := context.WithTimeout(ctx, config.Timeout)
+		defer cancel()
+		before := searchSnapshot(toolCtx, workspace, ".", true, true)
 		result := CommandResult{ExitCode: -1}
 		err := startupErr
 		if err == nil {
-			toolCtx, cancel := context.WithTimeout(ctx, config.Timeout)
-			defer cancel()
 			result, err = executor.Execute(toolCtx, workspace, args.Command, args.Args)
 		}
 		out := execToolResult{Stdout: result.Stdout, Stderr: result.Stderr, ExitCode: result.ExitCode}
@@ -77,6 +87,10 @@ Entrypoint approval does not guarantee that a command, runtime, or dependency is
 				out.ErrorKind, out.ExitCode = "sandbox_startup", -1
 			}
 		}
+		version := confirmedSearchVersion(before, searchSnapshot(toolCtx, workspace, ".", true, true))
+		// Hash the original result, before any model-generated summary can vary.
+		raw, _ := json.Marshal(out)
+		out.Evidence = &CommandEvidence{WorkspaceVersion: version, Fingerprint: fmt.Sprintf("%x", sha256.Sum256(raw))}
 		return execToolResponse(out)
 	})
 	return cleanup

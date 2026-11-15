@@ -26,9 +26,10 @@ type GlobItem struct {
 }
 
 type GlobResult struct {
-	Items      []GlobItem `json:"items"`
-	Truncated  bool       `json:"truncated"`
-	NextOffset *int       `json:"next_offset"`
+	Items          []GlobItem      `json:"items"`
+	Truncated      bool            `json:"truncated"`
+	NextOffset     *int            `json:"next_offset"`
+	SearchEvidence *SearchEvidence `json:"search_evidence,omitempty"`
 }
 
 // registerGlobTool registers the glob search tool against a workspace root.
@@ -46,7 +47,7 @@ func registerGlobTool(server *sdk.Server, workspace string, timeout time.Duratio
 			}
 			return pageResponse(result.Items, args.Offset, result.Truncated, result.NextOffset,
 				func(items []GlobItem, truncated bool, next *int) GlobResult {
-					return GlobResult{Items: items, Truncated: truncated, NextOffset: next}
+					return GlobResult{Items: items, Truncated: truncated, NextOffset: next, SearchEvidence: globPageEvidence(result.SearchEvidence, items, truncated)}
 				},
 				func(item GlobItem) string { return item.Path })
 		})
@@ -77,6 +78,7 @@ func Glob(ctx context.Context, workspace string, args globArgs) (GlobResult, err
 	if isGitPath(relDir) {
 		return GlobResult{Items: []GlobItem{}}, nil
 	}
+	before := searchSnapshot(ctx, workspace, relDir, args.IncludeIgnored, false)
 	cmdArgs := []string{"--files", "--null", "--hidden", "--no-follow", "--no-require-git"}
 	if args.IncludeIgnored {
 		cmdArgs = append(cmdArgs, "--no-ignore")
@@ -114,5 +116,6 @@ func Glob(ctx context.Context, workspace string, args globArgs) (GlobResult, err
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].Path < items[j].Path })
 	selected, truncated, next := selectPage(items, args.Offset, limit)
-	return GlobResult{Items: selected, Truncated: truncated, NextOffset: next}, nil
+	evidence := &SearchEvidence{Query: searchQuery("glob", relDir, args), Version: confirmedSearchVersion(before, searchSnapshot(ctx, workspace, relDir, args.IncludeIgnored, false)), Offset: args.Offset}
+	return GlobResult{Items: selected, Truncated: truncated, NextOffset: next, SearchEvidence: globPageEvidence(evidence, selected, truncated)}, nil
 }

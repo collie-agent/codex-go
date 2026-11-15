@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -34,11 +35,11 @@ func TestMultiAgentYAMLRunAndCompletedResume(t *testing.T) {
 	if err != nil || len(results) != 1 || results[0].Answer != "multi-agent final report" {
 		t.Fatalf("results=%+v error=%v", results, err)
 	}
-	fields := strings.Fields(stderr.String())
-	if len(fields) < 1 || !strings.HasPrefix(fields[0], "run_id=") {
+	fields := regexp.MustCompile(`run_id=([a-f0-9]+)`).FindStringSubmatch(stderr.String())
+	if len(fields) != 2 {
 		t.Fatalf("missing identity: %q", stderr.String())
 	}
-	runID := strings.TrimPrefix(fields[0], "run_id=")
+	runID := fields[1]
 	resumed, err := application.Resume(context.Background(), application.Options{ConfigPath: path, RunID: runID, Timeout: time.Second})
 	if err != nil || len(resumed) != 1 || resumed[0].Answer != "multi-agent final report" {
 		t.Fatalf("resumed=%+v error=%v", resumed, err)
@@ -69,11 +70,11 @@ func TestMultiAgentResumeAfterProviderFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("provider failure did not stop run")
 	}
-	fields := strings.Fields(stderr.String())
-	if len(fields) == 0 {
+	fields := regexp.MustCompile(`run_id=([a-f0-9]+)`).FindStringSubmatch(stderr.String())
+	if len(fields) != 2 {
 		t.Fatal("missing run identity")
 	}
-	runID := strings.TrimPrefix(fields[0], "run_id=")
+	runID := fields[1]
 	results, err := application.Resume(context.Background(), application.Options{ConfigPath: path, RunID: runID, Timeout: time.Second})
 	if err != nil || len(results) != 1 || results[0].Answer != "recovered report" {
 		t.Fatalf("results=%+v error=%v", results, err)
@@ -126,11 +127,11 @@ func TestMultiAgentBusinessFailureIsTerminal(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "source unavailable") {
 		t.Fatalf("error=%v", err)
 	}
-	fields := strings.Fields(stderr.String())
-	if len(fields) == 0 {
+	fields := regexp.MustCompile(`run_id=([a-f0-9]+)`).FindStringSubmatch(stderr.String())
+	if len(fields) != 2 {
 		t.Fatal("missing run ID")
 	}
-	runID := strings.TrimPrefix(fields[0], "run_id=")
+	runID := fields[1]
 	run, err := store.Get(context.Background(), runID)
 	if err != nil || run.Status != "failed" || run.FailureType != "business" || !strings.Contains(string(run.Result), "source unavailable") {
 		t.Fatalf("run=%+v error=%v", run, err)
