@@ -35,7 +35,7 @@ func TestReactFileStallRecoveryCanRepairAndVerify(t *testing.T) {
 		switch stage {
 		case 0:
 			if strings.Contains(string(body), "File investigation recovery") {
-				for _, want := range []string{"Repair value", "value is fixed and verified", "value.txt", "call_1", "remaining", "no new"} {
+				for _, want := range []string{"Repair value", "value is fixed and verified", "value.txt", "call_1", "remaining", "no new", "modify immediately and verify", "do not reread", "tool results have since resolved", "specific gap and its completion criterion"} {
 					if !strings.Contains(string(body), want) {
 						t.Errorf("recovery missing %q: %s", want, body)
 					}

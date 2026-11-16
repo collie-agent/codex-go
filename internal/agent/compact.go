@@ -313,6 +313,9 @@ Summarize execution evidence relevant to the current Goal, CompletionCriteria an
 - Never invent evidence or treat tool arguments as proof of success.
 - Every Facts, Actions and OpenIssues item requires non-empty Text and SourceCallIDs referencing the original tool calls supporting it.
 - Preserve original source IDs from PreviousSummary. Do not cite calls outside the supplied history.
+- Re-evaluate every previous OpenIssues and Pending item against PreviousSummary and AddedToolRecords. Remove resolved issues from OpenIssues; preserve relevant historical failures and their resolution in Actions with supporting source IDs. For partially resolved issues, retain only the remaining uncertainty. Never confirm a fact in Facts while describing the same fact as unconfirmed in OpenIssues.
+- Pending must contain only unfinished work required by the current Goal and completion criteria. Remove completed items; do not turn incidental findings into mandatory scope expansion.
+- Example: if PreviousSummary says the metric calculation has not been read, but AddedToolRecords confirms the calculation, retain the supported calculation in Facts and remove that gap from OpenIssues. If the requested README update has not run, keep writing and verifying README in Pending; do not claim the task is complete.
 - Distinguish remaining work from confirmed evidence. Return only the required output document.
 
 ## Output fields
@@ -321,7 +324,7 @@ Summarize execution evidence relevant to the current Goal, CompletionCriteria an
 | --- | --- | --- |
 | Facts | Evidence list | Facts directly supported by tool results and relevant to the goal; exclude assumptions and unverified claims. |
 | Actions | Evidence list | Operations already executed and their observed results, especially side effects; distinguish confirmed success from attempted operations. |
-| OpenIssues | Evidence list | Unresolved errors, failed attempts and uncertain outcomes that subsequent reasoning must retain. |
+| OpenIssues | Evidence list | Currently unresolved errors and uncertain outcomes; remove gaps resolved by later evidence. |
 | Pending | String list | Remaining work suggested by the records and completion criteria; reference only, never proof that an action ran or succeeded. |
 | Text | String | Non-empty description of one fact, action or open issue, stating the observed result and any uncertainty. Required in every Evidence item. |
 | SourceCallIDs | String list | Non-empty list of original tool call IDs supporting Text. Preserve prior citations and use only real calls in the covered history. Required in every Evidence item. |`

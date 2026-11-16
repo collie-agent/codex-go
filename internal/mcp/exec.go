@@ -20,6 +20,7 @@ import (
 type CommandExecutor struct {
 	network     string
 	environment []string
+	gitIdentity []string
 	bwrap       string
 	path        []string
 	mounts      []string
@@ -113,7 +114,11 @@ func NewCommandExecutor(runtimeDirs ...string) (*CommandExecutor, error) {
 			}
 		}
 	}
-	return &CommandExecutor{bwrap: path, path: controlledPath, mounts: mounts, runtime: runtimes, goModCache: goModCache}, nil
+	gitIdentity, err := readGitIdentity()
+	if err != nil {
+		return nil, err
+	}
+	return &CommandExecutor{bwrap: path, path: controlledPath, mounts: mounts, runtime: runtimes, goModCache: goModCache, gitIdentity: gitIdentity}, nil
 }
 
 // Execute runs at the canonical Workspace root with a 5-minute deadline.
@@ -228,6 +233,11 @@ func (e *CommandExecutor) execute(ctx context.Context, workspace, name string, a
 	}
 	sandboxArgs = append(sandboxArgs, "--setenv", "GOPROXY", defaultGoProxy(e.goProxy), "--setenv", "GOSUMDB", "off", "--setenv", "GOTOOLCHAIN", "local")
 	for _, value := range e.environment {
+		name, value, _ := strings.Cut(value, "=")
+		sandboxArgs = append(sandboxArgs, "--setenv", name, value)
+	}
+	// 仅传递提交身份，不挂载可能含凭据或外部 include 的宿主 Git 配置。
+	for _, value := range e.gitIdentity {
 		name, value, _ := strings.Cut(value, "=")
 		sandboxArgs = append(sandboxArgs, "--setenv", name, value)
 	}

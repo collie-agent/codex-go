@@ -425,7 +425,7 @@ func TestReactUsesConfiguredCompactOutput(t *testing.T) {
 						t.Error("compact exposes tools")
 					}
 					prompt, _ := json.Marshal(body["input"])
-					for _, want := range []string{"# Execution compaction", "## Output fields", "| Facts |", "| Actions |", "| OpenIssues |", "| Pending |", "| Text |", "| SourceCallIDs |", "## Additional instructions", "## Output format", "### Example 1", "### Example 2", "```", "compact custom instruction"} {
+					for _, want := range []string{"# Execution compaction", "## Output fields", "| Facts |", "| Actions |", "| OpenIssues |", "| Pending |", "| Text |", "| SourceCallIDs |", "## Additional instructions", "## Output format", "### Example 1", "### Example 2", "```", "compact custom instruction", "Remove resolved issues from OpenIssues", "Never confirm a fact in Facts", "Remove completed items", "do not turn incidental findings", "keep writing and verifying README in Pending"} {
 						if !strings.Contains(string(prompt), want) {
 							t.Errorf("prompt missing %q", want)
 						}
