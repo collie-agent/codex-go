@@ -19,6 +19,7 @@ type execToolArgs struct {
 
 // CommandEvidence keeps progress identity independent of output summarization.
 type CommandEvidence struct {
+	Purpose          string `json:"purpose"`
 	WorkspaceVersion string `json:"workspace_version"`
 	Fingerprint      string `json:"fingerprint"`
 }
@@ -92,7 +93,7 @@ Entrypoint approval does not guarantee that a command, runtime, or dependency is
 		version := confirmedSearchVersion(before, searchSnapshot(toolCtx, workspace, ".", true, true))
 		// Hash the original result, before any model-generated summary can vary.
 		raw, _ := json.Marshal(out)
-		out.Evidence = &CommandEvidence{WorkspaceVersion: version, Fingerprint: fmt.Sprintf("%x", sha256.Sum256(raw))}
+		out.Evidence = &CommandEvidence{Purpose: CommandPurpose(args.Command, args.Args), WorkspaceVersion: version, Fingerprint: fmt.Sprintf("%x", sha256.Sum256(raw))}
 		return execToolResponse(out)
 	})
 	return cleanup

@@ -7,9 +7,27 @@ const (
 	FailedReactStatus    ReactStatus = "failed"
 )
 
+// ExplorationDecision 是独立阶段协议，不使用 completed 表示阶段切换。
+type ExplorationDecision struct {
+	TaskType       string   `json:"task_type" lineprotocol:"TASK_TYPE"`
+	Basis          string   `json:"basis" lineprotocol:"BASIS"`
+	Choice         string   `json:"choice" lineprotocol:"CHOICE"`
+	TargetFiles    []string `json:"target_files,omitempty" lineprotocol:"TARGET_FILES"`
+	Target         string   `json:"target" lineprotocol:"TARGET"`
+	Evidence       string   `json:"evidence" lineprotocol:"EVIDENCE"`
+	NextOperation  string   `json:"next_operation" lineprotocol:"NEXT_OPERATION"`
+	Gap            string   `json:"gap" lineprotocol:"GAP"`
+	BlockingReason string   `json:"blocking_reason" lineprotocol:"BLOCKING_REASON"`
+	Investigation  string   `json:"investigation" lineprotocol:"INVESTIGATION"`
+	ExitCondition  string   `json:"exit_condition" lineprotocol:"EXIT_CONDITION"`
+	Reason         string   `json:"reason" lineprotocol:"REASON"`
+	ExecutionState string   `json:"execution_state" lineprotocol:"EXECUTION_STATE"`
+}
+
 type ReactResult struct {
-	Status ReactStatus `json:"status" lineprotocol:"STATUS"`
-	Answer string      `json:"answer" lineprotocol:"ANSWER"`
+	Exploration *ExplorationDecision `json:"exploration,omitempty" lineprotocol:"EXPLORATION"`
+	Status      ReactStatus          `json:"status" lineprotocol:"STATUS"`
+	Answer      string               `json:"answer" lineprotocol:"ANSWER"`
 	// 计划步骤完成时必填；普通 ReAct 模式使用空列表。
 	Observation        []string `json:"Observation" lineprotocol:"OBSERVATION"`
 	CompletionEvidence []string `json:"CompletionEvidence" lineprotocol:"COMPLETION_EVIDENCE"`

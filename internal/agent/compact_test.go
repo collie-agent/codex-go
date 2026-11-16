@@ -95,7 +95,7 @@ func compactionHistory(batches int) *state.DurableState {
 func compactionConfig(t *testing.T, url string) *config.AgentConfig {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "agent.yaml")
-	data := fmt.Sprintf("name: react\nlog_level: error\nbase:\n  llm:\n    model: test\n    api_key: test\n    base_url: %s\n    output_schema: line_protocol_llm_output\nagents:\n  compact:\n    llm:\n      model: test\n      api_key: test\n      base_url: %s\n      output_schema: json_llm_output\n", url, url)
+	data := fmt.Sprintf("name: react\nlog_level: error\nbase:\n  exploration_budget:\n    initial_turns: 1000\n  llm:\n    model: test\n    api_key: test\n    base_url: %s\n    output_schema: line_protocol_llm_output\nagents:\n  compact:\n    llm:\n      model: test\n      api_key: test\n      base_url: %s\n      output_schema: json_llm_output\n", url, url)
 	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -481,7 +481,7 @@ func TestReactUsesConfiguredCompactOutput(t *testing.T) {
 			}))
 			defer server.Close()
 			path := filepath.Join(t.TempDir(), "agent.yaml")
-			yaml := fmt.Sprintf("name: react\nlog_level: error\nbase:\n  llm:\n    model: reasoning-model\n    api_key: test\n    base_url: %s\n    output_schema: line_protocol_llm_output\nagents:\n  compact:\n    sys_prompt: compact custom instruction\n    llm:\n      model: compact-model\n      api_key: test\n      base_url: %s\n      output_schema: %s\n", server.URL, server.URL, schema)
+			yaml := fmt.Sprintf("name: react\nlog_level: error\nbase:\n  exploration_budget:\n    initial_turns: 1000\n  llm:\n    model: reasoning-model\n    api_key: test\n    base_url: %s\n    output_schema: line_protocol_llm_output\nagents:\n  compact:\n    sys_prompt: compact custom instruction\n    llm:\n      model: compact-model\n      api_key: test\n      base_url: %s\n      output_schema: %s\n", server.URL, server.URL, schema)
 			if err := os.WriteFile(path, []byte(yaml), 0600); err != nil {
 				t.Fatal(err)
 			}
@@ -542,7 +542,7 @@ func TestReactRetriesCompactFormatWithUserCorrections(t *testing.T) {
 				}))
 				defer server.Close()
 				path := filepath.Join(t.TempDir(), "retry.yaml")
-				data := fmt.Sprintf("name: react\nlog_level: error\nbase:\n  llm:\n    model: test\n    api_key: test\n    base_url: %s\n    output_schema: line_protocol_llm_output\nagents:\n  compact:\n    llm:\n      model: test\n      api_key: test\n      base_url: %s\n      output_schema: %s\n", server.URL, server.URL, schema)
+				data := fmt.Sprintf("name: react\nlog_level: error\nbase:\n  exploration_budget:\n    initial_turns: 1000\n  llm:\n    model: test\n    api_key: test\n    base_url: %s\n    output_schema: line_protocol_llm_output\nagents:\n  compact:\n    llm:\n      model: test\n      api_key: test\n      base_url: %s\n      output_schema: %s\n", server.URL, server.URL, schema)
 				if err := os.WriteFile(path, []byte(data), 0600); err != nil {
 					t.Fatal(err)
 				}

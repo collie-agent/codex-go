@@ -22,6 +22,38 @@ Multi-agent 模式由 `MultiAgentProcessorOrchestrator` 调度，每个代理复
 
 实现入口：[`internal/agent/orchestrator.go`](internal/agent/orchestrator.go)、[`react.go`](internal/agent/react.go)、[`planner.go`](internal/agent/planner.go)、[`multi_agent.go`](internal/agent/multi_agent.go)、[`multi_agent_react.go`](internal/agent/multi_agent_react.go)、[`internal/config/agent.go`](internal/config/agent.go)。
 
+### 探索预算与实施交接
+
+普通 ReAct、计划中的实施步骤和修改型子代理共用运行时探索预算。探索按模型决策轮次累计，批量调查仍计一轮，新证据、实际修改或重新交接均不清零。模型取得上下文后分类，纯分析任务给出依据后可继续分析；有具体证据证明无需修改时可正常完成。
+
+```yaml
+base:
+  exploration_budget:
+    initial_turns: 12
+    extension_turns: 4
+    max_extensions: 2
+    decision_retries: 1
+    modification_window_turns: 3
+agents:
+  worker1:
+    exploration_budget:
+      initial_turns: 16
+      max_extensions: 0
+      decision_retries: 0
+```
+
+以上为可合入现有配置的片段。`base` 设置默认策略，`agents` 按实际配置名称逐字段覆盖；普通 ReAct 和计划实施步骤使用 `react`，多代理使用各节点名称。显式零次延期或纠错有效。不同计划步骤、不同委派及独立调用拥有独立额度；同一未完成实例恢复沿用已保存策略、消耗、延期、纠错及修改窗口，修改 YAML 不刷新其预算。
+
+额度耗尽时必须独立提交实施、申请延期或无法完成决策，运行时校验和保存后下一轮才执行工具；同一响应中的工具及调度委派不会执行。延期需说明具体缺口、阻塞原因、定向调查和补齐条件，由运行时在次数和总预算内审批。实施交接需包含目标文件、预期变更、已有证据和下一项操作，默认三个业务决策轮内取得可确认目标变化。重复交接不刷新窗口，窗口不赠送探索额度；调用命令或声明修改不能替代文件变化证据。
+
+普通输出使用 `exploration`；多代理使用 `result.exploration`，阶段响应省略业务 `status`、`answer` 并令 `next` 为空。Line Protocol 在相应的 `RESULT` 内放置 `EXPLORATION` 块，多代理需要放在内层 `RESULT` 中。例如：
+
+```json
+{"result":{"exploration":{"task_type":"modification","basis":"用户要求修复返回值","choice":"implement","target_files":["main.go"],"target":"修正返回值","evidence":"已读取错误分支","next_operation":"应用补丁"}},"next":[]}
+```
+
+真实修改后，支持的 `go test` 命令和对已确认目标的 `git diff -- <paths>` 核验不扣探索；重新调查源码仍扣探索，无法识别用途的命令保守按调查处理。默认最多 20 轮探索，整个实例仍受现有总决策预算和停滞机制限制。失败收尾保留确认变更、验证记录、未完成条件和停止原因；worker 的预算失败作为结构化失败报告交给调用者，工具结果未知或保存失败则停止自动执行。日志包含执行实例、任务类型、阶段、累计探索额度、延期次数、窗口余量及拒绝／停止原因。
+
 ### Model Runtime / LLM Adapter（模型层）
 
 模型层通过 OpenAI Go SDK 对接 Responses API 及兼容接口，将与 provider 无关的 `ModelRequest` 转换为模型请求，并将 MCP 工具定义转换为原生函数工具。工具调用与返回按调用 ID 配对，供后续请求重放。流式与非流式请求共享输出处理逻辑；流式正文可实时输出，工具调用在响应完成后统一处理。

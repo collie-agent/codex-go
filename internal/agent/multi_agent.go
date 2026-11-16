@@ -205,7 +205,8 @@ func (r *multiAgentRun) execute(task DelegatedTask, parent AgentID, upstream []D
 		if err != nil {
 			return MultiAgentResult{}, err
 		}
-		if parent == "" && !hasNonEmptyItems(task.CompletionCriteria) {
+		// 可信失败可发生在入口生成标准之前，仍须保留失败结果。
+		if parent == "" && result.Result.Status != FailedReactStatus && !hasNonEmptyItems(task.CompletionCriteria) {
 			if !hasNonEmptyItems(result.EntryCompletionCriteria) {
 				return MultiAgentResult{}, fmt.Errorf("multi-agent: entry requires entry_completion_criteria on first response")
 			}

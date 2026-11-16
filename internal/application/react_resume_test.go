@@ -290,7 +290,20 @@ func TestResumeReactPreservesIncrementalCompactionAndOriginalEvidence(t *testing
 		writeResult(w, `{"status":"completed","answer":"done"}`)
 	}))
 	defer server.Close()
-	result, err := application.Resume(ctx, application.Options{RunID: run.RunID, ConfigPath: agentConfig(t, server.URL), Timeout: time.Second, Stderr: io.Discard})
+	// 此场景专门验证长历史压缩恢复，为历史调查显式提供足够探索额度。
+	configPath := agentConfig(t, server.URL)
+	configFile, err := os.OpenFile(configPath, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := configFile.WriteString("  react:\n    exploration_budget:\n      initial_turns: 1000\n"); err != nil {
+		_ = configFile.Close()
+		t.Fatal(err)
+	}
+	if err := configFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	result, err := application.Resume(ctx, application.Options{RunID: run.RunID, ConfigPath: configPath, Timeout: time.Second, Stderr: io.Discard})
 	if err != nil || len(result) != 1 || result[0].Answer != "done" || reasoning != 2 || compactions < 1 {
 		t.Fatalf("result=%+v compact=%d reasoning=%d err=%v", result, compactions, reasoning, err)
 	}

@@ -16,6 +16,7 @@ import (
 	"sync"
 
 	"github.com/collie-agent/codex-go/internal/config"
+	state "github.com/collie-agent/codex-go/internal/context"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -434,6 +435,19 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 		}
 		var finalResult T
 		if strings.TrimSpace(document) != "" && outputParser.Parse(document, &finalResult) == nil {
+			// 阶段决策由 ReAct 运行时单独校验、持久化并丢弃同响应工具。
+			// 普通最终结果仍与工具互斥，不能在产生副作用后宣称完成。
+			var decision *state.ReactResult
+			switch value := any(finalResult).(type) {
+			case state.ReactResult:
+				decision = &value
+			case state.MultiAgentResult:
+				decision = &value.Result
+			}
+			if decision != nil && decision.Exploration != nil && decision.Status == "" {
+				return finalResult, toolCalls, text, nil
+			}
+
 			rejection := errors.New("response contains both a final result and tool calls; the rejected tool batch was not executed. Return only the final result if the task is complete, or only tool calls with optional explanatory text if more work is needed")
 			for _, call := range toolCalls {
 				c.emitOutput(ctx, taskId, OutputToolError, ToolResultOutput{Name: call.Name, CallID: call.CallID, Error: rejection.Error()})

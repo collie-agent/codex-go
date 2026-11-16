@@ -1,0 +1,305 @@
+package agent
+
+import (
+	"encoding/json"
+
+	state "github.com/collie-agent/codex-go/internal/context"
+	filemcp "github.com/collie-agent/codex-go/internal/mcp"
+	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+// 仅识别有明确语法的业务操作；解释器、项目脚本和未知选项保守计为调查。
+func explorationPurpose(param *sdk.CallToolParams) string {
+	switch param.Name {
+	case "apply_patch":
+		return "modification"
+	case "exec", "exec_start":
+		raw, _ := json.Marshal(param.Arguments)
+		var args struct {
+			Command string
+			Args    []string
+		}
+		if json.Unmarshal(raw, &args) != nil {
+			return "investigation"
+		}
+		return filemcp.CommandPurpose(args.Command, args.Args)
+	case "exec_poll", "exec_stop", "read_tool_result":
+		return "verification"
+	}
+	return "investigation"
+}
+
+// 批次是并行调用的证据边界；不把净变化归因到某一个命令。
+type explorationAccounting struct {
+	Batch      int
+	Handoff    int
+	Applied    bool
+	SinceBatch int `json:",omitempty"`
+	Purpose    string
+	Calls      map[string]string
+	Before     map[string]targetSnapshot `json:",omitempty"`
+	After      map[string]targetSnapshot `json:",omitempty"`
+	Outcome    string
+}
+
+// 同一批次的测试可能生成目标文件，不能将净变化归因于并行的修改操作。
+// 用途来自运行时分类；进程轮询沿用启动用途，恢复无需重读工作区。
+func (r *explorationAccounting) hasVerificationCommand(completed []*state.ToolResult) bool {
+	for _, call := range completed {
+		if !isCommandProgressTool(call.ToolName) {
+			continue
+		}
+		if r.Calls[call.ToolCallId] == "verification" {
+			return true
+		}
+		if call.ToolName == "exec" || call.ToolName == "exec_start" {
+			var args struct {
+				Command string
+				Args    []string
+			}
+			if json.Unmarshal([]byte(call.Arguments), &args) == nil && filemcp.CommandPurpose(args.Command, args.Args) == "verification" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// 检查点回调和正常完成共享相同的证据可信度规则。
+func (r *explorationAccounting) updateOutcome(completed []*state.ToolResult) {
+	r.Outcome = "known"
+	if !modificationBatchKnown(completed) {
+		r.Outcome = "unknown"
+	}
+	if r.Before != nil && r.hasVerificationCommand(completed) {
+		r.Outcome = "unknown"
+	}
+	for path, before := range r.Before {
+		if !before.Known || !r.After[path].Known {
+			r.Outcome = "unknown"
+		}
+	}
+}
+
+// 只重放落盘的批次前后证据，绝不使用恢复时的工作区推断过去的修改。
+// Applied 与阶段一起保存，使多次恢复既不重复确认，也不刷新修改窗口。
+func (e *explorationState) reconcile(completed []*state.ToolResult) {
+	if len(completed) == 0 {
+		return
+	}
+	for i := range e.Accounting {
+		record := &e.Accounting[i]
+		if record.Batch != completed[0].Batch || record.Applied {
+			continue
+		}
+		if record.Outcome == "known" {
+			record.updateOutcome(completed)
+		}
+		if record.Outcome == "known" && record.Handoff > 0 && record.Handoff == len(e.Handoffs) && e.Phase == "implement" && modificationBatchKnown(completed) && (modificationBatchCandidate(completed) || record.SinceBatch > 0) {
+			e.confirmModification(record.Before, record.After, record.Batch)
+		}
+		if record.Outcome == "pending" {
+			record.Outcome = "unknown"
+		}
+		record.Applied = true
+	}
+}
+
+// 进程已结束时保存从启动到退出的批次基准；恢复只消费证据，不重连旧进程。
+func (e *explorationState) captureSessionBaseline(completed []*state.ToolResult, record *explorationAccounting) {
+	for _, call := range completed {
+		if call.ToolName != "exec_poll" && call.ToolName != "exec_stop" {
+			continue
+		}
+		var query struct {
+			SessionID string `json:"session_id"`
+		}
+		if json.Unmarshal([]byte(call.Arguments), &query) != nil {
+			continue
+		}
+		if baseline, ok := e.SessionBaselines[query.SessionID]; ok && modificationBatchKnown([]*state.ToolResult{call}) {
+			record.Before = baseline.Targets
+			record.SinceBatch = baseline.Batch
+		}
+	}
+}
+
+func (e *explorationState) batchPurpose(params []*sdk.CallToolParams) (string, map[string]string) {
+	purpose := "verification"
+	calls := make(map[string]string)
+	for _, param := range params {
+		next := explorationPurpose(param)
+		if e.verifiesModifiedTargets(param) {
+			next = "verification"
+		}
+		if param.Name == "exec_poll" || param.Name == "exec_stop" {
+			raw, _ := json.Marshal(param.Arguments)
+			var query struct {
+				SessionID string `json:"session_id"`
+			}
+			_ = json.Unmarshal(raw, &query)
+			next = e.SessionPurposes[query.SessionID]
+			if next == "" {
+				next = "investigation"
+			}
+		}
+		if param.Name == "read_tool_result" {
+			raw, _ := json.Marshal(param.Arguments)
+			var query struct {
+				CallID string `json:"call_id"`
+			}
+			_ = json.Unmarshal(raw, &query)
+			next = "investigation"
+			for i := len(e.Accounting) - 1; i >= 0; i-- {
+				if original, ok := e.Accounting[i].Calls[query.CallID]; ok {
+					next = original
+					break
+				}
+			}
+		}
+		id, _ := param.Meta[toolCallIDMetaKey].(string)
+		calls[id] = next
+		if next == "investigation" {
+			purpose = next
+		} else if next == "modification" && purpose != "investigation" {
+			purpose = next
+		}
+	}
+	return purpose, calls
+}
+
+func (e *explorationState) recordCommandSessions(completed []*state.ToolResult, calls map[string]string, before map[string]targetSnapshot, batch int) {
+	for _, call := range completed {
+		if call.ToolName != "exec_start" {
+			continue
+		}
+		var out struct {
+			SessionID string `json:"session_id"`
+		}
+		if commandResultPayload(call, &out) && out.SessionID != "" {
+			if e.SessionPurposes == nil {
+				e.SessionPurposes = make(map[string]string)
+			}
+			e.SessionPurposes[out.SessionID] = calls[call.ToolCallId]
+			if before != nil && !(&explorationAccounting{Calls: calls}).hasVerificationCommand(completed) && modificationBatchCandidate([]*state.ToolResult{call}) {
+				if e.SessionBaselines == nil {
+					e.SessionBaselines = make(map[string]sessionModificationBaseline)
+				}
+				e.SessionBaselines[out.SessionID] = sessionModificationBaseline{Batch: batch, Targets: before}
+			}
+		}
+	}
+}
+
+func modificationBatchKnown(completed []*state.ToolResult) bool {
+	for _, call := range completed {
+		if !isCommandProgressTool(call.ToolName) {
+			continue
+		}
+		var out struct {
+			ErrorKind string `json:"error_kind"`
+			State     string `json:"state"`
+			ExitCode  *int   `json:"exit_code"`
+		}
+		if !commandResultPayload(call, &out) || out.ErrorKind != "" || out.ExitCode == nil || out.State == "running" {
+			return false
+		}
+	}
+	return true
+}
+
+// 只读调查和测试即便碰巧伴随目标变化，也不构成实施操作。
+// 未知解释器仍需扣探索；其成功执行后的目标净变化才是证据。
+func modificationBatchCandidate(completed []*state.ToolResult) bool {
+	for _, call := range completed {
+		if call.ToolName == "apply_patch" {
+			return true
+		}
+		if call.ToolName != "exec" && call.ToolName != "exec_start" {
+			continue
+		}
+		var args struct {
+			Command string
+			Args    []string
+		}
+		if json.Unmarshal([]byte(call.Arguments), &args) != nil {
+			continue
+		}
+		if filemcp.CommandPurpose(args.Command, args.Args) == "verification" {
+			continue
+		}
+		switch args.Command {
+		case "rg", "grep", "find", "go", "cargo", "rustc":
+			continue
+		case "sed":
+			if len(args.Args) == 0 || args.Args[0] != "-i" {
+				continue
+			}
+		case "git":
+			if len(args.Args) == 0 {
+				continue
+			}
+			switch args.Args[0] {
+			case "diff", "status", "show", "log", "ls-files", "grep":
+				continue
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// 仅核验本实例已有实际修改证据的精确路径；全仓 diff 和历史调查仍计探索。
+func (e *explorationState) verifiesModifiedTargets(param *sdk.CallToolParams) bool {
+	if param.Name != "exec" || !e.ModificationConfirmed {
+		return false
+	}
+	raw, _ := json.Marshal(param.Arguments)
+	var args struct {
+		Command string
+		Args    []string
+	}
+	if json.Unmarshal(raw, &args) != nil || args.Command != "git" || len(args.Args) < 3 || args.Args[0] != "diff" || args.Args[1] != "--" {
+		return false
+	}
+	for _, path := range args.Args[2:] {
+		found := false
+		for _, evidence := range e.ModificationEvidence {
+			if evidence.Path == path {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+type sessionModificationBaseline struct {
+	Batch   int
+	Targets map[string]targetSnapshot
+}
+
+func (e *explorationState) confirmSessionModification(completed []*state.ToolResult, after map[string]targetSnapshot, record *explorationAccounting) {
+	for _, call := range completed {
+		if call.ToolName != "exec_poll" && call.ToolName != "exec_stop" {
+			continue
+		}
+		var query struct {
+			SessionID string `json:"session_id"`
+		}
+		if json.Unmarshal([]byte(call.Arguments), &query) != nil {
+			continue
+		}
+		baseline, ok := e.SessionBaselines[query.SessionID]
+		if !ok || !modificationBatchKnown([]*state.ToolResult{call}) {
+			continue
+		}
+		record.Before = baseline.Targets
+		record.SinceBatch = baseline.Batch
+		e.confirmModification(baseline.Targets, after, record.Batch)
+		delete(e.SessionBaselines, query.SessionID)
+	}
+}

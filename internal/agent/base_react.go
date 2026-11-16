@@ -28,19 +28,20 @@ const toolCallIDMetaKey = "call_id"
 // BaseReactProcess 复用 ReAct 执行机制；具体 Process 决定配置、上下文和结果契约。
 // MCP 会话归一次 Run 所有，结束时关闭；Process 不可并发运行或重复使用。
 type BaseReactProcess[T LLMSchema] struct {
-	fileProgressPolicy FileProgressPolicy
-	ctx                context.Context
-	maxTurn            int
-	toolConfig         filemcp.Config
-	mcpClientSess      *mcpSdk.ClientSession
-	serverSess         *mcpSdk.ServerSession
-	closeTools         func()
-	checkpoint         func() error
-	executionMu        sync.Mutex
-	executionErr       error
-	checkpointErr      error
-	skills             []Skill
-	output             provider.Outputer
+	fileProgressPolicy     FileProgressPolicy
+	ctx                    context.Context
+	maxTurn                int
+	toolConfig             filemcp.Config
+	mcpClientSess          *mcpSdk.ClientSession
+	serverSess             *mcpSdk.ServerSession
+	closeTools             func()
+	checkpoint             func() error
+	executionMu            sync.Mutex
+	executionErr           error
+	checkpointErr          error
+	beforeResultCheckpoint func() error
+	skills                 []Skill
+	output                 provider.Outputer
 }
 
 // 最大轮数固定在代码中，避免任务通过配置无限延长。
@@ -210,12 +211,34 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 	if err != nil {
 		return zero, nil, err
 	}
+	// 通过结果适配器统一普通、计划步骤与多代理的探索状态；观察器不启用预算。
+	explorationEnabled := progressResult(&zero) != nil
+	legacyExploration := budget.Exploration == nil && (len(durableState.ExecutionProgress) > 0 || len(durableState.ToolExecutions) > 0)
+	if explorationEnabled && budget.Exploration == nil {
+		policy := agentConfig.ExplorationBudget
+		if policy.InitialTurns == 0 {
+			policy = config.DefaultExplorationBudget()
+		}
+		budget.Exploration = &explorationState{Policy: policy, Phase: "exploring", Used: budget.UsedTurns}
+	}
+
+	if explorationEnabled {
+		e := budget.Exploration
+		log.Printf("[INFO] [react] instance=%s restore=%t legacy_exploration=%t initial_turns=%d extension_turns=%d max_extensions=%d decision_retries=%d modification_window_turns=%d task_type=%s phase=%s exploration=%d/%d extensions=%d invalid=%d modification_left=%d remaining_total=%d", durableState.ExecutionID, len(durableState.ExecutionProgress) > 0 || len(durableState.ToolExecutions) > 0, legacyExploration, e.Policy.InitialTurns, e.Policy.ExtensionTurns, e.Policy.MaxExtensions, e.Policy.DecisionRetries, e.Policy.ModificationWindowTurns, e.TaskType, e.Phase, e.Used, e.allowance(), e.Extensions, e.Invalid, e.ModificationLeft, r.maxTurn-budget.UsedTurns)
+		// 新 MCP 连接不继承旧进程身份；历史批次仍保留核验依据。
+		budget.Exploration.SessionPurposes = nil
+		budget.Exploration.SessionBaselines = nil
+	}
+
 	if budget.RecoveryActive && budget.Correction != "" {
 		worker.corrections = append(worker.corrections, budget.Correction)
 	}
 	finish := func(reason string) (T, []AgentProcessorType, error) {
 		if r.checkpointErr != nil {
 			return zero, nil, r.checkpointErr
+		}
+		if e := budget.Exploration; explorationEnabled && e != nil {
+			log.Printf("[INFO] [react] instance=%s task_type=%s phase=%s exploration=%d/%d extensions=%d modification_left=%d stop=%q", durableState.ExecutionID, e.TaskType, e.Phase, e.Used, e.allowance(), e.Extensions, e.ModificationLeft, reason)
 		}
 		return r.finishProgress(worker, modelContext, durableState, budget, reason, progressResult)
 	}
@@ -252,6 +275,12 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 			end++
 		}
 		batch := durableState.ToolExecutions[start:end]
+		if explorationEnabled {
+			budget.Exploration.reconcile(batch)
+			if err := saveDecisionProgress(durableState, budget, r.checkpoint); err != nil {
+				return zero, nil, err
+			}
+		}
 		if batch[0].Batch > budget.ObservedThroughBatch { //resume时只处理未observe progress的批次tool execution
 			if err := observeProgress(BatchEvidence{Completed: batch}, r.maxTurn-budget.UsedTurns-1); err != nil {
 				return finish(err.Error())
@@ -269,8 +298,25 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 		}
 	}
 	for i := 1; i <= r.maxTurn; i++ {
+		if budget.Finalizing || budget.UsedTurns >= r.maxTurn-1 {
+			return finish("maximum decision budget exhausted")
+		}
+		if explorationEnabled && budget.Exploration.Pending && budget.Exploration.Invalid > budget.Exploration.Policy.DecisionRetries {
+			return finish("exploration decision corrections exhausted: " + budget.Exploration.Rejection)
+		}
+		if explorationEnabled && budget.Exploration.Phase == "unable" {
+			reason := "saved unable decision"
+			if handoff := budget.Exploration.Handoff; handoff != nil {
+				reason = "unable: " + handoff.Reason + "; confirmed execution state: " + handoff.ExecutionState
+			}
+			return finish(reason)
+		}
+		if explorationEnabled && budget.Exploration.Phase == "implement" && budget.Exploration.ModificationLeft <= 0 {
+			return finish("modification window exhausted without confirmed target change")
+		}
 		// 同轮纠错不推进过期边界；恢复时保留最近三批目录检索结果。
 		transient.minimumBatch = batchOffset + i - discoveryResultDecisionTurns
+		explorationCharged := false
 		var result T
 		var toolParams []*mcpSdk.CallToolParams
 		// 格式纠错留在当前轮，避免最后一轮的可恢复错误直接耗尽执行预算。
@@ -286,14 +332,30 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 				worker.inputTokens = 0 // 旧模型视图的 usage 不再用于触发压缩。
 			}
 			decisionContext := modelContext
+			if explorationEnabled {
+				request := modelContext.ModelRequest()
+				e := budget.Exploration
+				request.SystemPrompt += "\n" + explorationInstructions
+				request.SystemPrompt += fmt.Sprintf("\nExploration state: instance=%s task_type=%s phase=%s used=%d/%d decision_required=%t extensions=%d rejection=%q modification_left=%d handoff=%d", durableState.ExecutionID, e.TaskType, e.Phase, e.Used, e.allowance(), e.required(), e.Extensions, e.Rejection, e.ModificationLeft, len(e.Handoffs))
+				decisionContext = frozenCompactContext{Contexter: modelContext, request: request}
+			}
 			if len(cachedDuplicates) > 0 {
 				// 缓存回传属于上一轮的协议响应，放在裁剪和压缩之后，且不写入实际执行历史。
-				request := modelContext.ModelRequest()
+				request := decisionContext.ModelRequest()
 				request.ToolResults = append(slices.Clone(request.ToolResults), cachedDuplicates...)
 				decisionContext = frozenCompactContext{Contexter: modelContext, request: request}
 			}
 			if budget.Finalizing || budget.UsedTurns >= r.maxTurn-1 {
 				return finish("maximum decision budget exhausted")
+			}
+			if explorationEnabled {
+				e := budget.Exploration
+				explorationCharged = e.TaskType != "analysis" && !e.required() && e.Phase != "implement"
+				if explorationCharged {
+					e.Used++
+				}
+
+				log.Printf("[INFO] [react] instance=%s task_type=%s phase=%s exploration=%d/%d extensions=%d rejection=%q modification_left=%d handoff=%d", durableState.ExecutionID, e.TaskType, e.Phase, e.Used, e.allowance(), e.Extensions, e.Rejection, e.ModificationLeft, len(e.Handoffs))
 			}
 			budget.UsedTurns++
 			if err := saveDecisionProgress(durableState, budget, r.checkpoint); err != nil {
@@ -302,6 +364,25 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 			result, _, toolParams, err = worker.Run(decisionContext)
 			if err == nil {
 				break
+			}
+			// 阈值处的协议错误也属于阶段纠错，不能借通用格式重试扩大额度。
+			if explorationEnabled && !explorationCharged && budget.Exploration.required() {
+				var parseErr *provider.OutputParseError
+				var toolErr *toolCallError
+				if errors.As(err, &parseErr) || errors.As(err, &toolErr) {
+					e := budget.Exploration
+					e.Invalid++
+					e.Pending = true
+					e.Rejection = err.Error()
+					if saveErr := saveDecisionProgress(durableState, budget, r.checkpoint); saveErr != nil {
+						return zero, nil, saveErr
+					}
+					if e.Invalid > e.Policy.DecisionRetries {
+						return finish("exploration decision corrections exhausted: " + err.Error())
+					}
+					worker.corrections = append(worker.corrections, "Exploration decision rejected: "+err.Error())
+					continue
+				}
 			}
 			var callErr *toolCallError
 			if errors.As(err, &callErr) {
@@ -326,6 +407,58 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 			worker.corrections = append(worker.corrections, outputFormatCorrection(durableState.RunId, "react", formatErrors, err, parseErr))
 		}
 		cachedDuplicates = nil
+		if explorationEnabled {
+			e := budget.Exploration
+			value := progressResult(&result)
+			// 本轮预扣的最后一个探索额度仍允许执行；下一轮才要求独立决策。
+			batchPurpose, _ := e.batchPurpose(toolParams)
+			// 已确认修改后的测试及完成不申请新的探索；普通调查仍受阈值门禁。
+			verification := len(toolParams) > 0 && batchPurpose == "verification"
+			completion := len(toolParams) == 0 && value.Status == CompletedReactStatus && e.ModificationConfirmed
+			required := e.required() && !explorationCharged && !(!e.Pending && (verification || completion))
+			if value.Exploration != nil || required {
+				if value.Exploration != nil && explorationCharged {
+					e.Used--
+				}
+				candidate := *e
+				reason, decisionErr := candidate.decide(value.Exploration, r.maxTurn-budget.UsedTurns-1)
+				if decisionErr == nil {
+					*e = candidate
+					e.Pending = false
+				}
+				if decisionErr != nil {
+					e.Rejection = decisionErr.Error()
+					e.Invalid++
+					e.Pending = true
+					worker.corrections = append(worker.corrections, "Exploration decision rejected: "+decisionErr.Error())
+				}
+				log.Printf("[INFO] [react] instance=%s task_type=%s phase=%s exploration=%d/%d extensions=%d rejection=%q modification_left=%d handoff=%d decision_error=%v stop=%s", durableState.ExecutionID, e.TaskType, e.Phase, e.Used, e.allowance(), e.Extensions, e.Rejection, e.ModificationLeft, len(e.Handoffs), decisionErr, reason)
+				if err := saveDecisionProgress(durableState, budget, r.checkpoint); err != nil {
+					return zero, nil, err
+				}
+				if decisionErr != nil && e.Invalid > e.Policy.DecisionRetries {
+					return finish("exploration decision corrections exhausted: " + decisionErr.Error())
+				}
+				if reason != "" {
+					return finish(reason)
+				}
+				continue
+			}
+		}
+		batchPurpose, batchCalls := "investigation", map[string]string(nil)
+		if explorationEnabled {
+			batchPurpose, batchCalls = budget.Exploration.batchPurpose(toolParams)
+		}
+		if explorationEnabled && explorationCharged && batchPurpose != "investigation" {
+			budget.Exploration.Used--
+			explorationCharged = false
+			if err := saveDecisionProgress(durableState, budget, r.checkpoint); err != nil {
+				return zero, nil, err
+			}
+		}
+		if explorationEnabled && budget.Exploration.Phase == "implement" && !budget.Exploration.ModificationConfirmed && len(toolParams) == 0 {
+			return finish("implementation handoff has no confirmed target modification")
+		}
 		if len(toolParams) == 0 {
 			validationErr := validate(result)
 			terminal := validationErr == nil
@@ -350,6 +483,28 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 				return result, nil, validationErr
 			}
 			return result, []AgentProcessorType{EndAgentType}, nil
+		}
+		if explorationEnabled {
+			e := budget.Exploration
+			if e.Phase == "implement" && batchPurpose == "investigation" && e.TaskType != "analysis" {
+				if e.Used >= e.allowance() {
+					return finish("exploration allowance exhausted; implementation requires existing evidence or an extension")
+				}
+				e.Used++
+			}
+			e.Accounting = append(e.Accounting, explorationAccounting{Batch: batchOffset + i, Handoff: len(e.Handoffs), Purpose: batchPurpose, Calls: batchCalls, Outcome: "pending"})
+			if len(e.Accounting) > 256 {
+				e.Accounting = e.Accounting[len(e.Accounting)-256:]
+			}
+			if err := saveDecisionProgress(durableState, budget, r.checkpoint); err != nil {
+				return zero, nil, err
+			}
+		}
+		if explorationEnabled && budget.Exploration.Phase == "implement" {
+			budget.Exploration.ModificationLeft--
+			if err := saveDecisionProgress(durableState, budget, r.checkpoint); err != nil {
+				return zero, nil, err
+			}
 		}
 		// 在登记和执行前移除重复项，也覆盖模型同一批返回的重复调用。
 		pending := toolParams[:0]
@@ -400,6 +555,13 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 		}
 		toolParams = pending
 		if len(toolParams) == 0 {
+			if explorationEnabled {
+				e := budget.Exploration
+				e.Accounting[len(e.Accounting)-1].Outcome = "cached"
+				if err := saveDecisionProgress(durableState, budget, r.checkpoint); err != nil {
+					return zero, nil, err
+				}
+			}
 			hasFile := false
 			for _, call := range cachedDuplicates {
 				if call.ToolName == string(config.ReadFileMCPToolName) || call.ToolName == string(config.ReadToolResultMCPToolName) || call.ToolName == string(config.GrepMCPToolName) || call.ToolName == string(config.GlobMCPToolName) || isCommandProgressTool(call.ToolName) {
@@ -420,6 +582,15 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 			continue
 		}
 		consecutiveDuplicates = 0
+		var modificationBefore map[string]targetSnapshot
+		if explorationEnabled && budget.Exploration.Phase == "implement" {
+			e := budget.Exploration
+			modificationBefore = snapshotModificationTargets(r.toolConfig.Workspace, e)
+			e.Accounting[len(e.Accounting)-1].Before = modificationBefore
+			if err := saveDecisionProgress(durableState, budget, r.checkpoint); err != nil {
+				return zero, nil, err
+			}
+		}
 		if durableState.ExecutionID != "" {
 			for position, param := range toolParams {
 				args, err := json.Marshal(param.Arguments)
@@ -471,7 +642,34 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 			}
 		}
 		historyOffset := len(durableState.ToolExecutions)
+		if explorationEnabled {
+			// 最后一个兄弟调用的结果与批次快照一起落盘；阶段确认可以随后补偿。
+			r.beforeResultCheckpoint = func() error {
+				e := budget.Exploration
+				record := &e.Accounting[len(e.Accounting)-1]
+				var completed []*fileContext.ToolResult
+				for _, call := range durableState.ToolExecutions {
+					if call.Batch != record.Batch {
+						continue
+					}
+					if call.Status == "" {
+						return nil
+					}
+					completed = append(completed, call)
+				}
+				if len(completed) == 0 {
+					return nil
+				}
+				e.captureSessionBaseline(completed, record)
+				if record.Before != nil {
+					record.After = snapshotModificationTargets(r.toolConfig.Workspace, e)
+				}
+				record.updateOutcome(completed)
+				return saveDecisionProgress(durableState, budget, nil)
+			}
+		}
 		r.batchToolCallings(toolParams, rc, agentConfig)
+		r.beforeResultCheckpoint = nil
 		// 有执行实例时，调用已预登记；否则结果由上下文直接追加。
 		var completed []*fileContext.ToolResult
 		ids := make(map[string]bool)
@@ -487,6 +685,32 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 				completed = append(completed, call)
 			}
 		}
+		if explorationEnabled && r.executionErr == nil {
+			e := budget.Exploration
+			e.recordCommandSessions(completed, batchCalls, modificationBefore, batchOffset+i)
+			record := &e.Accounting[len(e.Accounting)-1]
+			if modificationBefore != nil && record.After == nil {
+				record.After = snapshotModificationTargets(r.toolConfig.Workspace, e)
+			}
+			e.captureSessionBaseline(completed, record)
+			record.updateOutcome(completed)
+			if record.hasVerificationCommand(completed) {
+				// 测试与仍在运行的修改进程可能重叠，旧启动基准不再能区分变更来源。
+				e.SessionBaselines = nil
+			}
+			if modificationBefore != nil && record.Outcome == "known" {
+				if modificationBatchCandidate(completed) {
+					e.confirmModification(modificationBefore, record.After, batchOffset+i)
+				}
+				e.confirmSessionModification(completed, record.After, record)
+			}
+			log.Printf("[INFO] [react] instance=%s exploration=%d/%d batch=%d since_batch=%d purpose=%s calls=%v outcome=%s confirmed=%t evidence=%v", durableState.ExecutionID, e.Used, e.allowance(), record.Batch, record.SinceBatch, record.Purpose, record.Calls, record.Outcome, e.ModificationConfirmed, e.ModificationEvidence)
+			record.Applied = true
+			if err := saveDecisionProgress(durableState, budget, r.checkpoint); err != nil {
+				return zero, nil, err
+			}
+		}
+
 		failedExecs.observe(completed)
 		if r.executionErr == nil {
 			if err := observeProgress(BatchEvidence{Completed: completed, Cached: cachedDuplicates}, r.maxTurn-i); err != nil {
@@ -525,6 +749,9 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 		}
 		if r.executionErr != nil {
 			return zero, nil, r.executionErr
+		}
+		if explorationEnabled && budget.Exploration.Phase == "implement" && budget.Exploration.ModificationLeft == 0 {
+			return finish("modification window exhausted without confirmed target change")
 		}
 		if durableState.ExecutionID != "" {
 			rc.UpdateToolResults(func(_ []*fileContext.ToolResult) []*fileContext.ToolResult {
@@ -713,7 +940,12 @@ func (r *BaseReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, t
 		// Unknown outcomes stop scheduling, but must not suppress confirmed sibling
 		// results. A persistence failure, however, must never be retried here.
 		if callResult != nil && r.checkpoint != nil && r.checkpointErr == nil {
-			r.checkpointErr = r.checkpoint()
+			if r.beforeResultCheckpoint != nil {
+				r.checkpointErr = r.beforeResultCheckpoint()
+			}
+			if r.checkpointErr == nil {
+				r.checkpointErr = r.checkpoint()
+			}
 			r.executionErr = errors.Join(r.executionErr, r.checkpointErr)
 		}
 	}

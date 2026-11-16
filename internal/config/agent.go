@@ -11,16 +11,38 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type ExplorationBudget struct {
+	ExtensionTurns          int `json:"extension_turns"`
+	MaxExtensions           int `json:"max_extensions"`
+	ModificationWindowTurns int `json:"modification_window_turns"`
+	InitialTurns            int `json:"initial_turns"`
+	DecisionRetries         int `json:"decision_retries"`
+}
+
+// DefaultExplorationBudget returns the policy for a new execution instance.
+func DefaultExplorationBudget() ExplorationBudget {
+	return ExplorationBudget{InitialTurns: 12, DecisionRetries: 1, ExtensionTurns: 4, MaxExtensions: 2, ModificationWindowTurns: 3}
+}
+
+type yamlExplorationBudget struct {
+	ExtensionTurns          *int `yaml:"extension_turns"`
+	MaxExtensions           *int `yaml:"max_extensions"`
+	ModificationWindowTurns *int `yaml:"modification_window_turns"`
+	InitialTurns            *int `yaml:"initial_turns"`
+	DecisionRetries         *int `yaml:"decision_retries"`
+}
+
 type AgentConfig struct {
-	Name       string
-	LogLevel   LogLevel
-	LogDir     string
-	Global     *GlobalConfig
-	LLMConfig  *LLMConfig
-	AllowTools map[McpToolName]struct{}
-	SysPrompt  string
-	MultiAgent *MultiAgentConfig
-	NextAgents []string
+	ExplorationBudget ExplorationBudget
+	Name              string
+	LogLevel          LogLevel
+	LogDir            string
+	Global            *GlobalConfig
+	LLMConfig         *LLMConfig
+	AllowTools        map[McpToolName]struct{}
+	SysPrompt         string
+	MultiAgent        *MultiAgentConfig
+	NextAgents        []string
 
 	// configs stores independent resolved values so one processor cannot mutate another's settings.
 	configs           map[string]*AgentConfig
@@ -66,6 +88,7 @@ func cloneAgentConfig(c *AgentConfig) *AgentConfig {
 	}
 	clone := &AgentConfig{NextAgents: append([]string(nil), c.NextAgents...), MultiAgent: c.MultiAgent, Name: c.Name, LogDir: c.LogDir, LogLevel: c.LogLevel, SysPrompt: c.SysPrompt, LLMConfig: nil, AllowTools: make(map[McpToolName]struct{}, len(c.AllowTools))}
 	// 全局设置由整个运行共享，不参与 agent 独立配置的复制与覆盖。
+	clone.ExplorationBudget = c.ExplorationBudget
 	clone.Global = c.Global
 	clone.agentInstructions = slices.Clone(c.agentInstructions)
 	if c.MultiAgent != nil {
@@ -244,7 +267,31 @@ func resolveConfig(name string, raw yamlAgentSettings, base *AgentConfig) (*Agen
 	if raw.SysPrompt != nil {
 		prompt = *raw.SysPrompt
 	}
-	return &AgentConfig{NextAgents: append([]string(nil), raw.NextAgents...), Name: name, LLMConfig: llm, AllowTools: tools, SysPrompt: prompt}, nil
+	policy := DefaultExplorationBudget()
+	if base != nil {
+		policy = base.ExplorationBudget
+	}
+	if raw.ExplorationBudget != nil {
+		if raw.ExplorationBudget.ExtensionTurns != nil {
+			policy.ExtensionTurns = *raw.ExplorationBudget.ExtensionTurns
+		}
+		if raw.ExplorationBudget.MaxExtensions != nil {
+			policy.MaxExtensions = *raw.ExplorationBudget.MaxExtensions
+		}
+		if raw.ExplorationBudget.ModificationWindowTurns != nil {
+			policy.ModificationWindowTurns = *raw.ExplorationBudget.ModificationWindowTurns
+		}
+		if raw.ExplorationBudget.InitialTurns != nil {
+			policy.InitialTurns = *raw.ExplorationBudget.InitialTurns
+		}
+		if raw.ExplorationBudget.DecisionRetries != nil {
+			policy.DecisionRetries = *raw.ExplorationBudget.DecisionRetries
+		}
+	}
+	if policy.InitialTurns <= 0 || policy.DecisionRetries < 0 || policy.ExtensionTurns <= 0 || policy.MaxExtensions < 0 || policy.ModificationWindowTurns <= 0 {
+		return nil, fmt.Errorf("agents.%s: exploration_budget initial_turns, extension_turns and modification_window_turns must be positive; decision_retries and max_extensions must be non-negative", name)
+	}
+	return &AgentConfig{ExplorationBudget: policy, NextAgents: append([]string(nil), raw.NextAgents...), Name: name, LLMConfig: llm, AllowTools: tools, SysPrompt: prompt}, nil
 }
 
 func resolveLLM(raw yamlLLMConfig) (*LLMConfig, error) {
@@ -309,11 +356,12 @@ type yamlAgentConfig struct {
 	Agents               map[string]*yamlAgentSettings `yaml:"agents"`
 }
 type yamlAgentSettings struct {
-	Instruction *string        `yaml:"instruction"`
-	NextAgents  []string       `yaml:"next_agents"`
-	LLM         *yamlLLMConfig `yaml:"llm"`
-	AllowTools  *[]string      `yaml:"allow_tools"`
-	SysPrompt   *string        `yaml:"sys_prompt"`
+	ExplorationBudget *yamlExplorationBudget `yaml:"exploration_budget"`
+	Instruction       *string                `yaml:"instruction"`
+	NextAgents        []string               `yaml:"next_agents"`
+	LLM               *yamlLLMConfig         `yaml:"llm"`
+	AllowTools        *[]string              `yaml:"allow_tools"`
+	SysPrompt         *string                `yaml:"sys_prompt"`
 }
 type yamlLLMConfig struct {
 	MaxOutputTokens int64  `yaml:"max_output_tokens"`

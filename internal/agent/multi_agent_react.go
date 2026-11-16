@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -60,7 +61,15 @@ func (r *MultiAgentReactProcess) Run(agentConfig *config.AgentConfig, durableSta
 		}
 		return nil
 	}
-	return r.run(agentConfig, durableState, rc, modelContext, validate, nil, r.progressResult)
+	result, next, err := r.run(agentConfig, durableState, rc, modelContext, validate, nil, r.progressResult)
+	// 预算终止与模型 failed 一样是可信业务失败；存储和未知工具结果仍中止调度。
+	var failure *BusinessFailureError
+	if errors.As(err, &failure) {
+		result.Result = failure.Result
+		result.Next = nil
+		return result, nil, nil
+	}
+	return result, next, err
 }
 
 // progressResult 保留多代理输出结构，收尾摘要只写入内层业务结果。

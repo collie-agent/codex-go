@@ -10,6 +10,7 @@ import (
 )
 
 type executionProgress struct {
+	Exploration          *explorationState
 	ExecutionID          string
 	UsedTurns            int
 	Finalizing           bool //是否已经进入最终收尾阶段。在请求模型生成最终失败总结前设为 true
@@ -110,6 +111,7 @@ func (p *executionProgress) capture(g *fileProgressGuard) {
 
 func restoreDecisionProgress(durable *state.DurableState, g *fileProgressGuard) (*executionProgress, error) {
 	p := &executionProgress{ExecutionID: durable.ExecutionID}
+	var counters struct{ UsedTurns *int }
 	if len(durable.ExecutionProgress) > 0 {
 		if err := json.Unmarshal(durable.ExecutionProgress, p); err != nil {
 			return nil, fmt.Errorf("restore execution progress: %w", err)
@@ -117,17 +119,21 @@ func restoreDecisionProgress(durable *state.DurableState, g *fileProgressGuard) 
 		if p.ExecutionID != durable.ExecutionID {
 			return &executionProgress{ExecutionID: durable.ExecutionID}, nil
 		}
-	} else {
-		// Legacy records cannot reveal no-tool decisions. Conservatively charge every
-		// recorded batch and do not invent past completion or recovery evidence.
+		if err := json.Unmarshal(durable.ExecutionProgress, &counters); err != nil {
+			return nil, fmt.Errorf("restore decision counter: %w", err)
+		}
+	}
+	if p.UsedTurns < 0 {
+		return nil, fmt.Errorf("invalid negative decision budget")
+	}
+	// 旧进度可能存在但尚无 UsedTurns 字段。已登记批次是已知消耗的下界，
+	// 不能因为 JSON 解码得到零值就刷新额度，也不猜测未记录的无工具决策。
+	if counters.UsedTurns == nil {
 		batches := make(map[int]bool)
 		for _, call := range durable.ToolExecutions {
 			batches[call.Batch] = true
 		}
 		p.UsedTurns = len(batches)
-	}
-	if p.UsedTurns < 0 {
-		return nil, fmt.Errorf("invalid negative decision budget")
 	}
 	if p.CommandCoverage != nil {
 		g.commandCoverage = p.CommandCoverage
@@ -161,11 +167,24 @@ func (r *BaseReactProcess[T]) finishProgress(worker *Worker[T], modelContext sta
 		reason = progress.StopReason
 	}
 	fallback := ReactResult{Status: FailedReactStatus, Answer: "Execution stopped: " + reason, Observation: []string{"Unfinished goal: " + durable.Goal}}
+	if e := progress.Exploration; e != nil {
+		for _, evidence := range e.ModificationEvidence {
+			fallback.Observation = append(fallback.Observation, fmt.Sprintf("Confirmed target change: %s handoff=%d batch=%d before=%s after=%s", evidence.Path, evidence.Handoff, evidence.Batch, evidence.Before, evidence.After))
+		}
+	}
 	for _, call := range durable.ToolExecutions[max(0, len(durable.ToolExecutions)-32):] {
 		if call.Status == "" {
 			continue
 		}
 		detail := fmt.Sprintf("call_id=%s tool=%s status=%s", call.ToolCallId, call.ToolName, call.Status)
+		if e := progress.Exploration; e != nil {
+			for _, record := range e.Accounting {
+				if record.Batch == call.Batch && record.Calls[call.ToolCallId] == "verification" {
+					fallback.Observation = append(fallback.Observation, "Recorded verification: "+detail+" result="+call.Result[:min(len(call.Result), 2000)]+" error="+call.Error[:min(len(call.Error), 2000)])
+					break
+				}
+			}
+		}
 		if changesWorkspace(call.ToolName) {
 			fallback.Observation = append(fallback.Observation, "Recorded action (effects require verification): "+detail)
 		}

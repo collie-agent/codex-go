@@ -24,6 +24,7 @@ type sessionQuery struct {
 // Timing is server-observed: model latency counts toward elapsed_ms, and
 // waited_ms reports only this poll. Neither polling nor output renews the limit.
 type sessionResult struct {
+	Purpose    string `json:"purpose"`
 	ElapsedMS  int64  `json:"elapsed_ms"`
 	WaitedMS   int64  `json:"waited_ms"`
 	LifetimeMS int64  `json:"lifetime_ms"`
@@ -39,6 +40,7 @@ type sessionResult struct {
 }
 
 type execSession struct {
+	purpose  string
 	started  time.Time
 	lifetime time.Duration
 	mu       sync.Mutex
@@ -111,14 +113,14 @@ func (o *execSessionOwner) close() {
 // as a small state object so each tool can be registered independently while
 // sharing the same connection lifecycle and cleanup.
 type execSessionRegistry struct {
-	mu       sync.Mutex
-	closed   bool
-	owners   map[*sdk.ServerSession]*execSessionOwner
-	workspace string
-	cfg      Config
-	executor *CommandExecutor
+	mu         sync.Mutex
+	closed     bool
+	owners     map[*sdk.ServerSession]*execSessionOwner
+	workspace  string
+	cfg        Config
+	executor   *CommandExecutor
 	startupErr error
-	policy   string
+	policy     string
 }
 
 // ownerFor returns the session owner for connection, creating one on first use.
@@ -183,6 +185,7 @@ func validateSessionCursor(s *execSession, cursor int64) error {
 // current poll; pass time.Now() from right before any optional wait.
 func buildSessionResult(s *execSession, cursor int64, waitStarted time.Time) sessionResult {
 	out := sessionResult{
+		Purpose:    s.purpose,
 		SessionID:  s.id,
 		State:      "running",
 		NextCursor: s.cursor,
@@ -298,7 +301,7 @@ Every successful call creates a new process session, including repeated identica
 		}
 		limit := min(r.cfg.Timeout, 5*time.Minute)
 		lifetime, cancel := context.WithTimeout(context.Background(), limit)
-		s := &execSession{started: time.Now(), lifetime: limit, id: hex.EncodeToString(id[:]), done: make(chan struct{}), changed: make(chan struct{}), cancel: cancel}
+		s := &execSession{purpose: CommandPurpose(args.Command, args.Args), started: time.Now(), lifetime: limit, id: hex.EncodeToString(id[:]), done: make(chan struct{}), changed: make(chan struct{}), cancel: cancel}
 		owner.sessions[s.id] = s
 		go func() {
 			defer cancel()
@@ -309,7 +312,7 @@ Every successful call creates a new process session, including repeated identica
 			close(s.changed)
 			s.mu.Unlock()
 		}()
-		return sessionResponse(sessionResult{SessionID: s.id, State: "running", LifetimeMS: s.lifetime.Milliseconds()})
+		return sessionResponse(sessionResult{Purpose: s.purpose, SessionID: s.id, State: "running", LifetimeMS: s.lifetime.Milliseconds()})
 	})
 }
 

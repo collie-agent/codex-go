@@ -12,6 +12,12 @@ multi-agent:
   # 同时执行的 ReAct 节点数；等待子任务的 supervisor 不占用名额。
   max_parallel: 2
 base:
+  exploration_budget:
+    initial_turns: 12
+    extension_turns: 4
+    max_extensions: 2
+    decision_retries: 1
+    modification_window_turns: 3
   llm:
     # 留空 base_url 时默认使用 https://api.openai.com/v1。
     api_key_env: OPENAI_API_KEY
@@ -42,6 +48,10 @@ agents:
       - worker1
       - worker2
   worker1:
+    # 按实际节点名称逐字段覆盖；显式零表示不授予探索延期。
+    exploration_budget:
+      initial_turns: 16
+      max_extensions: 0
     instruction: |
       你是实现 worker。只处理 delegated_task 中分配给你的目标，不扩大范围。
       需要修改文件时先检查相关内容，只修改完成该任务所需的文件；完成后用可用工具核对修改。
