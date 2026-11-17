@@ -323,7 +323,7 @@ func TestReactSessionWaitRetainsVerifiedCommandPurpose(t *testing.T) {
 	}
 }
 
-func TestReactUnknownSessionCannotGrantFreeInvestigation(t *testing.T) {
+func TestReactUnknownSessionFailureDoesNotConsumeExploration(t *testing.T) {
 	durable, err := runCommandExploration(t, t.TempDir(), [][]any{
 		modificationTool("poll", "exec_poll", map[string]any{"session_id": "invented", "wait_ms": 0}),
 		{observationMessage(`{"status":"completed","answer":"session unavailable"}`)},
@@ -335,8 +335,8 @@ func TestReactUnknownSessionCannotGrantFreeInvestigation(t *testing.T) {
 	if err := json.Unmarshal(durable.ExecutionProgress, &saved); err != nil {
 		t.Fatal(err)
 	}
-	if saved.Exploration.Used != 1 {
-		t.Fatalf("unknown session granted free turn: %s", durable.ExecutionProgress)
+	if len(durable.ToolExecutions) != 1 || durable.ToolExecutions[0].Status != "failed" || saved.Exploration.Used != 0 {
+		t.Fatalf("failed unknown-session call consumed exploration: %s", durable.ExecutionProgress)
 	}
 }
 

@@ -15,12 +15,7 @@ func checkContextFewShots[T any](t *testing.T, ctx fileContext.Contexter, count 
 	t.Helper()
 	jsonSections := strings.Split(ctx.JsonFewShot(), " output:\n")[1:]
 	lineSections := strings.Split(ctx.LineProtocolFewShot(), " output:\n")[1:]
-	// 普通上下文先展示五个通用语法示例；多代理直接展示完整业务文档。
-	formatExamples := 5
-	if _, ok := ctx.(fileContext.MultiAgentModelContext); ok {
-		formatExamples = 0
-	}
-	if len(jsonSections) != count || len(lineSections) != formatExamples+count {
+	if len(jsonSections) != count || len(lineSections) != count {
 		t.Fatalf("unexpected example counts: JSON=%d, Line Protocol=%d", len(jsonSections), len(lineSections))
 	}
 	for i := range jsonSections {
@@ -30,7 +25,7 @@ func checkContextFewShots[T any](t *testing.T, ctx fileContext.Contexter, count 
 		if err := decoder.Decode(&want); err != nil {
 			t.Fatalf("JSON example %d: %v", i+1, err)
 		}
-		document := strings.SplitN(lineSections[formatExamples+i], "\n\n", 2)[0]
+		document := strings.SplitN(lineSections[i], "\n\n", 2)[0]
 		if err := (&provider.LineProtocolOutput[*T]{}).Parse(document, &got); err != nil {
 			t.Fatalf("Line Protocol example %d: %v", i+1, err)
 		}

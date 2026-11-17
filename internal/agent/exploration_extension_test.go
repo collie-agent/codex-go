@@ -21,7 +21,7 @@ func TestReactExplorationExtensionGrantsBoundedInvestigation(t *testing.T) {
 		case 1, 3:
 			writeObservationResponse(w, []any{map[string]any{"type": "function_call", "id": "fc", "call_id": string(rune('a' + requests)), "name": "list_dir", "arguments": `{"path":".","limit":` + string(rune('0'+requests)) + `}`}})
 		case 2:
-			writeObservationResponse(w, []any{observationMessage(`{"exploration":{"task_type":"modification","basis":"requested fix","choice":"extend","gap":"missing target file","blocking_reason":"cannot patch unknown path","investigation":"list directory","exit_condition":"identify target"}}`), map[string]any{"type": "function_call", "id": "mixed", "call_id": "mixed", "name": "list_dir", "arguments": `{"path":"."}`}})
+			writeObservationResponse(w, []any{observationMessage(`{"exploration":{"task_type":"modification","basis":"requested fix","choice":"extend","gap":"missing target file","blocking_reason":"cannot patch unknown path","investigation":"list directory","exit_condition":"identify target"}}`)})
 		case 4:
 			writeObservationResponse(w, []any{observationMessage(`{"exploration":{"choice":"unable","reason":"target absent","execution_state":"two directory observations; no changes"}}`)})
 		default:

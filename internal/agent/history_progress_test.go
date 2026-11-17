@@ -151,9 +151,9 @@ func TestReactHistoryCompactionAllowsOneNecessaryReread(t *testing.T) {
 	turn, compactions := 0, 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		if strings.Contains(string(body), "# Execution compaction") {
+		if strings.Contains(string(body), "# 执行上下文压缩") {
 			compactions++
-			criteriaResponse(w, `{"Facts":[{"Text":"source is available","SourceCallIDs":["source"]}],"Actions":[],"OpenIssues":[],"Pending":[]}`)
+			criteriaResponse(w, `{"Facts":[{"Text":"source is available","SourceCallIDs":["source"]}],"Actions":[],"OpenIssues":[]}`)
 			return
 		}
 		turn++

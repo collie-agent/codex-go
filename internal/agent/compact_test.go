@@ -47,7 +47,7 @@ func TestReactCompactsOlderBatchesAndContinuesReasoning(t *testing.T) {
 			if !strings.Contains(input, "call_11") || !strings.Contains(input, "parallel output") {
 				t.Error("compression omitted snapshot tail")
 			}
-			writeObservationResponse(w, []any{observationMessage(`{"Facts":[{"Text":"old evidence","SourceCallIDs":["call_1"]}],"Actions":[],"OpenIssues":[],"Pending":[]}`)})
+			writeObservationResponse(w, []any{observationMessage(`{"Facts":[{"Text":"old evidence","SourceCallIDs":["call_1"]}],"Actions":[],"OpenIssues":[]}`)})
 			return
 		}
 		if strings.Contains(input, "raw-batch-1:") || strings.Contains(input, "raw-batch-3:") {
@@ -132,7 +132,7 @@ func TestReactCorrectsUnknownCompactionSourceAndContinues(t *testing.T) {
 		if requests == 2 {
 			id = "call_1"
 		}
-		writeObservationResponse(w, []any{observationMessage(fmt.Sprintf(`{"Facts":[{"Text":"evidence","SourceCallIDs":[%q]}],"Actions":[],"OpenIssues":[],"Pending":[]}`, id))})
+		writeObservationResponse(w, []any{observationMessage(fmt.Sprintf(`{"Facts":[{"Text":"evidence","SourceCallIDs":[%q]}],"Actions":[],"OpenIssues":[]}`, id))})
 	}))
 	defer server.Close()
 	process, err := NewReactProcess[ReactResult](t.Context(), filemcp.Config{Workspace: t.TempDir()})
@@ -147,7 +147,7 @@ func TestReactCorrectsUnknownCompactionSourceAndContinues(t *testing.T) {
 
 func TestReactPreservesCompactionWhenEvidenceRetriesExhausted(t *testing.T) {
 	durable := compactionHistory(11)
-	previous := `{"ExecutionID":"compact-instance","ThroughBatch":1,"Summary":{"Facts":[{"Text":"prior evidence","SourceCallIDs":["call_1"]}],"Actions":[],"OpenIssues":[],"Pending":[]}}`
+	previous := `{"ExecutionID":"compact-instance","ThroughBatch":1,"Summary":{"Facts":[{"Text":"prior evidence","SourceCallIDs":["call_1"]}],"Actions":[],"OpenIssues":[]}}`
 	durable.ExecutionCompaction = []byte(previous)
 	history, err := json.Marshal(durable.ToolExecutions)
 	if err != nil {
@@ -172,7 +172,7 @@ func TestReactPreservesCompactionWhenEvidenceRetriesExhausted(t *testing.T) {
 				t.Error("previous correction lost")
 			}
 		}
-		writeObservationResponse(w, []any{observationMessage(`{"Facts":[{"Text":"invented","SourceCallIDs":["call_22"]}],"Actions":[],"OpenIssues":[],"Pending":[]}`)})
+		writeObservationResponse(w, []any{observationMessage(`{"Facts":[{"Text":"invented","SourceCallIDs":["call_22"]}],"Actions":[],"OpenIssues":[]}`)})
 	}))
 	defer server.Close()
 	process, err := NewReactProcess[ReactResult](t.Context(), filemcp.Config{Workspace: t.TempDir()})
@@ -196,7 +196,7 @@ func TestReactRejectsUnverifiableCompaction(t *testing.T) {
 			requests := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 				requests++
-				writeObservationResponse(w, []any{observationMessage(`{"Facts":[` + evidence + `],"Actions":[],"OpenIssues":[],"Pending":[]}`)})
+				writeObservationResponse(w, []any{observationMessage(`{"Facts":[` + evidence + `],"Actions":[],"OpenIssues":[]}`)})
 			}))
 			defer server.Close()
 			process, err := NewReactProcess[ReactResult](t.Context(), filemcp.Config{Workspace: t.TempDir()})
@@ -236,7 +236,7 @@ func TestReactReadsOriginalCompactedToolResult(t *testing.T) {
 			t.Error(err)
 		}
 		if body.Text.Format.Type == "json_schema" {
-			writeObservationResponse(w, []any{observationMessage(`{"Facts":[{"Text":"original available","SourceCallIDs":["call_1"]}],"Actions":[],"OpenIssues":[],"Pending":[]}`)})
+			writeObservationResponse(w, []any{observationMessage(`{"Facts":[{"Text":"original available","SourceCallIDs":["call_1"]}],"Actions":[],"OpenIssues":[]}`)})
 			return
 		}
 		found := false
@@ -425,14 +425,14 @@ func TestReactUsesConfiguredCompactOutput(t *testing.T) {
 						t.Error("compact exposes tools")
 					}
 					prompt, _ := json.Marshal(body["input"])
-					for _, want := range []string{"# Execution compaction", "## Output fields", "| Facts |", "| Actions |", "| OpenIssues |", "| Pending |", "| Text |", "| SourceCallIDs |", "## Additional instructions", "## Output format", "### Example 1", "### Example 2", "```", "compact custom instruction", "Remove resolved issues from OpenIssues", "Never confirm a fact in Facts", "Remove completed items", "do not turn incidental findings", "keep writing and verifying README in Pending"} {
+					for _, want := range []string{"# 执行上下文压缩", "## 输出字段", "Facts（", "Actions（", "OpenIssues（", "Text（", "SourceCallIDs（", "## 附加指令", "## 输出格式", "### 示例 1", "### 示例 2", "compact custom instruction", "从 OpenIssues 移除已解决的问题", "不得在 Facts 中确认某事实", "不生成剩余工作清单"} {
 						if !strings.Contains(string(prompt), want) {
 							t.Errorf("prompt missing %q", want)
 						}
 					}
-					commonExample := "MESSAGE=\"hello\""
+					commonFormat := "Final text output format: Line Protocol."
 					if schema == "json_llm_output" {
-						commonExample = `"message":"hello"`
+						commonFormat = "Output format: JSON."
 					}
 					var messages []struct {
 						Content string `json:"content"`
@@ -443,17 +443,20 @@ func TestReactUsesConfiguredCompactOutput(t *testing.T) {
 						return
 					}
 					system := messages[0].Content
-					common := strings.Index(system, commonExample)
-					compact := strings.Index(system, "## Output fields")
-					if common < 0 || compact < common {
-						t.Error("common format examples must precede compact fields and examples")
+					if strings.Contains(system, "```") {
+						t.Error("compact few-shot output must not contain Markdown fences")
 					}
-					if strings.Count(system, "## Common output format") != 1 {
+					common := strings.Index(system, commonFormat)
+					compact := strings.Index(system, "## 输出字段")
+					if common < 0 || compact < common {
+						t.Error("common format rules must precede compact fields and examples")
+					}
+					if strings.Count(system, "## 通用输出格式") != 1 {
 						t.Error("expected one common output format section")
 					}
 					text, _ := body["text"].(map[string]any)
 					format, _ := text["format"].(map[string]any)
-					output := `{"Facts":[{"Text":"old evidence","SourceCallIDs":["call_1"]}],"Actions":[],"OpenIssues":[],"Pending":[]}`
+					output := `{"Facts":[{"Text":"old evidence","SourceCallIDs":["call_1"]}],"Actions":[],"OpenIssues":[]}`
 					if schema == "json_llm_output" {
 						if format["type"] != "json_schema" {
 							t.Error("missing JSON schema")
@@ -508,7 +511,7 @@ func TestReactRetriesCompactFormatWithUserCorrections(t *testing.T) {
 				requests := 0
 				wantError := "unexpected end of JSON input"
 				bad := `{"Facts":`
-				good := `{"Facts":[{"Text":"old evidence","SourceCallIDs":["call_1"]}],"Actions":[],"OpenIssues":[],"Pending":[]}`
+				good := `{"Facts":[{"Text":"old evidence","SourceCallIDs":["call_1"]}],"Actions":[],"OpenIssues":[]}`
 				if schema == config.LineProtocolLLMOutputSchema {
 					wantError = "separate BEGIN FACTS / END FACTS blocks"
 					bad = "```text\nBEGIN RESULT\nBEGIN FACTS\nTEXT=\"old evidence\"\nSOURCECALLIDS=\"call_1\"\nTEXT=\"second evidence\"\nSOURCECALLIDS=\"call_2\"\nEND FACTS\nEND RESULT\n```"
@@ -587,8 +590,8 @@ func TestReactCompactsOversizedOlderBatch(t *testing.T) {
 		var body map[string]any
 		json.NewDecoder(req.Body).Decode(&body)
 		encoded, _ := json.Marshal(body)
-		if strings.Contains(string(encoded), "# Execution compaction") {
-			writeObservationResponse(w, []any{observationMessage(`{"Facts":[{"Text":"old evidence","SourceCallIDs":["call_1"]}],"Actions":[],"OpenIssues":[],"Pending":[]}`)})
+		if strings.Contains(string(encoded), "# 执行上下文压缩") {
+			writeObservationResponse(w, []any{observationMessage(`{"Facts":[{"Text":"old evidence","SourceCallIDs":["call_1"]}],"Actions":[],"OpenIssues":[]}`)})
 			return
 		}
 		if strings.Contains(string(encoded), strings.Repeat("x", 1000)) {
@@ -617,7 +620,7 @@ func TestReactRechecksOversizedSummary(t *testing.T) {
 		var body map[string]any
 		json.NewDecoder(req.Body).Decode(&body)
 		encoded, _ := json.Marshal(body)
-		if strings.Contains(string(encoded), "# Execution compaction") {
+		if strings.Contains(string(encoded), "# 执行上下文压缩") {
 			attempts++
 			summary := "short evidence"
 			if attempts == 1 {
@@ -657,7 +660,7 @@ func TestReactStopsWhenCompactionCannotFitBudget(t *testing.T) {
 		var body map[string]any
 		json.NewDecoder(req.Body).Decode(&body)
 		encoded, _ := json.Marshal(body)
-		if !strings.Contains(string(encoded), "# Execution compaction") {
+		if !strings.Contains(string(encoded), "# 执行上下文压缩") {
 			t.Error("reasoning continued with oversized context")
 		}
 		attempts++
@@ -701,8 +704,8 @@ func TestReactDropsAllCoveredBatches(t *testing.T) {
 		}
 		encoded, _ := json.Marshal(body)
 		input := string(encoded)
-		if strings.Contains(input, "# Execution compaction") {
-			writeObservationResponse(w, []any{observationMessage(`{"Facts":[{"Text":"old evidence","SourceCallIDs":["call_1"]}],"Actions":[],"OpenIssues":[],"Pending":[]}`)})
+		if strings.Contains(input, "# 执行上下文压缩") {
+			writeObservationResponse(w, []any{observationMessage(`{"Facts":[{"Text":"old evidence","SourceCallIDs":["call_1"]}],"Actions":[],"OpenIssues":[]}`)})
 			return
 		}
 		for batch := 2; batch <= 12; batch++ {
@@ -767,7 +770,7 @@ func TestAsyncCompactionSnapshotAndHandoff(t *testing.T) {
 		case <-req.Context().Done():
 			return
 		}
-		writeObservationResponse(w, []any{observationMessage(`{"Facts":[{"Text":"snapshot evidence","SourceCallIDs":["call_1"]}],"Actions":[],"OpenIssues":[],"Pending":[]}`)})
+		writeObservationResponse(w, []any{observationMessage(`{"Facts":[{"Text":"snapshot evidence","SourceCallIDs":["call_1"]}],"Actions":[],"OpenIssues":[]}`)})
 	}))
 	defer server.Close()
 	durable := compactionHistory(11)
@@ -897,7 +900,7 @@ func TestCompactionResumesWithOnlyNewEvidence(t *testing.T) {
 		if strings.Contains(string(input), "raw-batch-5:") {
 			t.Error("repeated covered evidence")
 		}
-		writeObservationResponse(w, []any{observationMessage(`{"Facts":[{"Text":"merged evidence","SourceCallIDs":["call_1","call_8"]}],"Actions":[],"OpenIssues":[],"Pending":[]}`)})
+		writeObservationResponse(w, []any{observationMessage(`{"Facts":[{"Text":"merged evidence","SourceCallIDs":["call_1","call_8"]}],"Actions":[],"OpenIssues":[]}`)})
 	}))
 	defer server.Close()
 	rc := state.NewReactContext(durable)

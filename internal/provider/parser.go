@@ -328,8 +328,10 @@ func parseLineProtocol(document string) (*ParsedBlock, error) {
 			if literal != strings.TrimSpace(literal) {
 				return fail("whitespace around JSON literal for " + path)
 			}
-			if !json.Valid([]byte(literal)) {
-				return fail("invalid JSON literal for " + path)
+			var value json.RawMessage
+			if err := json.Unmarshal([]byte(literal), &value); err != nil {
+				// 保留具体语法原因，让格式纠错能区分缺少结束引号和非法转义。
+				return fail("invalid JSON literal for " + path + ": " + err.Error())
 			}
 			if literal[0] == '[' || literal[0] == '{' {
 				return fail("array and object literals are not permitted for " + path)

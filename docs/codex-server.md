@@ -26,24 +26,26 @@ go run ./cmd/codex-server --redis-url redis://127.0.0.1:6379/0
 
 ```json
 {
-  "input": "结合代码分析项目是如何实现 multi-agent 的"
+  "input": "结合代码分析项目是如何实现 multi-agent 的",
+  "workspace": "/path/to/workspace"
 }
 ```
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
+| `workspace` | string | 新任务必填 | 工作目录，须在 Consumer 主机上存在且不能只包含空白字符。恢复运行时使用原工作目录。 |
 | `input` | string | 二选一 | 新任务内容；与 `run_id` 互斥，不能为空或只有空白字符。原始字符串会传给消费者。 |
 | `run_id` | string | 二选一 | 恢复已有运行，详见下文；与 `input` 互斥，不能为空或只有空白字符。 |
 | `conv_id` | string | 否 | 新任务所属的已有会话 ID；省略或空字符串时创建新会话。恢复时沿用原运行的会话，此字段不改变其归属。 |
 
-继续已有会话时，请求体示例：`{"input":"继续上一任务","conv_id":"已有会话ID"}`。这会创建新的运行，并加载该会话较早运行的历史；主动中断运行的已保存进度也可作为参考，详见 [会话历史与恢复](conversation-history.md)。服务端负责入队，会话或运行是否存在由消费者执行任务时校验。
+继续已有会话时，请求体示例：`{"input":"继续上一任务","conv_id":"已有会话ID","workspace":"/path/to/workspace"}`。这会创建新的运行，并加载该会话较早运行的历史；主动中断运行的已保存进度也可作为参考，详见 [会话历史与恢复](conversation-history.md)。服务端负责入队，会话或运行是否存在由消费者执行任务时校验。
 
 `input` 和 `run_id` 必须恰好提供一个有效值；另一个字段应省略或为 `""`，即使只包含空白字符也不能与有效字段同时提交。
 
 ```sh
 curl -i -X POST 'http://localhost:8080/tasks' \
   -H 'Content-Type: application/json' \
-  -d '{"input":"结合代码分析项目是如何实现 multi-agent 的"}'
+  -d '{"input":"结合代码分析项目是如何实现 multi-agent 的","workspace":"/path/to/workspace"}'
 ```
 
 成功返回 HTTP `201`：
@@ -58,11 +60,11 @@ curl -i -X POST 'http://localhost:8080/tasks' \
 
 | HTTP 状态 | `error` | 说明 |
 | --- | --- | --- |
-| 400 | `provide either input or run_id` | JSON 无效、字段类型错误、未提供有效的 `input` 或 `run_id`，或两者同时非空。 |
+| 400 | `provide input and workspace, or run_id` | JSON 无效、字段类型错误、未提供有效的 `input` 或 `run_id`，或两者同时非空。 |
 | 500 | `cannot generate task ID` | 无法生成任务 ID。 |
 | 500 | `cannot enqueue task` | 任务写入队列失败。 |
 
-例如：`{"error":"provide either input or run_id"}`。运行不存在、运行锁被占用或配置不匹配等执行阶段错误不会作为本次 POST 的 HTTP 错误返回。
+例如：`{"error":"provide input and workspace, or run_id"}`。运行不存在、运行锁被占用或配置不匹配等执行阶段错误不会作为本次 POST 的 HTTP 错误返回。
 
 ## 订阅任务事件
 

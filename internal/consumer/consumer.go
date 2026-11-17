@@ -31,9 +31,6 @@ func RunWithConcurrency(ctx context.Context, opts application.Options, concurren
 	if concurrency < 1 {
 		return fmt.Errorf("--concurrency must be positive")
 	}
-	if strings.TrimSpace(opts.Workspace) == "" {
-		return fmt.Errorf("--workspace is required")
-	}
 	if opts.Timeout <= 0 {
 		return fmt.Errorf("--timeout must be positive")
 	}
@@ -146,7 +143,7 @@ func consume(ctx context.Context, client *redis.Client, opts application.Options
 			continue
 		}
 		if !message.ValidInput() || strings.TrimSpace(message.TaskId) == "" {
-			logger.Print("[ERROR] consumer: invalid task message: TaskId and either Input or RunId are required")
+			logger.Print("[ERROR] consumer: invalid task message: TaskId and either Input with Workspace or RunId are required")
 			continue
 		}
 		runID := message.RunId
@@ -157,6 +154,7 @@ func consume(ctx context.Context, client *redis.Client, opts application.Options
 			return rdb.ListenInterrupt(ctx, client, lockedRunID, interrupt)
 		}
 		taskOpts.Task = message.Input
+		taskOpts.Workspace = message.Workspace
 		// 会话归属按消息指定；省略时由 application 为本任务创建新会话。
 		taskOpts.ConvID = message.ConvId
 		// 退出信号只停止领取；已经出队的任务必须运行完成，避免丢失。

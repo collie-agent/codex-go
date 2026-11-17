@@ -12,7 +12,7 @@ import (
 	filemcp "github.com/collie-agent/codex-go/internal/mcp"
 )
 
-func TestReactDirectoryResultsLastThreeDecisions(t *testing.T) {
+func TestReactResumedDirectoryResultsRemainInHistory(t *testing.T) {
 	durable := compactionHistory(1)
 	durable.ToolExecutions = []*state.ToolResult{
 		{Batch: 1, ToolCallId: "glob_call", ToolName: "glob", Arguments: `{}`, Status: "success", Result: "glob unique evidence"},
@@ -29,7 +29,7 @@ func TestReactDirectoryResultsLastThreeDecisions(t *testing.T) {
 		requests++
 		input, _ := json.Marshal(body["input"])
 		for _, evidence := range []string{"glob unique evidence", "directory unique evidence"} {
-			if got := strings.Contains(string(input), evidence); got != (requests <= 3) {
+			if got := strings.Contains(string(input), evidence); !got {
 				t.Errorf("request %d: evidence %q present=%v", requests, evidence, got)
 			}
 		}

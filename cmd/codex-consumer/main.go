@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/collie-agent/codex-go/internal/agent"
 	"github.com/collie-agent/codex-go/internal/application"
 	"github.com/collie-agent/codex-go/internal/config"
 	"github.com/collie-agent/codex-go/internal/consumer"
@@ -30,7 +31,6 @@ func main() {
 	flag.StringVar(&opts.LogDir, "log-dir", "", "output log directory (overrides YAML log_dir; default ./logs)")
 	flag.IntVar(&concurrency, "concurrency", 1, "maximum number of tasks running simultaneously")
 	flag.StringVar(&opts.ConfigPath, "config", "", "YAML agent configuration with top-level redis (required)")
-	flag.StringVar(&opts.Workspace, "workspace", "", "workspace directory shared by queued tasks (required)")
 	flag.DurationVar(&opts.Timeout, "timeout", 5*time.Minute, "tool command timeout")
 	flag.StringVar(&opts.Mode, "mode", "", "react, plan-execute or multi-agent (defaults to YAML name)")
 	flag.StringVar(&opts.MCPCommand, "mcp-command", "", "external MCP executable (defaults to in-process tools)")
@@ -55,6 +55,13 @@ func main() {
 		}
 	})
 	if err := logging.Setup(opts.LogDir, opts.ConfigPath); err != nil {
+		log.Printf("[ERROR] %v", err)
+		os.Exit(1)
+	}
+	// 启动时扫描一次，所有消费任务共用同一份技能索引。
+	var err error
+	opts.Skills, err = agent.LoadSkills()
+	if err != nil {
 		log.Printf("[ERROR] %v", err)
 		os.Exit(1)
 	}

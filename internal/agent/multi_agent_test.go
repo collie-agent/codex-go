@@ -467,7 +467,8 @@ func TestMultiAgentUpstreamReportsSurviveNestedDelegation(t *testing.T) {
 					}
 					if !ok {
 						t.Error("missing execution context")
-					} else if err := json.Unmarshal([]byte(encoded), &execution); err != nil {
+						// 执行上下文后还会追加探索预算，只解码该节的 JSON 对象。
+					} else if err := json.NewDecoder(strings.NewReader(encoded)).Decode(&execution); err != nil {
 						t.Error(err)
 					} else {
 						if len(execution.Upstream) != 1 {

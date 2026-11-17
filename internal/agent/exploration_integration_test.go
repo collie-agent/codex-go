@@ -46,7 +46,29 @@ func TestPlanExplorationModifiesVerifiesAndIsolatesSteps(t *testing.T) {
 			return
 		}
 		calls++
+		// 第一轮正常探索；第二轮达到阈值；接受实施后不再重复注入。
 		if calls <= len(script) {
+			// 原始请求包含角色，预算必须出现在 user 消息中。
+			var messages []struct {
+				Role    string
+				Content string
+			}
+			if err := json.Unmarshal(req.Input, &messages); err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, message := range messages {
+				if strings.Contains(message.Content, "Exploration budget:") {
+					found = true
+					if message.Role != "user" {
+						t.Error("budget must use user role")
+					}
+				}
+			}
+			if calls <= 3 && found != (calls == 2) {
+				t.Errorf("call %d: budget present=%t", calls, found)
+			}
+
 			writeObservationResponse(w, script[calls-1])
 			return
 		}

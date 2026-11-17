@@ -269,7 +269,7 @@ func TestResumeReactPreservesIncrementalCompactionAndOriginalEvidence(t *testing
 					}
 				}
 			}
-			writeResult(w, `{"Facts":[{"Text":"earlier evidence","SourceCallIDs":["call_1"]}],"Actions":[],"OpenIssues":[],"Pending":[]}`)
+			writeResult(w, `{"Facts":[{"Text":"earlier evidence","SourceCallIDs":["call_1"]}],"Actions":[],"OpenIssues":[]}`)
 			return
 		}
 		reasoning++

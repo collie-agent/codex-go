@@ -2,31 +2,11 @@ package context
 
 import "github.com/collie-agent/codex-go/internal/config"
 
-// 通用示例演示 JSON 语法；业务字段及其语义由各上下文另行提供。
+// 公共层只声明协议规则；具体字段与 few-shot 示例由各业务上下文提供。
 const jsonFormatPrompt = `Output format: JSON.
-Return exactly one valid JSON value matching the requested output schema. Do not include Markdown fences, comments, or explanatory text. Preserve field name casing exactly. Use JSON arrays for lists, including [] for empty lists.
+Return exactly one valid JSON value matching the requested output schema. Do not include Markdown fences, comments, or explanatory text. Preserve field name casing exactly. Use JSON arrays for lists, including [] for empty lists.`
 
-### Common JSON example 1
-
-**Input:** Return message "hello", count 2, ratio 0.5, ok true and enabled false.
-
-**Output:**
-
-` + "```json\n" + `{"message":"hello","count":2,"ratio":0.5,"ok":true,"enabled":false}
-` + "```" + `
-
-### Common JSON example 2
-
-**Input:** Return tags "first" and "second", nested detail with message "nested", an empty items list and optional note null.
-
-**Output:**
-
-` + "```json\n" + `{"tags":["first","second"],"detail":{"message":"nested"},"items":[],"note":null}
-` + "```" + `
-
-These examples illustrate formatting only. Use the current task's declared field names, types and values.`
-
-// 通用示例使用与业务结果无关的字段；格式约束只作用于最终文本，不限制原生工具调用。
+// 格式约束只作用于最终文本，不限制原生工具调用。
 const lineProtocolFormatPrompt = `Final text output format: Line Protocol.
 
 If supplied function tools are needed to gather evidence or advance the task, call them through the native tool-call interface. Do not write tool calls as Line Protocol text and do not emit a final result while required tool results are still missing. The following contract applies only when returning a final text result without tool calls.
@@ -39,11 +19,11 @@ Mandatory response contract:
 
 Document and names:
 - Return exactly one complete root block. Use uppercase BEGIN NAME and END NAME on separate lines, and close nested blocks in reverse opening order with matching names.
-- Names are case-insensitive. Block names match [A-Z][A-Z0-9_]*. Field names use the same pattern, optionally with dot-separated segments of that pattern. BEGIN_NAME and END_NAME are also accepted, including mixed space/underscore boundaries; prefer the space form shown below.
+- Names are case-insensitive. Block names match [A-Z][A-Z0-9_]*. Field names use the same pattern, optionally with dot-separated segments of that pattern. BEGIN_NAME and END_NAME are also accepted, including mixed space/underscore boundaries; prefer the space form.
 - Use the root name requested by the task; the parser does not require it to equal the destination Go type name.
 - For fields, use an explicit lineprotocol tag when present, otherwise the json tag name before any comma options, otherwise the Go field name. For child blocks, the same mapping applies; without an explicit lineprotocol tag, the destination struct type name is also accepted. An explicit lineprotocol tag replaces these aliases.
 - A dotted name such as META.NOTE is one literal field name, not a path that creates nested objects. Emit it only when declared by the destination schema.
-- Never output undeclared fields or blocks, unexported fields, or fields tagged json:"-" or lineprotocol:"-". Use only the current task's declared schema; the examples below do not supply missing schema information.
+- Never output undeclared fields or blocks, unexported fields, or fields tagged json:"-" or lineprotocol:"-". Use only the current task's declared schema.
 
 Values and structure:
 - Write each scalar on one physical line as FIELD=JSON_LITERAL with no spaces around = or the literal. Values must be valid JSON strings, numbers, true, false, or null and match the destination type. Do not quote numbers or booleans unless the destination is a string. NaN, Infinity, single-quoted strings, and unquoted text are invalid.
@@ -58,61 +38,6 @@ Values and structure:
 Whitespace:
 - Do not include blank lines, comments, indentation, trailing spaces, Markdown fences, explanations, or text outside the root block. Strings may contain whitespace inside their quotes.
 - Prefer LF line endings. CRLF and CR are also accepted. End immediately after the root END line, or with exactly one final newline.
-
-The following examples illustrate formatting only; use the current task's field names, types, tags, and values.
-
-Example 1 input: In RESULT, return message "hello", integer count 2, ratio 0.5, ok true, and enabled false.
-Example 1 output:
-BEGIN RESULT
-MESSAGE="hello"
-COUNT=2
-RATIO=0.5
-OK=true
-ENABLED=false
-END RESULT
-
-Example 2 input: In PLAN, return goal "inspect", tags "first" and "second", two steps with ids "read" and "write" (steps have lineprotocol tag STEP), and optional string pointer note null.
-Example 2 output:
-BEGIN PLAN
-GOAL="inspect"
-TAGS="first"
-TAGS="second"
-BEGIN STEP
-ID="read"
-END STEP
-BEGIN STEP
-ID="write"
-END STEP
-NOTE=null
-END PLAN
-
-Example 3 input: In RESULT, return text containing a quote, a backslash, a newline, and a tab; return literal string "[1,2]" in RAW. The completed boolean has lineprotocol tag COMPLETED, and a string field has lineprotocol tag META.NOTE.
-Example 3 output:
-BEGIN RESULT
-TEXT="quote: \"; slash: \\; newline: \n; tab: \t"
-RAW="[1,2]"
-COMPLETED=true
-META.NOTE="literal dotted field"
-END RESULT
-
-Example 4 input: In RESULT, return one tag "only" in a string list and one ITEM in a struct list. ITEM contains a DETAIL struct with message "nested" and an EMPTY struct with no fields. Omit the empty aliases list and return optional struct pointer fallback null.
-Example 4 output:
-BEGIN RESULT
-TAGS="only"
-BEGIN ITEM
-BEGIN DETAIL
-MESSAGE="nested"
-END DETAIL
-BEGIN EMPTY
-END EMPTY
-END ITEM
-FALLBACK=null
-END RESULT
-
-Example 5 input: Return an empty NO_TOOL struct.
-Example 5 output:
-BEGIN NO_TOOL
-END NO_TOOL
 
 Invalid forms (do not output these): TAGS=[]; DETAIL={}; MESSAGE=hello; COUNT=NaN; META.NOTE="x" when no such literal field is declared; BEGIN RESULT closed by END PLAN; two root blocks; or a field emitted both as FIELD=null and as a FIELD child block.
 

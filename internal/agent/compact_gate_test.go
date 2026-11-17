@@ -23,8 +23,8 @@ func TestReactWaitsForCompactionBeforeReasoningAtSyncThreshold(t *testing.T) {
 			return
 		}
 		encoded, _ := json.Marshal(body)
-		if strings.Contains(string(encoded), "# Execution compaction") {
-			writeObservationResponse(w, []any{observationMessage(`{"Facts":[{"Text":"compressed evidence","SourceCallIDs":["call_1"]}],"Actions":[],"OpenIssues":[],"Pending":[]}`)})
+		if strings.Contains(string(encoded), "# 执行上下文压缩") {
+			writeObservationResponse(w, []any{observationMessage(`{"Facts":[{"Text":"compressed evidence","SourceCallIDs":["call_1"]}],"Actions":[],"OpenIssues":[]}`)})
 			return
 		}
 		if !strings.Contains(string(encoded), "compressed evidence") {
@@ -48,7 +48,7 @@ func TestReactPreservesEveryBatchNotCoveredBySummary(t *testing.T) {
 	for _, call := range durable.ToolExecutions {
 		call.Result = "small result"
 	}
-	durable.ExecutionCompaction = []byte(`{"ExecutionID":"compact-instance","ThroughBatch":1,"Summary":{"Facts":[],"Actions":[],"OpenIssues":[],"Pending":[]}}`)
+	durable.ExecutionCompaction = []byte(`{"ExecutionID":"compact-instance","ThroughBatch":1,"Summary":{"Facts":[],"Actions":[],"OpenIssues":[]}}`)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		var body map[string]any
 		json.NewDecoder(req.Body).Decode(&body)
@@ -82,7 +82,7 @@ func TestReactContinuesBelowSyncThresholdThenWaitsForPendingCompaction(t *testin
 		var body map[string]any
 		json.NewDecoder(req.Body).Decode(&body)
 		encoded, _ := json.Marshal(body)
-		if strings.Contains(string(encoded), "# Execution compaction") {
+		if strings.Contains(string(encoded), "# 执行上下文压缩") {
 			if compactRequests.Add(1) != 1 {
 				t.Error("started duplicate compaction")
 				return
@@ -93,7 +93,7 @@ func TestReactContinuesBelowSyncThresholdThenWaitsForPendingCompaction(t *testin
 			case <-req.Context().Done():
 				return
 			}
-			writeObservationResponse(w, []any{observationMessage(`{"Facts":[{"Text":"async summary","SourceCallIDs":["call_1"]}],"Actions":[],"OpenIssues":[],"Pending":[]}`)})
+			writeObservationResponse(w, []any{observationMessage(`{"Facts":[{"Text":"async summary","SourceCallIDs":["call_1"]}],"Actions":[],"OpenIssues":[]}`)})
 			return
 		}
 		if reasoningRequests.Add(1) == 1 {
@@ -156,7 +156,7 @@ func TestReactStopsWaitingOnCancellationOrDeadline(t *testing.T) {
 				var body map[string]any
 				json.NewDecoder(req.Body).Decode(&body)
 				encoded, _ := json.Marshal(body)
-				if !strings.Contains(string(encoded), "# Execution compaction") {
+				if !strings.Contains(string(encoded), "# 执行上下文压缩") {
 					reasoning.Add(1)
 					return
 				}
@@ -214,7 +214,7 @@ func TestReactRecompactsUncoveredGrowthAndFailsClosedWhenBudgetCannotFit(t *test
 		var body map[string]any
 		json.NewDecoder(req.Body).Decode(&body)
 		encoded, _ := json.Marshal(body)
-		if strings.Contains(string(encoded), "# Execution compaction") {
+		if strings.Contains(string(encoded), "# 执行上下文压缩") {
 			if compactions.Add(1) == 1 {
 				close(started)
 				select {
@@ -225,10 +225,10 @@ func TestReactRecompactsUncoveredGrowthAndFailsClosedWhenBudgetCannotFit(t *test
 			} else if compactions.Load() == 2 && !strings.Contains(string(encoded), "new_read_1") {
 				t.Error("recompaction omitted growth during first compaction")
 			}
-			summary := map[string]any{"Facts": []any{map[string]any{"Text": "updated summary", "SourceCallIDs": []string{"call_1"}}}, "Actions": []any{}, "OpenIssues": []any{}, "Pending": []string{}}
+			summary := map[string]any{"Facts": []any{map[string]any{"Text": "updated summary", "SourceCallIDs": []string{"call_1"}}}, "Actions": []any{}, "OpenIssues": []any{}}
 			if compactions.Load() > 1 {
 				// 后续摘要本身仍超预算，验证三次重试后停止推理。
-				summary["Pending"] = []string{strings.Repeat("p", exceedTokenThreshold*4)}
+				summary["Facts"] = []any{map[string]any{"Text": strings.Repeat("p", exceedTokenThreshold*4), "SourceCallIDs": []string{"call_1"}}}
 			}
 			encoded, _ := json.Marshal(summary)
 			writeObservationResponse(w, []any{observationMessage(string(encoded))})
@@ -263,7 +263,7 @@ func TestReactRecompactsUncoveredGrowthAndFailsClosedWhenBudgetCannotFit(t *test
 		call.Result = "small"
 	}
 	durable.ToolExecutions[0].Result = strings.Repeat("x", 70000)
-	durable.ExecutionCompaction, _ = json.Marshal(ExecutionCompaction{ExecutionID: durable.ExecutionID, ThroughBatch: 8, Summary: ExecutionSummary{Pending: []string{strings.Repeat("p", 110000)}}})
+	durable.ExecutionCompaction, _ = json.Marshal(ExecutionCompaction{ExecutionID: durable.ExecutionID, ThroughBatch: 8, Summary: ExecutionSummary{Facts: []Evidence{{Text: strings.Repeat("p", 110000), SourceCallIDs: []string{"call_1"}}}}})
 	_, _, err = process.Run(compactionConfig(t, server.URL), durable)
 	if err == nil || !strings.Contains(err.Error(), "context exceeds token budget after 3 attempts") {
 		t.Fatalf("expected bounded compaction failure, got %v", err)
@@ -282,10 +282,10 @@ func TestReactDoesNotReasonAfterCompactionFailsAtSyncThreshold(t *testing.T) {
 		var body map[string]any
 		json.NewDecoder(req.Body).Decode(&body)
 		encoded, _ := json.Marshal(body)
-		if !strings.Contains(string(encoded), "# Execution compaction") {
+		if !strings.Contains(string(encoded), "# 执行上下文压缩") {
 			reasoning.Add(1)
 		}
-		writeObservationResponse(w, []any{observationMessage(`{"Facts":[{"Text":"invalid evidence","SourceCallIDs":["nonexistent_call"]}],"Actions":[],"OpenIssues":[],"Pending":[]}`)})
+		writeObservationResponse(w, []any{observationMessage(`{"Facts":[{"Text":"invalid evidence","SourceCallIDs":["nonexistent_call"]}],"Actions":[],"OpenIssues":[]}`)})
 	}))
 	defer server.Close()
 	process, err := NewReactProcess[ReactResult](t.Context(), filemcp.Config{Workspace: t.TempDir()})
@@ -318,9 +318,9 @@ func TestReactCorrectionBudgetBlocksOversizedRetry(t *testing.T) {
 			return
 		}
 		encoded, _ := json.Marshal(body)
-		if strings.Contains(string(encoded), "# Execution compaction") {
+		if strings.Contains(string(encoded), "# 执行上下文压缩") {
 			compactions.Add(1)
-			writeObservationResponse(w, []any{observationMessage(`{"Facts":[{"Text":"small summary","SourceCallIDs":["call_1"]}],"Actions":[],"OpenIssues":[],"Pending":[]}`)})
+			writeObservationResponse(w, []any{observationMessage(`{"Facts":[{"Text":"small summary","SourceCallIDs":["call_1"]}],"Actions":[],"OpenIssues":[]}`)})
 			return
 		}
 		if reasoning.Add(1) == 1 {

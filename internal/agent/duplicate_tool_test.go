@@ -199,7 +199,7 @@ func TestReactRepeatsExecAfterWorkspaceChange(t *testing.T) {
 }
 
 // 目录结果过期后，重复调用的纠错必须携带原结果，而不能只引用已不可见的历史。
-func TestReactDuplicateRestoresExpiredDirectoryResult(t *testing.T) {
+func TestReactDuplicateKeepsResumedDirectoryResult(t *testing.T) {
 	turns := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		turns++
@@ -208,8 +208,8 @@ func TestReactDuplicateRestoresExpiredDirectoryResult(t *testing.T) {
 			t.Fatal(err)
 		}
 		input, _ := json.Marshal(request["input"])
-		if turns == 4 && strings.Contains(string(input), "directory recovery evidence") {
-			t.Error("directory result should have expired before the duplicate")
+		if turns == 4 && !strings.Contains(string(input), "directory recovery evidence") {
+			t.Error("resumed directory result missing from conversation history")
 		}
 		if turns <= 3 {
 			criteriaResponse(w, "", map[string]any{"type": "function_call", "id": fmt.Sprintf("fc_%d", turns), "call_id": fmt.Sprintf("read_%d", turns), "name": "read_tool_result", "arguments": `{"call_id":"file_call","offset":0,"limit":10}`})
@@ -220,7 +220,7 @@ func TestReactDuplicateRestoresExpiredDirectoryResult(t *testing.T) {
 			return
 		}
 		if !strings.Contains(string(input), "directory recovery evidence") {
-			t.Error("duplicate feedback did not restore the expired result")
+			t.Error("duplicate feedback lost the restored result")
 		}
 		criteriaResponse(w, `{"status":"completed","answer":"done"}`)
 	}))

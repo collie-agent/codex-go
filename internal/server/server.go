@@ -87,12 +87,13 @@ func New(backend Backend, store Store) http.Handler {
 	})
 	router.POST("/tasks", func(c *gin.Context) {
 		var req struct {
-			Input  string `json:"input"`
-			RunId  string `json:"run_id"`
-			ConvId string `json:"conv_id"`
+			Input     string `json:"input"`
+			RunId     string `json:"run_id"`
+			ConvId    string `json:"conv_id"`
+			Workspace string `json:"workspace"`
 		}
-		if c.ShouldBindJSON(&req) != nil || !(entity.TaskMessage{Input: req.Input, RunId: req.RunId}).ValidInput() {
-			c.JSON(400, gin.H{"error": "provide either input or run_id"})
+		if c.ShouldBindJSON(&req) != nil || !(entity.TaskMessage{Input: req.Input, RunId: req.RunId, Workspace: req.Workspace}).ValidInput() {
+			c.JSON(400, gin.H{"error": "provide input and workspace, or run_id"})
 			return
 		}
 		b := make([]byte, 16)
@@ -102,7 +103,7 @@ func New(backend Backend, store Store) http.Handler {
 		}
 		id := hex.EncodeToString(b)
 		// 可选会话 ID 随任务入队，由消费者传给 application.Run。
-		data, _ := json.Marshal(entity.TaskMessage{Input: req.Input, TaskId: id, ConvId: req.ConvId, RunId: req.RunId})
+		data, _ := json.Marshal(entity.TaskMessage{Input: req.Input, TaskId: id, ConvId: req.ConvId, RunId: req.RunId, Workspace: req.Workspace})
 		if _, err := backend.RPush(c.Request.Context(), rdb.TASK_QUEUE_NAME, string(data)); err != nil {
 			c.JSON(500, gin.H{"error": "cannot enqueue task"})
 			return

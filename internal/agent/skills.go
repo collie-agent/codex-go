@@ -26,7 +26,7 @@ func addSkillsToReactContext(rc *state.ReactContext, skills []Skill) {
 	}
 	// JSON 引用元数据，避免多行 description 改变提示词的 Markdown 结构。
 	metadata, _ := json.Marshal(skills)
-	rc.SetSysPrompt("# Available skills\n\n以下是已注册技能的名称和用途索引：\n\n" + string(metadata))
+	rc.SetSkillsIndex(string(metadata))
 }
 
 // LoadSkills 按目录顺序扫描用户技能；注册结果由调用方持有，避免全局可变状态。

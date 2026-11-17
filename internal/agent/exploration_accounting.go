@@ -31,15 +31,58 @@ func explorationPurpose(param *sdk.CallToolParams) string {
 
 // 批次是并行调用的证据边界；不把净变化归因到某一个命令。
 type explorationAccounting struct {
-	Batch      int
-	Handoff    int
-	Applied    bool
-	SinceBatch int `json:",omitempty"`
-	Purpose    string
-	Calls      map[string]string
-	Before     map[string]targetSnapshot `json:",omitempty"`
-	After      map[string]targetSnapshot `json:",omitempty"`
-	Outcome    string
+	Batch               int
+	Handoff             int
+	Charged             bool `json:",omitempty"`
+	ModificationCharged bool `json:",omitempty"`
+	Applied             bool
+	SinceBatch          int `json:",omitempty"`
+	Purpose             string
+	Calls               map[string]string
+	Before              map[string]targetSnapshot `json:",omitempty"`
+	After               map[string]targetSnapshot `json:",omitempty"`
+	Outcome             string
+}
+
+// 仅在所有调查调用均明确失败时退回预扣；未知结果保持原有停止边界。
+// Charged 与预算一起落盘，检查点回调和恢复可重复结算而不会重复退款。
+func (e *explorationState) settleFailedInvestigation(record *explorationAccounting, completed []*state.ToolResult) {
+	e.settleFailedModification(record, completed)
+	if !record.Charged {
+		return
+	}
+	failed := make(map[string]bool)
+	for _, call := range completed {
+		failed[call.ToolCallId] = call.Status == filemcp.ToolCallFailedStatus
+	}
+	for id, purpose := range record.Calls {
+		if purpose == "investigation" && !failed[id] {
+			return
+		}
+	}
+	e.Used--
+	record.Charged = false
+}
+
+// 实施窗口按批次预扣；仅所有调用明确失败才退还，未知或部分成功仍计费。
+// 标记与退款一起持久化，检查点回调和恢复重复结算不会增加窗口。
+func (e *explorationState) settleFailedModification(record *explorationAccounting, completed []*state.ToolResult) {
+	if !record.ModificationCharged || len(record.Calls) == 0 {
+		return
+	}
+	failed := make(map[string]bool)
+	for _, call := range completed {
+		failed[call.ToolCallId] = call.Status == filemcp.ToolCallFailedStatus
+	}
+	for id := range record.Calls {
+		if !failed[id] {
+			return
+		}
+	}
+	if e.Phase == "implement" && record.Handoff == len(e.Handoffs) {
+		e.ModificationLeft++
+	}
+	record.ModificationCharged = false
 }
 
 // 同一批次的测试可能生成目标文件，不能将净变化归因于并行的修改操作。
@@ -92,6 +135,7 @@ func (e *explorationState) reconcile(completed []*state.ToolResult) {
 		if record.Batch != completed[0].Batch || record.Applied {
 			continue
 		}
+		e.settleFailedInvestigation(record, completed)
 		if record.Outcome == "known" {
 			record.updateOutcome(completed)
 		}

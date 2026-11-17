@@ -32,7 +32,7 @@ func (f *fakeBackend) ReadTaskStream(ctx context.Context, _, _ string) ([]*entit
 }
 
 func TestCreateTask(t *testing.T) {
-	for _, body := range []string{`{"input":"hello"}`, `{"input":"hello","conv_id":""}`} {
+	for _, body := range []string{`{"input":"hello","workspace":"/tmp"}`, `{"input":"hello","conv_id":"","workspace":"/tmp"}`} {
 		t.Run(body, func(t *testing.T) {
 			f := &fakeBackend{}
 			w := httptest.NewRecorder()
@@ -50,10 +50,19 @@ func TestCreateTask(t *testing.T) {
 	}
 }
 
+func TestCreateTaskWithWorkspace(t *testing.T) {
+	f := &fakeBackend{}
+	w := httptest.NewRecorder()
+	New(f, nil).ServeHTTP(w, httptest.NewRequest("POST", "/tasks", strings.NewReader(`{"input":"inspect","workspace":"/projects/example"}`)))
+	if w.Code != http.StatusCreated || f.task.Workspace != "/projects/example" {
+		t.Fatalf("status=%d body=%s task=%+v", w.Code, w.Body, f.task)
+	}
+}
+
 func TestCreateTaskWithConversation(t *testing.T) {
 	f := &fakeBackend{}
 	w := httptest.NewRecorder()
-	New(f, nil).ServeHTTP(w, httptest.NewRequest("POST", "/tasks", strings.NewReader(`{"input":"continue task","conv_id":"existing-conversation"}`)))
+	New(f, nil).ServeHTTP(w, httptest.NewRequest("POST", "/tasks", strings.NewReader(`{"input":"continue task","conv_id":"existing-conversation","workspace":"/tmp"}`)))
 	if w.Code != http.StatusCreated || f.task.ConvId != "existing-conversation" {
 		t.Fatalf("status=%d body=%s task=%+v", w.Code, w.Body, f.task)
 	}

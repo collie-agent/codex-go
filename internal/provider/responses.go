@@ -34,17 +34,18 @@ type responsesApiClient[T any] struct {
 }
 
 type baseResponsesApiClient[T any] struct {
-	strategy        responseStrategy
-	client          *openai.Client
-	agentConfig     *config.AgentConfig
-	contextLogLabel string
-	systemPrompt    string
-	corrections     []string
-	logLevel        config.LogLevel
-	output          Outputer
-	inputTokens     int64
-	additionalTools []*sdk.Tool
-	stderr          Outputer
+	strategy            responseStrategy
+	client              *openai.Client
+	agentConfig         *config.AgentConfig
+	contextLogLabel     string
+	systemPrompt        string
+	conversationHistory string
+	corrections         []string
+	logLevel            config.LogLevel
+	output              Outputer
+	inputTokens         int64
+	additionalTools     []*sdk.Tool
+	stderr              Outputer
 }
 
 // SetOutputer 在运行前配置输出目标；nil 恢复默认日志文件输出。
@@ -96,6 +97,11 @@ func (c *baseResponsesApiClient[T]) SetContextLogLabel(label string) {
 // SetSystemPrompt 将系统指令作为独立的 system 消息发送。
 func (c *baseResponsesApiClient[T]) SetSystemPrompt(prompt string) {
 	c.systemPrompt = prompt
+}
+
+// SetConversationHistory 将历史参考作为 system 后、全部工具交互前的 user 消息。
+func (c *baseResponsesApiClient[T]) SetConversationHistory(history string) {
+	c.conversationHistory = history
 }
 
 // SetCorrectionMessages 将运行内的纠错提示作为正文之后的独立 user 消息发送。
@@ -230,11 +236,14 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 	if c.agentConfig.LLMConfig.MaxOutputTokens > 0 {
 		params.MaxOutputTokens = openai.Int(c.agentConfig.LLMConfig.MaxOutputTokens)
 	}
-	if len(messages) > 0 || c.systemPrompt != "" || len(c.corrections) > 0 {
+	if len(messages) > 0 || c.systemPrompt != "" || c.conversationHistory != "" || len(c.corrections) > 0 {
 		items := make(responses.ResponseInputParam, 0, 2*len(messages)+2+len(c.corrections))
 		// 系统指令独立于任务数据，工具重放时也保持相同角色。
 		if c.systemPrompt != "" {
 			items = append(items, responses.ResponseInputItemParamOfMessage(c.systemPrompt, responses.EasyInputMessageRoleSystem))
+		}
+		if c.conversationHistory != "" {
+			items = append(items, responses.ResponseInputItemParamOfMessage(c.conversationHistory, responses.EasyInputMessageRoleUser))
 		}
 		for _, message := range messages {
 			if strings.TrimSpace(message.ToolCallID) == "" || strings.TrimSpace(message.Name) == "" {

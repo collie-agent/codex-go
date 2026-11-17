@@ -73,15 +73,16 @@ func TestConsumerCompletesTerminalTasksAfterOutputButNotExecutionFailure(t *test
 		fmt.Fprint(w, `{"id":"consumer-test","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"{\"status\":\"completed\",\"answer\":\"queue task done\"}"}]}]}`)
 	}))
 	defer server.Close()
-	message, err := json.Marshal(entity.TaskMessage{Input: "inspect queued workspace", TaskId: "queued-task"})
+	workspace := t.TempDir()
+	message, err := json.Marshal(entity.TaskMessage{Input: "inspect queued workspace", TaskId: "queued-task", Workspace: workspace})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// 固定协议字面量独立于编码器，坏消息和失败任务不能阻塞后续任务。
 	if err := client.RPush(t.Context(), rdb.TASK_QUEUE_NAME,
 		`not-json`, `null`, `{}`, `{"Input":"missing ID"}`, `{"TaskId":"missing input"}`,
-		`{"Input":"fail queued task","TaskId":"failed-task"}`,
-		`{"Input":"business failure task","TaskId":"business-failed-task"}`, message).Err(); err != nil {
+		fmt.Sprintf(`{"Input":"fail queued task","TaskId":"failed-task","Workspace":%q}`, workspace),
+		fmt.Sprintf(`{"Input":"business failure task","TaskId":"business-failed-task","Workspace":%q}`, workspace), message).Err(); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
@@ -162,6 +163,10 @@ func TestConsumerCompletesTerminalTasksAfterOutputButNotExecutionFailure(t *test
 				if event.RunID == "" || event.RunID == "queued-task" || event.AgentInstanceID != "" || event.ParentAgentInstanceID != "" || event.AgentName != "" {
 					t.Fatalf("wrong run summary attribution: %+v", event)
 				}
+				var saved database.AgentRun
+				if err := db.Where("run_id = ?", event.RunID).First(&saved).Error; err != nil || saved.Workspace != workspace {
+					t.Fatalf("queued workspace: run=%+v err=%v", saved, err)
+				}
 				if !sawAnswer || event.Delta != "{}" {
 					t.Fatalf("completion must follow task output with empty JSON payload: sawAnswer=%v event=%+v", sawAnswer, event)
 				}
@@ -209,7 +214,7 @@ func TestConsumerContinuesConversationFromMessage(t *testing.T) {
 	}))
 	defer server.Close()
 	// 使用协议字面量，避免编码器与解码器同时遗漏 ConvId 而误通过。
-	message := fmt.Sprintf(`{"Input":"continue previous task","TaskId":"conversation-task","ConvId":%q}`, prior.ConvID)
+	message := fmt.Sprintf(`{"Input":"continue previous task","TaskId":"conversation-task","ConvId":%q,"Workspace":%q}`, prior.ConvID, workspace)
 	if err := client.RPush(t.Context(), rdb.TASK_QUEUE_NAME, message).Err(); err != nil {
 		t.Fatal(err)
 	}
@@ -512,7 +517,7 @@ func TestHTTPInterruptStopsConsumerRun(t *testing.T) {
 		<-r.Context().Done()
 	}))
 	defer model.Close()
-	message, _ := json.Marshal(entity.TaskMessage{Input: "wait for interrupt", TaskId: "interrupt-integration"})
+	message, _ := json.Marshal(entity.TaskMessage{Input: "wait for interrupt", TaskId: "interrupt-integration", Workspace: t.TempDir()})
 	if err := client.RPush(t.Context(), rdb.TASK_QUEUE_NAME, message).Err(); err != nil {
 		t.Fatal(err)
 	}
@@ -659,7 +664,7 @@ func TestHTTPInterruptExecutionModes(t *testing.T) {
 			}))
 			defer model.Close()
 			path := configuration(t, addr, model.URL)
-			msg := entity.TaskMessage{Input: "interrupt service execution", TaskId: "service-" + mode}
+			msg := entity.TaskMessage{Input: "interrupt service execution", TaskId: "service-" + mode, Workspace: workspace}
 			if mode == "plan-execute" {
 				run, err := store.Create(t.Context(), "", "two steps", workspace, mode)
 				if err != nil {

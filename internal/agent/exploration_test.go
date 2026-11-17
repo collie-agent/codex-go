@@ -16,6 +16,19 @@ func TestReactExplorationThresholdBlocksFurtherTools(t *testing.T) {
 	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
+		var request struct {
+			Tools []json.RawMessage `json:"tools"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode model request: %v", err)
+			return
+		}
+		if calls == 1 && len(request.Tools) == 0 {
+			t.Error("ordinary exploration must expose tools")
+		}
+		if calls > 1 && len(request.Tools) != 0 {
+			t.Errorf("exploration budget decision exposed %d tools", len(request.Tools))
+		}
 		if calls <= 4 {
 			writeObservationResponse(w, []any{map[string]any{"type": "function_call", "id": fmt.Sprint("fc", calls), "call_id": fmt.Sprint("call", calls), "name": "list_dir", "arguments": fmt.Sprintf(`{"path":".","limit":%d}`, calls)}})
 			return

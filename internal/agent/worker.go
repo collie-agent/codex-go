@@ -70,6 +70,7 @@ func (w *Worker[T]) Run(modelContext fileContext.Contexter) (result T, text stri
 	}
 	// 输出协议和示例属于系统指令，状态正文始终位于工具结果之后。
 	client.SetSystemPrompt(appendContextFewShot(request.SystemPrompt, modelContext, w.agentConfig.LLMConfig.OutputSchema))
+	client.SetConversationHistory(request.ConversationHistoryText())
 	client.SetCorrectionMessages(w.corrections)
 	input := request.Input
 	// 调用方提供的末尾上下文紧随正文。
@@ -77,17 +78,26 @@ func (w *Worker[T]) Run(modelContext fileContext.Contexter) (result T, text stri
 		input += "\n\n" + request.TrailingContext
 	}
 	var messages []provider.ToolMessage
+	var discoveryMessages []provider.ToolMessage
 	for _, tr := range request.ToolResults {
 		content := tr.Result
 		if tr.Error != "" {
 			// 传输错误也必须回填给对应调用，不能被空结果掩盖。
 			content += "\n\nError: " + tr.Error
 		}
-		messages = append(messages, provider.ToolMessage{
+		message := provider.ToolMessage{
 			ChatCompletionToolMessageParam: *openai.ToolMessage(content, tr.ToolCallId).OfTool,
 			Name:                           tr.ToolName, Arguments: tr.Arguments,
-		})
+		}
+		// 目录检索紧邻最新状态；仅调整请求视图，保留各组顺序及调用/结果配对。
+		switch config.McpToolName(tr.ToolName) {
+		case config.GlobMCPToolName, config.ListDirMCPToolName:
+			discoveryMessages = append(discoveryMessages, message)
+		default:
+			messages = append(messages, message)
+		}
 	}
+	messages = append(messages, discoveryMessages...)
 	result, toolCalls, assistantOutput, err := client.RunWithToolMessages(w.ctx, request.RunID, input, session, messages)
 	w.inputTokens = client.InputTokens()
 	if err != nil {
@@ -110,7 +120,10 @@ func (w *Worker[T]) Run(modelContext fileContext.Contexter) (result T, text stri
 		return zero, "", nil, fmt.Errorf("task %s: %s returned unexpected tool calls", request.RunID, request.LogLabel)
 	}
 	// This is the assistant's visible response text for the ReAct turn, not hidden reasoning.
-	if w.agentConfig.LogLevel.InfoEnabled() {
+	// 探索阶段决策始终记录，便于在 error 日志级别下追踪阶段切换依据。
+	if request.LogLabel == "exploration budget" {
+		log.Printf("[INFO] [exploration budget] task %s: assistant output=%s", request.RunID, assistantOutput)
+	} else if w.agentConfig.LogLevel.InfoEnabled() {
 		log.Printf("[INFO] task %s: assistant output=%s", request.RunID, assistantOutput)
 	}
 	var toolParams []*mcpSdk.CallToolParams

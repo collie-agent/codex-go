@@ -60,14 +60,15 @@ func TestResumeKeepsHistoricalMarkdownSeparateFromCurrentToolMessages(t *testing
 			t.Error(err)
 		}
 		items := request.Input
-		if len(items) != 4 {
-			t.Errorf("want system, current call/output, current state; got %d messages", len(items))
+		if len(items) != 3 {
+			t.Errorf("want system, historical user including saved calls, current state; got %d messages", len(items))
 		} else {
-			if items[0].Role != "system" || items[3].Role != "user" || items[1].CallID != "current-call" || items[2].CallID != "current-call" || items[2].Output != "current result" {
-				t.Errorf("current tool messages lost: %+v", items)
+			if items[0].Role != "system" || items[1].Role != "user" || items[2].Role != "user" {
+				t.Errorf("unexpected history message roles: %+v", items)
 			}
-			for _, want := range []string{"- tool_interactions:", "history-first", "history-second", "first historical result", "permission denied"} {
-				if !strings.Contains(string(items[0].Content), want) {
+
+			for _, want := range []string{"- tool_interactions:", "history-first", "history-second", "first historical result", "permission denied", "current-call", "current result"} {
+				if !strings.Contains(string(items[1].Content), want) {
 					t.Errorf("historical Markdown missing %q", want)
 				}
 			}
@@ -121,10 +122,10 @@ func TestResumeKeepsHistoricalToolOwnershipAndUnknownOutcome(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Error(err)
 		}
-		if len(request.Input) != 2 {
-			t.Errorf("want historical system reference and current user; got %d messages", len(request.Input))
+		if len(request.Input) != 3 {
+			t.Errorf("want system, historical user reference and current user; got %d messages", len(request.Input))
 		} else {
-			system := request.Input[0].Content
+			system := request.Input[1].Content
 			// 历史工具保留执行实例归属和结果不确定性，不能作为当前原生工具消息。
 			for _, want := range []string{prior.RunID, "- tool_interactions:", "confirmed-call", "unknown-call", "saved evidence", "outcome unknown"} {
 				if !strings.Contains(system, want) {
@@ -193,7 +194,7 @@ func TestResumeSelectsInterruptedPlanHistoryByStepProgress(t *testing.T) {
 		}
 		history := ""
 		for _, item := range request.Input {
-			if item.Role == "system" {
+			if item.Role == "user" && strings.HasPrefix(item.Content, "# Conversation history") {
 				history += item.Content
 			}
 		}

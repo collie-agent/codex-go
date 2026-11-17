@@ -41,8 +41,11 @@ func TestReactRunSendsBuiltInPromptBeforeCustomPrompt(t *testing.T) {
 			if !strings.Contains(request.Input[0].Content, "# Required result schema") || strings.Contains(request.Input[1].Content, "# Required result schema") {
 				t.Error("output contract must only appear in system message")
 			}
-			if !strings.HasPrefix(request.Input[1].Content, "# DurableState\n") || !strings.HasSuffix(request.Input[1].Content, "original task verified") {
-				t.Error("standalone state must end with completion criteria")
+			if !strings.HasPrefix(request.Input[1].Content, "# DurableState\n") || !strings.Contains(request.Input[1].Content, "original task verified") {
+				t.Error("standalone state must include completion criteria")
+			}
+			if strings.Contains(request.Input[0].Content, explorationInstructions) || strings.Contains(request.Input[1].Content, explorationInstructions) || strings.Contains(request.Input[1].Content, "Exploration state:") {
+				t.Error("ordinary turns must omit exploration budget")
 			}
 			if strings.Contains(request.Input[0].Content, "本次运行目标") {
 				t.Error("task goal included in system message")

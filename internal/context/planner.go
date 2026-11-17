@@ -24,7 +24,6 @@ const plannerSystemPrompt = `你是 plan-execute 流程中的 planner。根据 G
 - CompletionEvidence：空字符串数组。
 - Observation：空字符串数组。
 
-使用 Line Protocol 时，根块为 PLAN，StepExecutions 使用重复的 STEPEXECUTIONS 子块，空 Observation 和 CompletionEvidence 省略。
 `
 
 type PlannerContext struct {

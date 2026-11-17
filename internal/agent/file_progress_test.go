@@ -247,15 +247,15 @@ func TestReactFileRecoveryRespectsRemainingTurnBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	process.SetFileProgressPolicy(agent.FileProgressPolicy{StalledBatches: 98, RecoveryWindow: 4})
-	// Start with 100 decisions left so recovery reaches the actual budget boundary.
-	durable := &state.DurableState{RunId: "budget", ExecutionID: "budget", Goal: "inspect", CompletionCriteria: []string{"inspect value"}, ExecutionProgress: json.RawMessage(`{"ExecutionID":"budget","UsedTurns":200}`)}
+	process.SetFileProgressPolicy(agent.FileProgressPolicy{StalledBatches: 8, RecoveryWindow: 4})
+	// Start with 10 decisions left so recovery reaches the actual budget boundary.
+	durable := &state.DurableState{RunId: "budget", ExecutionID: "budget", Goal: "inspect", CompletionCriteria: []string{"inspect value"}, ExecutionProgress: json.RawMessage(`{"ExecutionID":"budget","UsedTurns":50}`)}
 	cfg := &config.AgentConfig{ExplorationBudget: config.ExplorationBudget{InitialTurns: 1000, DecisionRetries: 1}, LogLevel: config.ErrorLogLevel, AllowTools: map[config.McpToolName]struct{}{config.ReadFileMCPToolName: {}}, LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema}}
 	_, _, err = process.Run(cfg, durable)
 	if err == nil || !strings.Contains(err.Error(), "file investigation stalled") {
 		t.Fatalf("expected bounded recovery failure, got %v", err)
 	}
-	if turns != 100 {
+	if turns != 10 {
 		t.Fatalf("recovery changed overall budget: turns=%d", turns)
 	}
 }
