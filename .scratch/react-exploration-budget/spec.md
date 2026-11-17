@@ -2,7 +2,7 @@
 
 Status: ready-for-agent
 
-四轮访谈中的设计决策已逐项确认。本文描述待实现行为；生产代码尚未实现。
+本文记录原始设计决策；实现进展见各实现工单。实施阶段操作准入与有界纠正的补充规格见 [08：实施阶段操作准入与有界纠正](issues/08-implementation-window-admission.md)。
 
 ## 问题与目标
 

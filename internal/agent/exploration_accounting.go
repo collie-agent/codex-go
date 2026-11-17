@@ -203,9 +203,12 @@ func (e *explorationState) batchPurpose(params []*sdk.CallToolParams) (string, m
 		}
 		id, _ := param.Meta[toolCallIDMetaKey].(string)
 		calls[id] = next
+		// 调查优先于修改、工作区检查和验证，禁止混合批次借低成本用途部分放行。
 		if next == "investigation" {
 			purpose = next
 		} else if next == "modification" && purpose != "investigation" {
+			purpose = next
+		} else if next == "workspace_check" && purpose == "verification" {
 			purpose = next
 		}
 	}

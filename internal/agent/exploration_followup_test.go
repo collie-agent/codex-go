@@ -187,7 +187,7 @@ func TestReactRepeatedFollowupHandoffCannotRefreshWindow(t *testing.T) {
 		modificationHandoff(),
 		modificationHandoff(),
 	})
-	if err == nil || !strings.Contains(err.Error(), "cannot refresh") {
+	if err == nil || !strings.Contains(err.Error(), "modification window exhausted") {
 		t.Fatalf("err=%v", err)
 	}
 	var saved struct {
@@ -200,7 +200,7 @@ func TestReactRepeatedFollowupHandoffCannotRefreshWindow(t *testing.T) {
 	if err := json.Unmarshal(durable.ExecutionProgress, &saved); err != nil {
 		t.Fatal(err)
 	}
-	if saved.Exploration.Used != 1 || saved.Exploration.ModificationLeft != 2 || len(saved.Exploration.Handoffs) != 2 || saved.Exploration.ModificationConfirmed || len(durable.ToolExecutions) != 2 {
+	if saved.Exploration.Used != 1 || saved.Exploration.ModificationLeft != 0 || len(saved.Exploration.Handoffs) != 2 || saved.Exploration.ModificationConfirmed || len(durable.ToolExecutions) != 2 {
 		t.Fatalf("progress=%s tools=%d", durable.ExecutionProgress, len(durable.ToolExecutions))
 	}
 }

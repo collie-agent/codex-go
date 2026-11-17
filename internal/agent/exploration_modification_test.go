@@ -201,7 +201,7 @@ func TestReactRepeatedHandoffCannotRefreshWindow(t *testing.T) {
 	workspace := t.TempDir()
 	durable := &state.DurableState{ExecutionID: "repeat", Goal: "change main.go", CompletionCriteria: []string{"changed"}}
 	err := runModificationScript(t, workspace, durable, config.ExplorationBudget{}, [][]any{modificationHandoff(), modificationTool("list", "list_dir", map[string]string{"path": "."}), modificationHandoff(), modificationHandoff()})
-	if err == nil || !strings.Contains(err.Error(), "cannot refresh") {
+	if err == nil || !strings.Contains(err.Error(), "modification window exhausted") {
 		t.Fatalf("err=%v", err)
 	}
 	var saved struct {
@@ -210,7 +210,7 @@ func TestReactRepeatedHandoffCannotRefreshWindow(t *testing.T) {
 	if err := json.Unmarshal(durable.ExecutionProgress, &saved); err != nil {
 		t.Fatal(err)
 	}
-	if saved.Exploration.ModificationLeft != 2 {
+	if saved.Exploration.ModificationLeft != 0 {
 		t.Fatalf("window refreshed: %s", durable.ExecutionProgress)
 	}
 }
@@ -219,7 +219,7 @@ func TestReactExhaustedExplorationDoesNotAllowWindowInvestigation(t *testing.T) 
 	durable := &state.DurableState{ExecutionID: "exhausted", Goal: "change main.go", CompletionCriteria: []string{"changed"}}
 	policy := config.DefaultExplorationBudget()
 	policy.InitialTurns = 1
-	err := runModificationScript(t, workspace, durable, policy, [][]any{modificationTool("list", "list_dir", map[string]string{"path": "."}), modificationHandoff(), modificationTool("read", "read_file", map[string]string{"path": "main.go"})})
+	err := runModificationScript(t, workspace, durable, policy, [][]any{modificationTool("list", "list_dir", map[string]string{"path": "."}), modificationHandoff(), modificationTool("read", "read_file", map[string]string{"path": "main.go"}), modificationTool("read2", "read_file", map[string]string{"path": "main.go"}), modificationTool("read3", "read_file", map[string]string{"path": "main.go"})})
 	if err == nil || !strings.Contains(err.Error(), "exploration allowance exhausted") {
 		t.Fatalf("err=%v", err)
 	}

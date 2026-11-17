@@ -221,7 +221,7 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 
 	if explorationEnabled {
 		e := budget.Exploration
-		log.Printf("[INFO] [exploration budget] instance=%s restore=%t legacy_exploration=%t initial_turns=%d extension_turns=%d max_extensions=%d decision_retries=%d modification_window_turns=%d task_type=%s phase=%s exploration=%d/%d extensions=%d invalid=%d modification_left=%d remaining_total=%d", durableState.ExecutionID, len(durableState.ExecutionProgress) > 0 || len(durableState.ToolExecutions) > 0, legacyExploration, e.Policy.InitialTurns, e.Policy.ExtensionTurns, e.Policy.MaxExtensions, e.Policy.DecisionRetries, e.Policy.ModificationWindowTurns, e.TaskType, e.Phase, e.Used, e.allowance(), e.Extensions, e.Invalid, e.ModificationLeft, r.maxTurn-budget.UsedTurns)
+		log.Printf("[INFO] [exploration budget] instance=%s restore=%t legacy_exploration=%t initial_turns=%d extension_turns=%d max_extensions=%d decision_retries=%d modification_window_turns=%d task_type=%s phase=%s exploration=%d/%d extensions=%d invalid=%d modification_left=%d remaining_total=%d rejection=%q", durableState.ExecutionID, len(durableState.ExecutionProgress) > 0 || len(durableState.ToolExecutions) > 0, legacyExploration, e.Policy.InitialTurns, e.Policy.ExtensionTurns, e.Policy.MaxExtensions, e.Policy.DecisionRetries, e.Policy.ModificationWindowTurns, e.TaskType, e.Phase, e.Used, e.allowance(), e.Extensions, e.Invalid, e.ModificationLeft, r.maxTurn-budget.UsedTurns, e.Rejection)
 		// 新 MCP 连接不继承旧进程身份；历史批次仍保留核验依据。
 		budget.Exploration.SessionPurposes = nil
 		budget.Exploration.SessionBaselines = nil
@@ -333,14 +333,30 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 			if explorationEnabled && budget.Exploration.required() {
 				request := modelContext.ModelRequest()
 				request.LogLabel = "exploration budget"
-				// 阶段决策只使用已有证据，不向模型暴露远程或本地工具。
-				request.AllowTools = false
 				e := budget.Exploration
+				// 已确认目标修改后仍需执行验证；返回的调查批次仍由下面的阶段门禁整批拒绝。
+				// 待纠错决策不能借此执行工具，首次交接也仍是独立的无工具轮次。
+				request.AllowTools = e.ModificationConfirmed && !e.Pending
 				// 仅在阈值决策或纠错待处理时追加预算提示，避免普通轮次重复占用上下文。
 				_, multiAgent := any(result).(MultiAgentResult)
-				request.TrailingContext += "\n" + explorationInstructions + "\n\n" + explorationFewShot(agentConfig.LLMConfig.OutputSchema, multiAgent)
+				if request.AllowTools {
+					request.TrailingContext += "\n已确认目标修改，但探索额度已耗尽。可以执行受支持的验证操作或按正常协议完成任务。继续调查前须依据已有证据单独提交 exploration 阶段决策，不得混入工具调用。"
+				} else {
+					request.TrailingContext += "\n" + explorationInstructions + "\n\n" + explorationFewShot(agentConfig.LLMConfig.OutputSchema, multiAgent)
+				}
 				request.TrailingContext += fmt.Sprintf("\nExploration state: instance=%s task_type=%s phase=%s used=%d/%d decision_required=%t extensions=%d rejection=%q modification_left=%d handoff=%d", durableState.ExecutionID, e.TaskType, e.Phase, e.Used, e.allowance(), e.required(), e.Extensions, e.Rejection, e.ModificationLeft, len(e.Handoffs))
 				decisionContext = frozenCompactContext{Contexter: modelContext, request: request}
+			}
+			if explorationEnabled && budget.Exploration.Phase == "implement" {
+				e := budget.Exploration
+				request := decisionContext.ModelRequest()
+				// 实施交接不在工具历史中；恢复也必须让模型看到既有证据和真实剩余窗口。
+				handoff, _ := json.Marshal(e.Handoff)
+				request.TrailingContext += fmt.Sprintf("\nImplementation state: instance=%s phase=%s used=%d/%d extensions=%d modification_left=%d handoff=%s", durableState.ExecutionID, e.Phase, e.Used, e.allowance(), e.Extensions, e.ModificationLeft, handoff)
+				if e.Rejection != "" {
+					request.TrailingContext += "\n" + e.Rejection
+				}
+				decisionContext = frozenCompactContext{Contexter: decisionContext, request: request}
 			}
 			if len(cachedDuplicates) > 0 {
 				// 缓存回传属于上一轮的协议响应，放在裁剪和压缩之后，且不写入实际执行历史。
@@ -442,24 +458,37 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 				}
 				candidate := *e
 				reason, decisionErr := candidate.decide(value.Exploration, r.maxTurn-budget.UsedTurns-1)
+				if len(toolParams) > 0 && e.Phase == "implement" {
+					decisionErr = fmt.Errorf("phase decision must be standalone; mixed tool batch was not executed")
+				}
+				// 实施中的无效决策与违规调查共用剩余窗口，不授予独立阶段纠错额度。
+				inModificationWindow := e.Phase == "implement" && !e.ModificationConfirmed
 				if decisionErr == nil {
 					*e = candidate
 					e.Pending = false
 				}
 				if decisionErr != nil {
 					e.Rejection = decisionErr.Error()
-					e.Invalid++
-					e.Pending = true
-					worker.corrections = append(worker.corrections, "Exploration decision rejected: "+decisionErr.Error())
+					if inModificationWindow {
+						e.ModificationLeft--
+						e.Pending = false
+						e.Rejection = fmt.Sprintf("Exploration decision rejected: %s; apply a target modification, submit a valid standalone extend decision or choose unable. modification_left=%d", decisionErr, e.ModificationLeft)
+						log.Printf("[INFO] [exploration budget] instance=%s operation=rejected correction_allowed=%t modification_left=%d", durableState.ExecutionID, e.ModificationLeft > 0, e.ModificationLeft)
+					} else {
+						e.Invalid++
+						e.Pending = true
+						worker.corrections = append(worker.corrections, "Exploration decision rejected: "+decisionErr.Error())
+					}
+					r.publishRejectedToolBatch(durableState.RunId, toolParams, e.Rejection)
 				}
 				log.Printf("[INFO] [exploration budget] instance=%s task_type=%s phase=%s exploration=%d/%d extensions=%d rejection=%q modification_left=%d handoff=%d decision_error=%v stop=%s", durableState.ExecutionID, e.TaskType, e.Phase, e.Used, e.allowance(), e.Extensions, e.Rejection, e.ModificationLeft, len(e.Handoffs), decisionErr, reason)
 				if err := saveDecisionProgress(durableState, budget, r.checkpoint); err != nil {
 					return zero, nil, err
 				}
-				if decisionErr != nil && e.Invalid > e.Policy.DecisionRetries {
+				if decisionErr != nil && !inModificationWindow && e.Invalid > e.Policy.DecisionRetries {
 					return finish("exploration decision corrections exhausted: " + decisionErr.Error())
 				}
-				if reason != "" {
+				if decisionErr == nil && reason != "" {
 					return finish(reason)
 				}
 				continue
@@ -508,10 +537,23 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 			e := budget.Exploration
 			if e.Phase == "implement" && batchPurpose == "investigation" && e.TaskType != "analysis" {
 				if e.Used >= e.allowance() {
-					return finish("exploration allowance exhausted; implementation requires existing evidence or an extension")
+					log.Printf("[INFO] [exploration budget] instance=%s purpose=%s admission=denied exploration=%d/%d modification_left=%d", durableState.ExecutionID, batchPurpose, e.Used, e.allowance(), e.ModificationLeft)
+					// 策略拒绝不是工具失败：不登记执行或预扣探索，直接消耗业务轮窗口，不能退款。
+					e.ModificationLeft--
+					e.Rejection = fmt.Sprintf("Operation rejected: exploration allowance exhausted; batch was not executed. Apply a target modification using existing evidence, submit a standalone exploration extend decision with gap, blocking_reason, investigation and exit_condition, or choose unable. modification_left=%d", e.ModificationLeft)
+					r.publishRejectedToolBatch(durableState.RunId, toolParams, e.Rejection)
+					if err := saveDecisionProgress(durableState, budget, r.checkpoint); err != nil {
+						return zero, nil, err
+					}
+					log.Printf("[INFO] [exploration budget] instance=%s operation=rejected correction_allowed=%t modification_left=%d", durableState.ExecutionID, e.ModificationLeft > 0, e.ModificationLeft)
+					if e.ModificationLeft <= 0 {
+						return finish("modification window exhausted without confirmed target change; exploration allowance exhausted")
+					}
+					continue
 				}
 				e.Used++
 			}
+			e.Rejection = "" // 已接受纠正操作，避免后续模型继续收到过期的拒绝及窗口余量。
 			e.Accounting = append(e.Accounting, explorationAccounting{Batch: batchOffset + i, Handoff: len(e.Handoffs), Purpose: batchPurpose, Calls: batchCalls, Charged: batchPurpose == "investigation" && e.TaskType != "analysis", Outcome: "pending"})
 			if len(e.Accounting) > 256 {
 				e.Accounting = e.Accounting[len(e.Accounting)-256:]
@@ -521,11 +563,16 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 			}
 		}
 		if explorationEnabled && budget.Exploration.Phase == "implement" {
+			// 工作区检查不赠送探索额度，也不证明修改；整个业务批次只扣一次修改窗口。
 			budget.Exploration.ModificationLeft--
 			budget.Exploration.Accounting[len(budget.Exploration.Accounting)-1].ModificationCharged = true
 			if err := saveDecisionProgress(durableState, budget, r.checkpoint); err != nil {
 				return zero, nil, err
 			}
+		}
+		if explorationEnabled {
+			e := budget.Exploration
+			log.Printf("[INFO] [exploration budget] instance=%s purpose=%s admission=allowed exploration=%d/%d modification_left=%d", durableState.ExecutionID, batchPurpose, e.Used, e.allowance(), e.ModificationLeft)
 		}
 		// 在登记和执行前移除重复项，也覆盖模型同一批返回的重复调用。
 		pending := toolParams[:0]
@@ -1038,7 +1085,16 @@ func hasNonEmptyItems(items []string) bool {
 	return true
 }
 
-// publishToolResult 只发布执行结果，不改变上下文或触发工具重试。
+// 拒绝发生前已发布 tool_call；即使随后保存失败，也须逐个发布终态。
+// 这里只发送事件，不把未执行调用写入执行记录或参与工具失败退款。
+func (r *BaseReactProcess[T]) publishRejectedToolBatch(taskID string, params []*mcpSdk.CallToolParams, reason string) {
+	for _, param := range params {
+		id, _ := param.Meta[toolCallIDMetaKey].(string)
+		r.publishToolResult(taskID, &fileContext.ToolResult{ToolName: param.Name, ToolCallId: id, Error: "tool batch was not executed: " + reason})
+	}
+}
+
+// publishToolResult 只发布工具终态，不改变上下文或触发工具重试。
 func (r *BaseReactProcess[T]) publishToolResult(taskID string, result *fileContext.ToolResult) {
 	if r.output == nil {
 		return

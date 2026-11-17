@@ -54,7 +54,7 @@ func runCommandExploration(t *testing.T, workspace string, outputs [][]any, poli
 	if len(policies) > 0 {
 		policy = policies[0]
 	}
-	result, _, err := process.Run(&config.AgentConfig{ExplorationBudget: policy, AllowTools: map[config.McpToolName]struct{}{config.ExecMCPToolName: {}, config.ExecStartMCPToolName: {}, config.ExecPollMCPToolName: {}, config.ExecStopMCPToolName: {}, config.ReadFileMCPToolName: {}}, LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema}}, durable)
+	result, _, err := process.Run(&config.AgentConfig{ExplorationBudget: policy, AllowTools: map[config.McpToolName]struct{}{config.ExecMCPToolName: {}, config.ApplyPatchMCPToolName: {}, config.ExecStartMCPToolName: {}, config.ExecPollMCPToolName: {}, config.ExecStopMCPToolName: {}, config.ReadFileMCPToolName: {}}, LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema}}, durable)
 	if err == nil && result.Status != CompletedReactStatus {
 		err = fmt.Errorf("unexpected result: %+v", result)
 	}
