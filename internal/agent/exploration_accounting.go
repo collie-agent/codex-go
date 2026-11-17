@@ -73,6 +73,18 @@ func (e *explorationState) settleFailedModification(record *explorationAccountin
 	failed := make(map[string]bool)
 	for _, call := range completed {
 		failed[call.ToolCallId] = call.Status == filemcp.ToolCallFailedStatus
+		// 命令非零退出的 MCP 状态仍可为 success；实施窗口按真实退出结果退款。
+		// 运行中、缺少退出码或无法解析的结果不属于已确认失败。
+		if call.Status == filemcp.ToolCallSuceessStatus && isCommandProgressTool(call.ToolName) {
+			var out struct {
+				State     string `json:"state"`
+				ExitCode  *int   `json:"exit_code"`
+				ErrorKind string `json:"error_kind"`
+			}
+			if commandResultPayload(call, &out) && out.State != "running" && out.ExitCode != nil {
+				failed[call.ToolCallId] = *out.ExitCode != 0 || out.ErrorKind != ""
+			}
+		}
 	}
 	for id := range record.Calls {
 		if !failed[id] {
@@ -139,7 +151,7 @@ func (e *explorationState) reconcile(completed []*state.ToolResult) {
 		if record.Outcome == "known" {
 			record.updateOutcome(completed)
 		}
-		if record.Outcome == "known" && record.Handoff > 0 && record.Handoff == len(e.Handoffs) && e.Phase == "implement" && modificationBatchKnown(completed) && (modificationBatchCandidate(completed) || record.SinceBatch > 0) {
+		if record.Outcome == "known" && record.Handoff == len(e.Handoffs) && (record.Handoff == 0 || e.Phase == "implement") && modificationBatchKnown(completed) && (modificationBatchCandidate(completed) || record.SinceBatch > 0) {
 			e.confirmModification(record.Before, record.After, record.Batch)
 		}
 		if record.Outcome == "pending" {
@@ -349,4 +361,45 @@ func (e *explorationState) confirmSessionModification(completed []*state.ToolRes
 		e.confirmModification(baseline.Targets, after, record.Batch)
 		delete(e.SessionBaselines, query.SessionID)
 	}
+}
+
+// 完成证据从本实例落盘的实际调用推导，恢复时不凭模型声明或当前工作区补造。
+func (e *explorationState) preHandoffVerified(history []*state.ToolResult) bool {
+	latest := 0
+	for _, evidence := range e.ModificationEvidence {
+		if evidence.Batch > latest {
+			latest = evidence.Batch
+		}
+	}
+	if latest == 0 {
+		return false
+	}
+	// 以后续验证为准，不能让较早的成功掩盖最新失败或未知结果。
+	for i := len(e.Accounting) - 1; i >= 0; i-- {
+		record := e.Accounting[i]
+		if record.Batch <= latest || record.Purpose != "verification" {
+			continue
+		}
+		found := 0
+		valid := record.Outcome == "known"
+		for _, call := range history {
+			if call.Batch != record.Batch {
+				continue
+			}
+			if _, ok := record.Calls[call.ToolCallId]; !ok {
+				continue
+			}
+			found++
+			var out struct {
+				ExitCode  *int   `json:"exit_code"`
+				State     string `json:"state"`
+				ErrorKind string `json:"error_kind"`
+			}
+			if call.Status != filemcp.ToolCallSuceessStatus || !isCommandProgressTool(call.ToolName) || !commandResultPayload(call, &out) || out.ExitCode == nil || *out.ExitCode != 0 || out.State == "running" || out.ErrorKind != "" {
+				valid = false
+			}
+		}
+		return valid && found > 0 && found == len(record.Calls)
+	}
+	return false
 }

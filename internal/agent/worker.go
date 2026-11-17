@@ -72,6 +72,7 @@ func (w *Worker[T]) Run(modelContext fileContext.Contexter) (result T, text stri
 	client.SetSystemPrompt(appendContextFewShot(request.SystemPrompt, modelContext, w.agentConfig.LLMConfig.OutputSchema))
 	client.SetConversationHistory(request.ConversationHistoryText())
 	client.SetCorrectionMessages(w.corrections)
+	client.SetFinalUserMessage(request.FinalUserMessage)
 	input := request.Input
 	// 调用方提供的末尾上下文紧随正文。
 	if request.TrailingContext != "" {

@@ -41,6 +41,7 @@ type baseResponsesApiClient[T any] struct {
 	systemPrompt        string
 	conversationHistory string
 	corrections         []string
+	finalUserMessage    string
 	logLevel            config.LogLevel
 	output              Outputer
 	inputTokens         int64
@@ -108,6 +109,11 @@ func (c *baseResponsesApiClient[T]) SetConversationHistory(history string) {
 // 复制切片，避免调用方后续追加时改变当前请求的消息快照。
 func (c *baseResponsesApiClient[T]) SetCorrectionMessages(corrections []string) {
 	c.corrections = slices.Clone(corrections)
+}
+
+// SetFinalUserMessage 在正文和纠错之后追加本轮的独立 user 指令。
+func (c *baseResponsesApiClient[T]) SetFinalUserMessage(message string) {
+	c.finalUserMessage = message
 }
 
 // OutputParseError 区分可由模型纠正的输出格式错误和请求、配置等运行错误。
@@ -229,15 +235,18 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 		},
 		Tools: tools,
 		Text:  textConfig,
-		// 当前请求不重放 reasoning 项，显式关闭思考模式以支持后续工具结果回传。
+		// 未配置时保持 none；显式配置在流式和非流式请求中一致生效。
 		Reasoning: shared.ReasoningParam{Effort: shared.ReasoningEffortNone},
+	}
+	if effort := c.agentConfig.LLMConfig.ReasoningEffort; effort != "" {
+		params.Reasoning.Effort = shared.ReasoningEffort(effort)
 	}
 	// 省略零值，保留现有服务端默认行为；流式和非流式共享此预算。
 	if c.agentConfig.LLMConfig.MaxOutputTokens > 0 {
 		params.MaxOutputTokens = openai.Int(c.agentConfig.LLMConfig.MaxOutputTokens)
 	}
-	if len(messages) > 0 || c.systemPrompt != "" || c.conversationHistory != "" || len(c.corrections) > 0 {
-		items := make(responses.ResponseInputParam, 0, 2*len(messages)+2+len(c.corrections))
+	if len(messages) > 0 || c.systemPrompt != "" || c.conversationHistory != "" || len(c.corrections) > 0 || c.finalUserMessage != "" {
+		items := make(responses.ResponseInputParam, 0, 2*len(messages)+3+len(c.corrections))
 		// 系统指令独立于任务数据，工具重放时也保持相同角色。
 		if c.systemPrompt != "" {
 			items = append(items, responses.ResponseInputItemParamOfMessage(c.systemPrompt, responses.EasyInputMessageRoleSystem))
@@ -267,6 +276,9 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 		items = append(items, responses.ResponseInputItemParamOfMessage(input, responses.EasyInputMessageRoleUser))
 		for _, correction := range c.corrections {
 			items = append(items, responses.ResponseInputItemParamOfMessage(correction, responses.EasyInputMessageRoleUser))
+		}
+		if c.finalUserMessage != "" {
+			items = append(items, responses.ResponseInputItemParamOfMessage(c.finalUserMessage, responses.EasyInputMessageRoleUser))
 		}
 		params.Input = responses.ResponseNewParamsInputUnion{OfInputItemList: items}
 	}

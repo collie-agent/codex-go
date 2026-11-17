@@ -89,6 +89,7 @@ type Contexter interface {
 }
 
 // ModelRequest 是与 provider 无关的请求快照；TrailingContext 在正文之后追加。
+// FinalUserMessage 作为独立 user 消息置于所有历史、正文和纠错消息之后。
 // AllowTools 是上下文的能力限制，仍需与 agent 配置中的工具权限取交集。
 type ModelRequest struct {
 	RunID               string
@@ -98,6 +99,7 @@ type ModelRequest struct {
 	ResumedHistory      *RunOutcome
 	ToolResults         []*ToolResult
 	TrailingContext     string
+	FinalUserMessage    string
 	AllowTools          bool
 	LogLabel            string
 }

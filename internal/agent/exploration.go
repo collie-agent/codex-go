@@ -45,6 +45,8 @@ const explorationInstructions = `# 探索预算与阶段决策
 
 达到阈值时，返回 exploration，choice 为 implement、extend 或 unable：
 
+- 已有本实例确认的修改且随后验证成功时，可以按正常协议返回 completed，无须创建新的实施交接。
+- implement 的 next_operation 必须描述接下来执行的具体修改，不能填写“无需操作”“直接结束”或已完成声明。
 - implement：确立修改任务，必须提供 target_files（工作区相对路径）、target（预期修改）、evidence 和 next_operation；也兼容在 target 中提供单个文件的旧格式。
 - extend：必须提供 gap、blocking_reason、investigation 和 exit_condition。
 - unable：必须提供 reason 和 execution_state。
@@ -198,6 +200,13 @@ func (e *explorationState) decide(d *state.ExplorationDecision, remaining int) (
 	case "implement":
 		if !nonempty(d.Target, d.Evidence, d.NextOperation) {
 			return "", fmt.Errorf("implement requires target, evidence, next_operation")
+		}
+		// 否定操作或结束声明不构成新的实施承诺，应走已有证据完成路径。
+		operation := strings.ToLower(strings.TrimSpace(d.NextOperation))
+		for _, phrase := range []string{"无需", "无须", "不需要", "直接结束", "返回最终", "no further", "no operation", "nothing to", "already complete", "return final", "no-op", "noop"} {
+			if strings.Contains(operation, phrase) {
+				return "", fmt.Errorf("implement next_operation must describe a concrete modification; use normal completion for verified existing changes")
+			}
 		}
 		if err := e.beginModification(d); err != nil {
 			return "", err

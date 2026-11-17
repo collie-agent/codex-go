@@ -93,7 +93,12 @@ func TestReactWorkspaceChecksExhaustWindowWithoutConfirmingModification(t *testi
 				modificationTool("status3", "exec", map[string]any{"command": "git", "args": []string{"status", "--short", "--branch"}}),
 				{observationMessage(`{"status":"completed","answer":"claimed modified"}`)},
 			}, policy)
-			if err == nil || !strings.Contains(err.Error(), "modification window exhausted") {
+			wantReason, wantLeft := "modification window exhausted", 0
+			if !gitWorkspace {
+				// 非仓库中的检查明确失败，不扣窗口，也不能让完成声明冒充修改。
+				wantReason, wantLeft = "no confirmed target modification", policy.ModificationWindowTurns
+			}
+			if err == nil || !strings.Contains(err.Error(), wantReason) {
 				t.Fatalf("err=%v state=%s", err, durable.ExecutionProgress)
 			}
 			var saved struct {
@@ -105,7 +110,7 @@ func TestReactWorkspaceChecksExhaustWindowWithoutConfirmingModification(t *testi
 			if err := json.Unmarshal(durable.ExecutionProgress, &saved); err != nil {
 				t.Fatal(err)
 			}
-			if saved.Exploration.Used != 1 || saved.Exploration.ModificationLeft != 0 || saved.Exploration.ModificationConfirmed || len(durable.ToolExecutions) != 4 {
+			if saved.Exploration.Used != 1 || saved.Exploration.ModificationLeft != wantLeft || saved.Exploration.ModificationConfirmed || len(durable.ToolExecutions) != 4 {
 				t.Fatalf("state=%s tools=%+v", durable.ExecutionProgress, durable.ToolExecutions)
 			}
 			for _, call := range durable.ToolExecutions[1:] {

@@ -356,6 +356,8 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 				if e.Rejection != "" {
 					request.TrailingContext += "\n" + e.Rejection
 				}
+				// 每轮重建提示，包含真实剩余窗口；单独置于纠错消息之后，明确下一步实施意图。
+				request.FinalUserMessage = fmt.Sprintf("已进入实施阶段，剩余修改窗口为 %d 轮。请依据已有证据，优先对 target_files 执行 next_operation，尽快产生实际目标变更。仅在修改确有需要时执行工作区检查。若存在阻止安全修改的信息缺口，请单独申请探索延期；无法继续时返回 unable。修改后执行验证。", e.ModificationLeft)
 				decisionContext = frozenCompactContext{Contexter: decisionContext, request: request}
 			}
 			if len(cachedDuplicates) > 0 {
@@ -508,6 +510,12 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 		if explorationEnabled && budget.Exploration.Phase == "implement" && !budget.Exploration.ModificationConfirmed && len(toolParams) == 0 {
 			return finish("implementation handoff has no confirmed target modification")
 		}
+		if len(toolParams) == 0 && explorationEnabled && progressResult(&result).Status == CompletedReactStatus {
+			e := budget.Exploration
+			if e.ModificationConfirmed && len(e.Handoffs) == 0 && e.Used >= e.allowance() && !e.preHandoffVerified(durableState.ToolExecutions) {
+				return finish("pre-handoff modification requires successful verification after latest change")
+			}
+		}
 		if len(toolParams) == 0 {
 			validationErr := validate(result)
 			terminal := validationErr == nil
@@ -651,9 +659,13 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 		}
 		consecutiveDuplicates = 0
 		var modificationBefore map[string]targetSnapshot
-		if explorationEnabled && budget.Exploration.Phase == "implement" {
+		if explorationEnabled && (budget.Exploration.Phase == "implement" || budget.Exploration.Handoff == nil) {
 			e := budget.Exploration
-			modificationBefore = snapshotModificationTargets(r.toolConfig.Workspace, e)
+			targets := e
+			if e.Handoff == nil {
+				targets = preHandoffTargets(toolParams)
+			}
+			modificationBefore = snapshotModificationTargets(r.toolConfig.Workspace, targets)
 			e.Accounting[len(e.Accounting)-1].Before = modificationBefore
 			if err := saveDecisionProgress(durableState, budget, r.checkpoint); err != nil {
 				return zero, nil, err
@@ -730,7 +742,7 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 				}
 				e.captureSessionBaseline(completed, record)
 				if record.Before != nil {
-					record.After = snapshotModificationTargets(r.toolConfig.Workspace, e)
+					record.After = snapshotRecordedTargets(r.toolConfig.Workspace, record.Before)
 				}
 				e.settleFailedInvestigation(record, completed)
 				record.updateOutcome(completed)
@@ -759,7 +771,7 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 			e.recordCommandSessions(completed, batchCalls, modificationBefore, batchOffset+i)
 			record := &e.Accounting[len(e.Accounting)-1]
 			if modificationBefore != nil && record.After == nil {
-				record.After = snapshotModificationTargets(r.toolConfig.Workspace, e)
+				record.After = snapshotRecordedTargets(r.toolConfig.Workspace, record.Before)
 			}
 			e.captureSessionBaseline(completed, record)
 			e.settleFailedInvestigation(record, completed)

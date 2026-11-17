@@ -88,9 +88,12 @@ agents:
       model: your-compact-model
       output_schema: json_llm_output # 或 line_protocol_llm_output
       stream: false
+      reasoning_effort: high # 省略时为 none；取值需由模型支持
     sys_prompt: |
       保留与当前目标有关的关键证据。
 ```
+
+`llm.reasoning_effort` 设置 Responses API 的 `reasoning.effort`，例如 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`。配置值原样传给服务端，具体支持值由模型和网关决定；省略时保持 `none`。流式和非流式均生效；代理省略专用 `llm` 时继承 `base.llm`，提供专用 `llm` 时在该块单独设置。
 
 `llm.max_output_tokens` 可设置单次响应的输出预算，例如 `32768`（需在模型和网关允许的范围内）；省略或设为 `0` 时使用服务端默认值，负数不合法。遇到 `status=incomplete`、`incomplete reason=max_output_tokens` 时，可调高此值，并检查网关的输出限制，将大型文件写入拆成多次工具调用。此设置与输入上下文压缩阈值独立；配置了代理专用 `llm` 时需在该块设置。截断响应仍作为失败处理，避免执行不完整的工具参数。
 

@@ -56,6 +56,16 @@ func TestReactResumeImplementationAdmissionCompletesRealChange(t *testing.T) {
 					return
 				}
 				if resumed && requests == 0 {
+					var messages []struct{ Role, Content string }
+					if err := json.Unmarshal(body.Input, &messages); err != nil {
+						t.Error(err)
+						http.Error(w, "invalid model input", http.StatusBadRequest)
+						return
+					}
+					last := messages[len(messages)-1]
+					if last.Role != "user" || !strings.HasPrefix(last.Content, "已进入实施阶段，剩余修改窗口为 2 轮。") {
+						t.Errorf("restored model missing final implementation instruction: %+v", last)
+					}
 					for _, want := range []string{"modification_left=2", "phase=implement", "source inspected", "apply patch"} {
 						if !strings.Contains(input, want) {
 							t.Errorf("restored model missing %q: %s", want, input)

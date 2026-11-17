@@ -2,6 +2,7 @@ package agent
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strings"
 
 	state "github.com/collie-agent/codex-go/internal/context"
+	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type modificationEvidence struct {
@@ -56,8 +58,8 @@ func (e *explorationState) beginModification(d *state.ExplorationDecision) error
 // 批次前后观察同一目标文件，既有脏内容只作为基准，不能充当本次变更。
 func snapshotModificationTargets(workspace string, e *explorationState) map[string]targetSnapshot {
 	snapshots := make(map[string]targetSnapshot)
-	if e.Handoff == nil {
-		return snapshots
+	if e.Handoff == nil || len(e.Handoff.TargetFiles) == 0 {
+		return nil
 	}
 	for _, path := range e.Handoff.TargetFiles {
 		snapshots[path] = targetSnapshot{}
@@ -126,7 +128,54 @@ func (e *explorationState) confirmModification(before, after map[string]targetSn
 		}
 	}
 	if e.ModificationConfirmed {
+		e.TaskType = "modification"
 		e.Phase = "exploring"
 		e.ModificationLeft = 0
 	}
+}
+
+// 交接前仅从明确的补丁头提取候选路径；快照仍执行完整的工作区边界检查。
+// 候选路径不是变更证据，只有成功批次的前后内容差异才能确认修改。
+func preHandoffTargets(params []*sdk.CallToolParams) *explorationState {
+	paths := []string{}
+	for _, param := range params {
+		if param.Name == "exec" || param.Name == "exec_start" {
+			raw, _ := json.Marshal(param.Arguments)
+			var args struct {
+				Command string
+				Args    []string
+			}
+			// 只接受运行时已经识别的简单 sed -i 修改语法。
+			if json.Unmarshal(raw, &args) == nil && explorationPurpose(param) == "modification" && args.Command == "sed" && len(args.Args) > 0 {
+				paths = append(paths, args.Args[len(args.Args)-1])
+			}
+			continue
+		}
+		if param.Name != "apply_patch" {
+			continue
+		}
+		raw, _ := json.Marshal(param.Arguments)
+		var args struct{ Patch string }
+		if json.Unmarshal(raw, &args) != nil {
+			continue
+		}
+		for _, line := range strings.Split(args.Patch, "\n") {
+			if !strings.HasPrefix(line, "--- ") && !strings.HasPrefix(line, "+++ ") {
+				continue
+			}
+			path := strings.TrimSpace(strings.SplitN(line[4:], "\t", 2)[0])
+			if path != "/dev/null" && path != "" {
+				paths = append(paths, path)
+			}
+		}
+	}
+	return &explorationState{Handoff: &state.ExplorationDecision{TargetFiles: paths}}
+}
+
+func snapshotRecordedTargets(workspace string, before map[string]targetSnapshot) map[string]targetSnapshot {
+	paths := make([]string, 0, len(before))
+	for path := range before {
+		paths = append(paths, path)
+	}
+	return snapshotModificationTargets(workspace, &explorationState{Handoff: &state.ExplorationDecision{TargetFiles: paths}})
 }

@@ -324,7 +324,7 @@ func resolveLLM(raw yamlLLMConfig) (*LLMConfig, error) {
 	if baseURL == "" {
 		baseURL = "https://api.openai.com/v1"
 	}
-	return &LLMConfig{MaxOutputTokens: raw.MaxOutputTokens, Stream: raw.Stream, BaseUrl: baseURL, ApiKey: key, Model: raw.Model, OutputSchema: LLMOutputSchema(output)}, nil
+	return &LLMConfig{ReasoningEffort: raw.ReasoningEffort, MaxOutputTokens: raw.MaxOutputTokens, Stream: raw.Stream, BaseUrl: baseURL, ApiKey: key, Model: raw.Model, OutputSchema: LLMOutputSchema(output)}, nil
 }
 
 func rejectNull(node *yaml.Node) error {
@@ -364,6 +364,7 @@ type yamlAgentSettings struct {
 	SysPrompt         *string                `yaml:"sys_prompt"`
 }
 type yamlLLMConfig struct {
+	ReasoningEffort string `yaml:"reasoning_effort"`
 	MaxOutputTokens int64  `yaml:"max_output_tokens"`
 	Stream          bool   `yaml:"stream"`
 	BaseURL         string `yaml:"base_url"`

@@ -8,6 +8,8 @@ const (
 )
 
 type LLMConfig struct {
+	// ReasoningEffort 控制模型思考强度；空值保留 none 的默认行为。
+	ReasoningEffort string
 	// MaxOutputTokens 为零时使用服务端默认值，正数显式限制单次响应预算。
 	MaxOutputTokens int64
 	// Stream enables SSE transport; omitted configurations keep non-streaming behavior.
