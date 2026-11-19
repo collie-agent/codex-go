@@ -392,7 +392,7 @@ func TestConversationHistoryContextLimitStopsWithoutCompressibleHistory(t *testi
 		t.Fatal(err)
 	}
 	prior.Status = "completed"
-	payload := strings.Repeat("full-history-", 10000) + "history-tail"
+	payload := strings.Repeat("full-history-", 25000) + "history-tail"
 	prior.Result, err = json.Marshal(payload)
 	if err != nil {
 		t.Fatal(err)

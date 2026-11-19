@@ -26,7 +26,7 @@ type targetSnapshot struct {
 }
 
 func (e *explorationState) beginModification(d *state.ExplorationDecision) error {
-	if e.Phase == "implement" && !e.ModificationConfirmed {
+	if e.awaitingTargetChange() {
 		return fmt.Errorf("pending implementation handoff cannot refresh modification window")
 	}
 	paths := d.TargetFiles
@@ -51,7 +51,7 @@ func (e *explorationState) beginModification(d *state.ExplorationDecision) error
 		e.ModificationLeft = 3
 	}
 	e.ModificationConfirmed = false
-	e.Phase = "implement"
+	e.Phase = phaseImplement
 	return nil
 }
 
@@ -129,7 +129,7 @@ func (e *explorationState) confirmModification(before, after map[string]targetSn
 	}
 	if e.ModificationConfirmed {
 		e.TaskType = "modification"
-		e.Phase = "exploring"
+		e.Phase = phaseExploring
 		e.ModificationLeft = 0
 	}
 }

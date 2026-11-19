@@ -19,6 +19,5 @@ var (
 	_ AgentProcessor[MultiAgentResult] = (*MultiAgentReactProcess)(nil)
 	_ AgentProcessor[PlannerResult]    = (*PlannerProcess)(nil)
 	_ AgentProcessor[ReactResult]      = (*ReactProcess[ReactResult])(nil)
-	_ AgentProcessor[ObserveResult]    = (*ReactProcess[ObserveResult])(nil)
 	_ AgentProcessor[ObserveResult]    = (*ObserveProcess[ObserveResult])(nil)
 )

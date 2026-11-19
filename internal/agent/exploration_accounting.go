@@ -2,6 +2,8 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
+	"log"
 
 	state "github.com/collie-agent/codex-go/internal/context"
 	filemcp "github.com/collie-agent/codex-go/internal/mcp"
@@ -29,6 +31,7 @@ func explorationPurpose(param *sdk.CallToolParams) string {
 	return "investigation"
 }
 
+// 保存每批工具调用的用途、扣费状态，以及确认目标文件变更所需的证据
 // 批次是并行调用的证据边界；不把净变化归因到某一个命令。
 type explorationAccounting struct {
 	Batch               int
@@ -91,7 +94,7 @@ func (e *explorationState) settleFailedModification(record *explorationAccountin
 			return
 		}
 	}
-	if e.Phase == "implement" && record.Handoff == len(e.Handoffs) {
+	if e.Phase == phaseImplement && record.Handoff == len(e.Handoffs) {
 		e.ModificationLeft++
 	}
 	record.ModificationCharged = false
@@ -151,7 +154,7 @@ func (e *explorationState) reconcile(completed []*state.ToolResult) {
 		if record.Outcome == "known" {
 			record.updateOutcome(completed)
 		}
-		if record.Outcome == "known" && record.Handoff == len(e.Handoffs) && (record.Handoff == 0 || e.Phase == "implement") && modificationBatchKnown(completed) && (modificationBatchCandidate(completed) || record.SinceBatch > 0) {
+		if record.Outcome == "known" && record.Handoff == len(e.Handoffs) && (record.Handoff == 0 || e.Phase == phaseImplement) && modificationBatchKnown(completed) && (modificationBatchCandidate(completed) || record.SinceBatch > 0) {
 			e.confirmModification(record.Before, record.After, record.Batch)
 		}
 		if record.Outcome == "pending" {
@@ -180,6 +183,17 @@ func (e *explorationState) captureSessionBaseline(completed []*state.ToolResult,
 	}
 }
 
+/*
+返回
+
+purpose 是整批的用途，供主循环判断探索额度和批次准入。
+calls 是 调用 ID → 用途 的映射，供批次记账、失败退款和后续查询使用
+整批采用其中优先级最高的用途：
+
+investigation（调查） > modification（修改） > workspace_check（工作区检查） > verification（验证）
+
+例如，同一批包含 rg 搜索和 apply_patch，calls 会分别记录 investigation 和 modification，整批则按 investigation 处理。如果实施阶段的探索额度已经用尽，这一批会整体被拒绝
+*/
 func (e *explorationState) batchPurpose(params []*sdk.CallToolParams) (string, map[string]string) {
 	purpose := "verification"
 	calls := make(map[string]string)
@@ -402,4 +416,112 @@ func (e *explorationState) preHandoffVerified(history []*state.ToolResult) bool 
 		return valid && found > 0 && found == len(record.Calls)
 	}
 	return false
+}
+
+// registerBatch 在工具执行前按批次用途结算探索额度。被拒批次没有执行记录可供退款。
+func (e *explorationState) registerBatch(batch int, purpose string, calls map[string]string) bool {
+	if e.Phase == phaseImplement && purpose == "investigation" && e.TaskType != "analysis" {
+		if e.Used >= e.allowance() {
+			// 策略拒绝不是工具失败：不登记执行或预扣探索，直接消耗业务轮窗口，不能退款。
+			e.ModificationLeft--
+			e.Rejection = fmt.Sprintf("Operation rejected: exploration allowance exhausted; batch was not executed. Apply a target modification using existing evidence, submit a standalone exploration extend decision with gap, blocking_reason, investigation and exit_condition, or choose unable. modification_left=%d", e.ModificationLeft)
+			return false
+		}
+		e.Used++
+	}
+	e.Rejection = "" // 已接受纠正操作，避免后续模型继续收到过期的拒绝及窗口余量。
+	e.Accounting = append(e.Accounting, explorationAccounting{Batch: batch, Handoff: len(e.Handoffs), Purpose: purpose, Calls: calls, Charged: purpose == "investigation" && e.TaskType != "analysis", Outcome: "pending"})
+	if len(e.Accounting) > 256 {
+		e.Accounting = e.Accounting[len(e.Accounting)-256:]
+	}
+	return true
+}
+
+// 批次登记成功后才扣修改窗口；扣费标记和余额在下一检查点一起保存。
+func (e *explorationState) chargeModificationBatch() bool {
+	if e.Phase != phaseImplement {
+		return false
+	}
+	e.ModificationLeft--
+	e.Accounting[len(e.Accounting)-1].ModificationCharged = true
+	return true
+}
+
+// admitExplorationBatch 先持久化批次记账，再单独持久化实施窗口扣减。
+func (r *BaseReactProcess[T]) admitExplorationBatch(durable *state.DurableState, budget *executionProgress, toolParams []*sdk.CallToolParams, batch int, batchPurpose string, batchCalls map[string]string) (admitted bool, stopReason string, err error) {
+	e := budget.Exploration
+	if !e.registerBatch(batch, batchPurpose, batchCalls) {
+		log.Printf("[INFO] [exploration budget] instance=%s purpose=%s admission=denied exploration=%d/%d modification_left=%d", durable.ExecutionID, batchPurpose, e.Used, e.allowance(), e.ModificationLeft)
+		r.publishRejectedToolBatch(durable.RunId, toolParams, e.Rejection)
+		if err := saveDecisionProgress(durable, budget, r.checkpoint); err != nil {
+			return false, "", err
+		}
+		log.Printf("[INFO] [exploration budget] instance=%s operation=rejected correction_allowed=%t modification_left=%d", durable.ExecutionID, e.ModificationLeft > 0, e.ModificationLeft)
+		if reason := e.stopReason(); reason != "" {
+			return false, reason + "; exploration allowance exhausted", nil
+		}
+		return false, "", nil
+	}
+	if err := saveDecisionProgress(durable, budget, r.checkpoint); err != nil {
+		return false, "", err
+	}
+	if e.chargeModificationBatch() {
+		if err := saveDecisionProgress(durable, budget, r.checkpoint); err != nil {
+			return false, "", err
+		}
+	}
+	log.Printf("[INFO] [exploration budget] instance=%s purpose=%s admission=allowed exploration=%d/%d modification_left=%d", durable.ExecutionID, batchPurpose, e.Used, e.allowance(), e.ModificationLeft)
+	return true, "", nil
+}
+
+// checkpointExplorationBatch 将最后一个调用的结果与批次快照一起落盘，便于恢复时补做确认。
+func (r *BaseReactProcess[T]) checkpointExplorationBatch(durable *state.DurableState, budget *executionProgress) error {
+	e := budget.Exploration
+	record := &e.Accounting[len(e.Accounting)-1]
+	var completed []*state.ToolResult
+	for _, call := range durable.ToolExecutions {
+		if call.Batch != record.Batch {
+			continue
+		}
+		if call.Status == "" {
+			return nil
+		}
+		completed = append(completed, call)
+	}
+	if len(completed) == 0 {
+		return nil
+	}
+	e.captureSessionBaseline(completed, record)
+	if record.Before != nil {
+		record.After = snapshotRecordedTargets(r.toolConfig.Workspace, record.Before)
+	}
+	e.settleFailedInvestigation(record, completed)
+	record.updateOutcome(completed)
+	return saveDecisionProgress(durable, budget, nil)
+}
+
+// settleExplorationBatch 确认批次结果和阶段变化，再提交已结算的预算。
+func (r *BaseReactProcess[T]) settleExplorationBatch(durable *state.DurableState, budget *executionProgress, completed []*state.ToolResult, modificationBefore map[string]targetSnapshot) error {
+	e := budget.Exploration
+	record := &e.Accounting[len(e.Accounting)-1]
+	e.recordCommandSessions(completed, record.Calls, modificationBefore, record.Batch)
+	if modificationBefore != nil && record.After == nil {
+		record.After = snapshotRecordedTargets(r.toolConfig.Workspace, record.Before)
+	}
+	e.captureSessionBaseline(completed, record)
+	e.settleFailedInvestigation(record, completed)
+	record.updateOutcome(completed)
+	if record.hasVerificationCommand(completed) {
+		// 测试与仍在运行的修改进程可能重叠，旧启动基准不再能区分变更来源。
+		e.SessionBaselines = nil
+	}
+	if modificationBefore != nil && record.Outcome == "known" {
+		if modificationBatchCandidate(completed) {
+			e.confirmModification(modificationBefore, record.After, record.Batch)
+		}
+		e.confirmSessionModification(completed, record.After, record)
+	}
+	log.Printf("[INFO] [exploration budget] instance=%s exploration=%d/%d batch=%d since_batch=%d purpose=%s calls=%v outcome=%s confirmed=%t evidence=%v", durable.ExecutionID, e.Used, e.allowance(), record.Batch, record.SinceBatch, record.Purpose, record.Calls, record.Outcome, e.ModificationConfirmed, e.ModificationEvidence)
+	record.Applied = true
+	return saveDecisionProgress(durable, budget, r.checkpoint)
 }

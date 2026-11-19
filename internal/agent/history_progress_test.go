@@ -172,7 +172,7 @@ func TestReactHistoryCompactionAllowsOneNecessaryReread(t *testing.T) {
 		if turn == 1 {
 			// A provider usage report forces real compaction before the next decision.
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{"id": "usage", "status": "completed", "usage": map[string]any{"input_tokens": 33000, "output_tokens": 1, "total_tokens": 33001}, "output": []any{call}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "usage", "status": "completed", "usage": map[string]any{"input_tokens": 66000, "output_tokens": 1, "total_tokens": 66001}, "output": []any{call}})
 			return
 		}
 		if !strings.Contains(string(body), "# Execution summary") {

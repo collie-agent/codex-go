@@ -35,7 +35,9 @@ func (e *BusinessFailureError) Error() string {
 }
 
 // ReactSchema 保留普通 ReAct 的输出类型；多代理输出由 MultiAgentReactProcess 处理。
-type ReactSchema interface{ ReactResult | ObserveResult }
+type ReactSchema interface{ ReactResult }
+
+type reactExecutionSchema interface{ ReactResult | MultiAgentResult }
 
 // ReactProcess 负责普通 ReAct、计划步骤验收及向 plan-execute 的交接。
 type ReactProcess[T ReactSchema] struct {
@@ -86,10 +88,7 @@ func (r *ReactProcess[T]) Run(agentConfig *config.AgentConfig, durableState *fil
 		delete(agentConfig.AllowTools, config.SwitchToPlanExecuteMCPToolName)
 	}
 	validate := func(result T) error {
-		reactResult, ok := any(result).(ReactResult)
-		if !ok {
-			return nil
-		}
+		reactResult := ReactResult(result)
 		// 格式解析不校验业务约束：仅明确完成且有答案时才允许成功退出。
 		switch reactResult.Status {
 		case FailedReactStatus:
@@ -221,8 +220,7 @@ func (r *ReactProcess[T]) updateCompletionCriteria(param *mcpSdk.CallToolParams,
 	return nil
 }
 
-// progressResult 将普通 ReAct 的收尾结果映射到输出；ObserveResult 不支持失败收尾。
+// progressResult 返回普通 ReAct 的业务结果。
 func (r *ReactProcess[T]) progressResult(result *T) *ReactResult {
-	value, _ := any(result).(*ReactResult)
-	return value
+	return any(result).(*ReactResult)
 }

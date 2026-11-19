@@ -132,7 +132,7 @@ func TestReactResumeLogsOriginalExplorationPolicy(t *testing.T) {
 	defer log.SetOutput(previous)
 	durable := &state.DurableState{ExecutionID: "logged-resume", Goal: "fix main.go", CompletionCriteria: []string{"fixed"}, ExecutionProgress: json.RawMessage(`{"ExecutionID":"logged-resume","UsedTurns":5,"Exploration":{"Policy":{"initial_turns":1,"extension_turns":2,"max_extensions":1,"decision_retries":1,"modification_window_turns":3},"Used":1,"Extensions":1,"TaskType":"modification","Phase":"implement","ModificationLeft":2}}`)}
 	_ = runModificationScript(t, t.TempDir(), durable, config.ExplorationBudget{}, [][]any{nil})
-	for _, expected := range []string{"instance=logged-resume restore=true legacy_exploration=false", "initial_turns=1 extension_turns=2 max_extensions=1 decision_retries=1 modification_window_turns=3", "exploration=1/3 extensions=1 invalid=0 modification_left=2 remaining_total=295"} {
+	for _, expected := range []string{"instance=logged-resume restore=true legacy_exploration=false", "initial_turns=1 extension_turns=2 max_extensions=1 decision_retries=1 modification_window_turns=3", "exploration=1/3 extensions=1 invalid=0 modification_left=2 remaining_total=55"} {
 		if !strings.Contains(output.String(), expected) {
 			t.Errorf("missing restore log %q", expected)
 		}
@@ -203,4 +203,52 @@ func TestReactRejectedDecisionPersistsReasonForResume(t *testing.T) {
 	if p.Exploration.Invalid != 1 || !p.Exploration.Pending || !strings.Contains(p.Exploration.Rejection, "implement requires target, evidence, next_operation") {
 		t.Fatalf("correction reason lost: %s", durable.ExecutionProgress)
 	}
+}
+
+func TestReactResumeSpendsOnlyRemainingWindowOnRejectedInvestigation(t *testing.T) {
+	workspace := t.TempDir()
+	durable := &state.DurableState{ExecutionID: "rejected-read", Goal: "change main.go", CompletionCriteria: []string{"changed"}}
+	policy := config.DefaultExplorationBudget()
+	policy.InitialTurns = 1
+	policy.ModificationWindowTurns = 2
+	read := func(id string) []any {
+		return modificationTool(id, "list_dir", map[string]string{"path": "."})
+	}
+	checkBudget := func(d *state.DurableState, left int) {
+		t.Helper()
+		var progress struct {
+			Exploration struct {
+				Used, ModificationLeft int
+				Phase                  string
+			}
+		}
+		if err := json.Unmarshal(d.ExecutionProgress, &progress); err != nil {
+			t.Fatal(err)
+		}
+		if progress.Exploration.Used != 1 || progress.Exploration.ModificationLeft != left || progress.Exploration.Phase != "implement" {
+			t.Fatalf("unexpected budget after rejection: %+v", progress.Exploration)
+		}
+		if len(d.ToolExecutions) != 1 || d.ToolExecutions[0].ToolCallId != "initial" {
+			t.Fatalf("unexpected tool history: %+v", d.ToolExecutions)
+		}
+	}
+	err := runModificationScript(t, workspace, durable, policy, [][]any{read("initial"), modificationHandoff(), read("first-denied"), nil})
+	if err == nil || !strings.Contains(err.Error(), "400 Bad Request") {
+		t.Fatalf("expected outage after first rejection, got %v", err)
+	}
+	checkBudget(durable, 1)
+
+	snapshot, err := json.Marshal(durable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored state.DurableState
+	if err := json.Unmarshal(snapshot, &restored); err != nil {
+		t.Fatal(err)
+	}
+	err = runModificationScript(t, workspace, &restored, config.ExplorationBudget{}, [][]any{read("last-denied")})
+	if err == nil || !strings.Contains(err.Error(), "modification window exhausted") {
+		t.Fatalf("expected final rejection to exhaust window, got %v", err)
+	}
+	checkBudget(&restored, 0)
 }

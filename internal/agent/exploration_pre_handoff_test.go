@@ -27,8 +27,9 @@ func TestReactPreHandoffModificationCanVerifyAndCompleteAtThreshold(t *testing.T
 func TestReactRejectsNoOperationImplementationHandoff(t *testing.T) {
 	workspace := t.TempDir()
 	durable := &state.DurableState{ExecutionID: "no-operation", Goal: "fix main.go"}
+	// 使用 skip_next_operation=1 明确标记无需进一步操作，应被拒绝。
 	err := runModificationScript(t, workspace, durable, config.DefaultExplorationBudget(), [][]any{
-		{observationMessage(`{"exploration":{"task_type":"modification","basis":"requested fix","choice":"implement","target_files":["main.go"],"target":"fix main.go","evidence":"inspected","next_operation":"无需进一步操作，返回最终完成结果"}}`)},
+		{observationMessage(`{"exploration":{"task_type":"modification","basis":"requested fix","choice":"implement","target_files":["main.go"],"target":"fix main.go","evidence":"inspected","next_operation":"","skip_next_operation":1}}`)},
 		modificationHandoff(),
 		modificationTool("edit", "apply_patch", map[string]string{"patch": "--- /dev/null\n+++ main.go\n@@ -0,0 +1 @@\n+package main\n"}),
 		{observationMessage(`{"status":"completed","answer":"fixed"}`)},

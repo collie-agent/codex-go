@@ -58,7 +58,7 @@ func TestPlanExplorationModifiesVerifiesAndIsolatesSteps(t *testing.T) {
 			}
 			found := false
 			for _, message := range messages {
-				if strings.Contains(message.Content, "Exploration budget:") {
+				if strings.Contains(message.Content, "Exploration state:") {
 					found = true
 					if message.Role != "user" {
 						t.Error("budget must use user role")

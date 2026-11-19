@@ -58,7 +58,7 @@ func TestReactRunIncludesRegisteredSkillsInModelContext(t *testing.T) {
 		for _, message := range request.Input {
 			content += message.Content
 		}
-		for _, want := range []string{"# Available skills", `"name":"tdd"`, `"description":"Write tests first."`} {
+		for _, want := range []string{"Available skills", `"name":"tdd"`, `"description":"Write tests first."`} {
 			if !strings.Contains(content, want) {
 				t.Errorf("model context missing %q", want)
 			}

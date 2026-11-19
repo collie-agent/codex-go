@@ -54,7 +54,7 @@ func TestOrchestratorModeRouting(t *testing.T) {
 				case "react":
 					if len(tt.wantModels) > 2 {
 						text = `{"status":"completed","answer":"done","observation":["observed step result"],"CompletionEvidence":["step criteria verified"]}`
-						if !strings.Contains(req.Input, "return these fields for the current plan step only:") {
+						if !strings.Contains(req.Input, "仅针对当前计划步骤返回以下字段：") {
 							t.Error("executor missing structured step result instructions")
 						}
 						// 后续步骤必须能看到前一步的观察和验收证据。

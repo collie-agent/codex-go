@@ -14,9 +14,9 @@ exec 工具本身完整返回 stdout、stderr。Agent 在写入工具结果和�
 
 这一处理先于下述执行历史压缩。执行历史压缩仍只改变模型视图，其输入、恢复及回读依据是已经保存的工具结果（超长 exec 为摘要）。
 
-`internal/agent/compact.go` 在每次 ReAct 模型请求前检查 token 阈值（`exceedTokenThreshold`，24 × 1024）。上一请求报告的输入 token 数或当前模型上下文估算超过阈值时，启动异步压缩。估算将 ASCII 按约四字符一个 token、其他字符按一个 token 计算，不是模型 tokenizer 的精确计数。累计的格式和工具调用纠错消息也计入预算，包括其中引用的非法输出；这些消息不属于可压缩工具记录，摘要生成后仍须纳入预算复检。
+`internal/agent/compact.go` 在每次 ReAct 模型请求前检查 token 阈值（`exceedTokenThreshold`，32 × 1024）。上一请求报告的输入 token 数或当前模型上下文估算超过阈值时，启动异步压缩。估算将 ASCII 按约四字符一个 token、其他字符按一个 token 计算，不是模型 tokenizer 的精确计数。累计的格式和工具调用纠错消息也计入预算，包括其中引用的非法输出；这些消息不属于可压缩工具记录，摘要生成后仍须纳入预算复检。
 
-压缩任务处理启动时的独立快照，覆盖快照中的全部工具批次。同一执行实例同时最多有一个压缩任务。期间上下文低于同步阈值（`syncTokenThreshold`，32 × 1024）时，ReAct 继续推理，工具调用及结果继续追加到实时上下文和完整执行记录。达到或超过同步阈值时，在下一次模型请求前等待已有压缩任务完成；应用摘要后清除旧 usage 并重新估算。若仍达到同步阈值，则继续压缩并等待，最多应用 3 次摘要，仍超限返回错误，禁止继续推理。每个后台压缩任务限时 2 分钟，等待支持运行上下文取消及截止时间；压缩失败直接返回错误。
+压缩任务处理启动时的独立快照，覆盖快照中的全部工具批次。同一执行实例同时最多有一个压缩任务。期间上下文低于同步阈值（`syncTokenThreshold`，64 × 1024）时，ReAct 继续推理，工具调用及结果继续追加到实时上下文和完整执行记录。达到或超过同步阈值时，在下一次模型请求前等待已有压缩任务完成；应用摘要后清除旧 usage 并重新估算。若仍达到同步阈值，则继续压缩并等待，最多应用 3 次摘要，仍超限返回错误，禁止继续推理。每个后台压缩任务限时 2 分钟，等待支持运行上下文取消及截止时间；压缩失败直接返回错误。
 
 压缩结果就绪后，在下一次 ReAct 模型请求前由主循环写入检查点，并切换为摘要 + 所有未被摘要覆盖的完整工具交互。后台压缩期间追加的所有批次都会保留，新增记录在下一次压缩中纳入摘要。
 
@@ -37,10 +37,10 @@ exec 工具本身完整返回 stdout、stderr。Agent 在写入工具结果和�
 | `sync wait failed` | 后台压缩失败，包括压缩任务超时；`duration` 为等待耗时，`error` 为失败原因。 |
 | `sync wait cancelled` | 运行上下文被取消或达到截止时间；`duration` 为等待耗时，`error` 为上下文错误。 |
 
-例如，以下日志表示达到 32K 同步阈值后等待压缩结果：
+例如，以下日志表示达到 64K 同步阈值后等待压缩结果：
 
 ```text
-task compact-run: [compact] sync wait started execution_id="compact-instance" tokens=34000 threshold=32768 applied_attempts=0
+task compact-run: [compact] sync wait started execution_id="compact-instance" tokens=66000 threshold=65536 applied_attempts=0
 task compact-run: [compact] sync wait completed execution_id="compact-instance" duration=1.2s
 task compact-run: [compact] applied execution_id="compact-instance" through_batch=11
 ```

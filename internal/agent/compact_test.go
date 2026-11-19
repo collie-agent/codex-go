@@ -85,7 +85,7 @@ func compactionHistory(batches int) *state.DurableState {
 	// 历史批次触发压缩，最近八批保持在预算内。
 	for i, call := range durable.ToolExecutions {
 		if i < 3 {
-			call.Result += strings.Repeat("old payload ", 3000)
+			call.Result += strings.Repeat("old payload ", 8000)
 		}
 	}
 	return durable
@@ -425,7 +425,7 @@ func TestReactUsesConfiguredCompactOutput(t *testing.T) {
 						t.Error("compact exposes tools")
 					}
 					prompt, _ := json.Marshal(body["input"])
-					for _, want := range []string{"# 执行上下文压缩", "## 输出字段", "Facts（", "Actions（", "OpenIssues（", "Text（", "SourceCallIDs（", "## 附加指令", "## 输出格式", "### 示例 1", "### 示例 2", "compact custom instruction", "从 OpenIssues 移除已解决的问题", "不得在 Facts 中确认某事实", "不生成剩余工作清单"} {
+					for _, want := range []string{"# 执行上下文压缩", "## 输出字段", "Facts：", "Actions：", "OpenIssues：", "Text：", "SourceCallIDs：", "## 附加指令", "## 输出格式", "### 示例 1", "### 示例 2", "compact custom instruction", "移除后续证据已解决的缺口", "排除假设和未经验证的声明", "不生成剩余工作清单"} {
 						if !strings.Contains(string(prompt), want) {
 							t.Errorf("prompt missing %q", want)
 						}
@@ -582,7 +582,7 @@ func TestReactRetriesCompactFormatWithUserCorrections(t *testing.T) {
 
 func TestReactCompactsOversizedOlderBatch(t *testing.T) {
 	durable := compactionHistory(4)
-	durable.ToolExecutions[0].Result = strings.Repeat("x", 120000)
+	durable.ToolExecutions[0].Result = strings.Repeat("x", 300000)
 	for _, call := range durable.ToolExecutions[1:] {
 		call.Result = fmt.Sprintf("raw-batch-%d:", call.Batch)
 	}
@@ -624,7 +624,7 @@ func TestReactRechecksOversizedSummary(t *testing.T) {
 			attempts++
 			summary := "short evidence"
 			if attempts == 1 {
-				summary = strings.Repeat("z", 120000)
+				summary = strings.Repeat("z", 300000)
 			}
 			result, _ := json.Marshal(ExecutionSummary{Facts: []Evidence{{Text: summary, SourceCallIDs: []string{"call_1"}}}})
 			writeObservationResponse(w, []any{observationMessage(string(result))})
@@ -651,7 +651,7 @@ func TestReactRechecksOversizedSummary(t *testing.T) {
 
 func TestReactStopsWhenCompactionCannotFitBudget(t *testing.T) {
 	durable := compactionHistory(4)
-	durable.ToolExecutions[0].Result = strings.Repeat("x", 120000)
+	durable.ToolExecutions[0].Result = strings.Repeat("x", 300000)
 	for _, call := range durable.ToolExecutions[1:] {
 		call.Result = fmt.Sprintf("raw-batch-%d:", call.Batch)
 	}
@@ -668,7 +668,7 @@ func TestReactStopsWhenCompactionCannotFitBudget(t *testing.T) {
 			http.Error(w, "retry limit exceeded", 500)
 			return
 		}
-		result, _ := json.Marshal(ExecutionSummary{Facts: []Evidence{{Text: strings.Repeat("z", 120000), SourceCallIDs: []string{"call_1"}}}})
+		result, _ := json.Marshal(ExecutionSummary{Facts: []Evidence{{Text: strings.Repeat("z", 300000), SourceCallIDs: []string{"call_1"}}}})
 		writeObservationResponse(w, []any{observationMessage(string(result))})
 	}))
 	defer server.Close()
@@ -686,7 +686,7 @@ func TestReactStopsWhenCompactionCannotFitBudget(t *testing.T) {
 	if len(durable.ExecutionCompaction) != 0 {
 		t.Fatal("oversized candidate was committed")
 	}
-	if durable.ToolExecutions[0].Result != strings.Repeat("x", 120000) {
+	if durable.ToolExecutions[0].Result != strings.Repeat("x", 300000) {
 		t.Fatal("original evidence changed")
 	}
 }
@@ -696,7 +696,7 @@ func TestReactDropsAllCoveredBatches(t *testing.T) {
 	for i, call := range durable.ToolExecutions {
 		call.Result = fmt.Sprintf("small-batch-%d", i+1)
 	}
-	durable.ToolExecutions[0].Result = strings.Repeat("x", 120000)
+	durable.ToolExecutions[0].Result = strings.Repeat("x", 300000)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		var body map[string]any
 		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {

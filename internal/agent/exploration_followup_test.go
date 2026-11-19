@@ -117,7 +117,7 @@ func TestReactSmallPatchDoesNotExemptFurtherInvestigation(t *testing.T) {
 		modificationTool("blocked-list", "list_dir", map[string]string{"path": "."}),
 		modificationTool("blocked-read", "read_file", map[string]string{"path": "main.go"}),
 	})
-	if err == nil || !strings.Contains(err.Error(), "decision corrections exhausted") {
+	if err == nil || !strings.Contains(err.Error(), "exploration budget returned unexpected tool calls") {
 		t.Fatalf("err=%v", err)
 	}
 	var saved struct {
@@ -129,7 +129,7 @@ func TestReactSmallPatchDoesNotExemptFurtherInvestigation(t *testing.T) {
 	if err := json.Unmarshal(durable.ExecutionProgress, &saved); err != nil {
 		t.Fatal(err)
 	}
-	if len(durable.ToolExecutions) != 2 || saved.Exploration.Used != 1 || saved.Exploration.Invalid != 2 || !saved.Exploration.Pending || !saved.Exploration.ModificationConfirmed {
+	if len(durable.ToolExecutions) != 2 || saved.Exploration.Used != 1 || saved.Exploration.Invalid != 1 || !saved.Exploration.Pending || !saved.Exploration.ModificationConfirmed {
 		t.Fatalf("progress=%s tools=%d", durable.ExecutionProgress, len(durable.ToolExecutions))
 	}
 }

@@ -18,8 +18,8 @@ import (
 
 const (
 	maxCompactionEvidenceErrors = 3
-	exceedTokenThreshold        = 16 * 1024
-	syncTokenThreshold          = 48 * 1024
+	exceedTokenThreshold        = 32 * 1024
+	syncTokenThreshold          = 64 * 1024
 )
 
 type ExecutionCompaction struct {

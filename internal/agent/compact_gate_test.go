@@ -122,8 +122,8 @@ func TestReactContinuesBelowSyncThresholdThenWaitsForPendingCompaction(t *testin
 	}
 	durable := compactionHistory(11)
 	for _, call := range durable.ToolExecutions {
-		// ASCII 约四字节一个 token，使初始上下文落在 24K 与 32K 两个阈值之间。
-		call.Result = strings.Repeat("x", 10000)
+		// ASCII 约四字节一个 token，使初始上下文落在 32K 与 64K 两个阈值之间。
+		call.Result = strings.Repeat("x", 16000)
 	}
 	cfg := compactionConfig(t, server.URL)
 	done := make(chan error, 1)
@@ -244,8 +244,8 @@ func TestReactRecompactsUncoveredGrowthAndFailsClosedWhenBudgetCannotFit(t *test
 		case <-req.Context().Done():
 			return
 		}
-		calls := make([]any, 0, 3)
-		for i := 1; i <= 3; i++ {
+		calls := make([]any, 0, 4)
+		for i := 1; i <= 4; i++ {
 			calls = append(calls, map[string]any{"type": "function_call", "id": fmt.Sprintf("fc_%d", i), "call_id": fmt.Sprintf("new_read_%d", i), "name": "read_tool_result", "arguments": fmt.Sprintf(`{"call_id":"call_1","offset":%d,"limit":65536}`, i-1)})
 		}
 		writeObservationResponse(w, calls)
@@ -262,8 +262,8 @@ func TestReactRecompactsUncoveredGrowthAndFailsClosedWhenBudgetCannotFit(t *test
 	for _, call := range durable.ToolExecutions {
 		call.Result = "small"
 	}
-	durable.ToolExecutions[0].Result = strings.Repeat("x", 70000)
-	durable.ExecutionCompaction, _ = json.Marshal(ExecutionCompaction{ExecutionID: durable.ExecutionID, ThroughBatch: 8, Summary: ExecutionSummary{Facts: []Evidence{{Text: strings.Repeat("p", 110000), SourceCallIDs: []string{"call_1"}}}}})
+	durable.ToolExecutions[0].Result = strings.Repeat("x", 200000)
+	durable.ExecutionCompaction, _ = json.Marshal(ExecutionCompaction{ExecutionID: durable.ExecutionID, ThroughBatch: 8, Summary: ExecutionSummary{Facts: []Evidence{{Text: strings.Repeat("p", 170000), SourceCallIDs: []string{"call_1"}}}}})
 	_, _, err = process.Run(compactionConfig(t, server.URL), durable)
 	if err == nil || !strings.Contains(err.Error(), "context exceeds token budget after 3 attempts") {
 		t.Fatalf("expected bounded compaction failure, got %v", err)
@@ -271,7 +271,7 @@ func TestReactRecompactsUncoveredGrowthAndFailsClosedWhenBudgetCannotFit(t *test
 	if compactions.Load() != 4 || reasoning.Load() != 1 {
 		t.Fatalf("compact=%d reasoning=%d", compactions.Load(), reasoning.Load())
 	}
-	if len(durable.ToolExecutions) != 11 {
+	if len(durable.ToolExecutions) != 12 {
 		t.Fatal("lost appended tool executions")
 	}
 }
@@ -304,8 +304,8 @@ func TestReactDoesNotReasonAfterCompactionFailsAtSyncThreshold(t *testing.T) {
 
 // 固定规格边界，避免测试随实现常量一起漂移。
 func TestCompactionThresholdsMatchSpec(t *testing.T) {
-	if exceedTokenThreshold != 24*1024 || syncTokenThreshold != 32*1024 {
-		t.Fatalf("thresholds = %d/%d, want 24K/32K", exceedTokenThreshold, syncTokenThreshold)
+	if exceedTokenThreshold != 32*1024 || syncTokenThreshold != 64*1024 {
+		t.Fatalf("thresholds = %d/%d, want 32K/64K", exceedTokenThreshold, syncTokenThreshold)
 	}
 }
 
@@ -324,8 +324,8 @@ func TestReactCorrectionBudgetBlocksOversizedRetry(t *testing.T) {
 			return
 		}
 		if reasoning.Add(1) == 1 {
-			// 原请求很小，但无效输出新增的纠错消息单独超过 32K。
-			writeObservationResponse(w, []any{observationMessage(strings.Repeat("x", 33*1024*4))})
+			// 原请求很小，但无效输出新增的纠错消息单独超过同步阈值。
+			writeObservationResponse(w, []any{observationMessage(strings.Repeat("x", 65*1024*4))})
 			return
 		}
 		writeObservationResponse(w, []any{observationMessage("BEGIN RESULT\nSTATUS=\"completed\"\nANSWER=\"done\"\nEND RESULT")})

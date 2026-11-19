@@ -100,6 +100,15 @@ func TestResumeExplorationRetainsEveryPhaseAndOriginalPolicy(t *testing.T) {
 				requests++
 				raw, _ := io.ReadAll(r.Body)
 				expected := fmt.Sprintf("task_type=%s phase=%s used=%d/%d decision_required=%t extensions=%d", tc.taskType, tc.phase, tc.used, 3+2*tc.extensions, tc.pending || (tc.used >= 3+2*tc.extensions && tc.phase != "implement"), tc.extensions)
+				if tc.phase == "implement" {
+					expected = fmt.Sprintf("Implementation state: instance=%s phase=implement used=%d/%d", run.RunID, tc.used, 3+2*tc.extensions)
+				} else if !tc.pending && tc.used < 3+2*tc.extensions {
+					if strings.Contains(string(raw), "Exploration state:") {
+						t.Error("unexpected exploration state before threshold")
+					}
+					http.Error(w, "model unavailable", http.StatusBadRequest)
+					return
+				}
 				if !strings.Contains(string(raw), expected) {
 					t.Errorf("missing restored state %q", expected)
 				}
@@ -179,7 +188,7 @@ func TestResumeLegacyExplorationNeverInventsModificationOrLosesKnownConsumption(
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requests++
 				raw, _ := io.ReadAll(r.Body)
-				if !strings.Contains(string(raw), fmt.Sprintf("phase=exploring used=%d/12", tc.used)) {
+				if tc.used >= 12 && !strings.Contains(string(raw), fmt.Sprintf("phase=exploring used=%d/12", tc.used)) {
 					t.Errorf("legacy consumption not retained")
 				}
 				http.Error(w, "model unavailable", 400)
@@ -374,8 +383,8 @@ func TestNewExecutionDoesNotInheritConversationExplorationBudget(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
 		raw, _ := io.ReadAll(r.Body)
-		if !strings.Contains(string(raw), "instance="+fresh.RunID+" task_type= phase=exploring used=0/12") || !strings.Contains(string(raw), "extensions=0") {
-			t.Error("new instance inherited exploration budget")
+		if strings.Contains(string(raw), "Exploration state:") || strings.Contains(string(raw), "Implementation state:") {
+			t.Error("new instance unexpectedly received exploration state")
 		}
 		http.Error(w, "model unavailable", 400)
 	}))

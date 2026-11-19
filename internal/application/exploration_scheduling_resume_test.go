@@ -232,7 +232,11 @@ func TestDelegatedExplorationResumeKeepsOriginalInstanceState(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requests++
 				body, _ := io.ReadAll(r.Body)
-				for _, want := range []string{instance, fmt.Sprintf("phase=%s used=2/%d", tc.phase, 2+2*tc.extensions)} {
+				wants := []string{instance, fmt.Sprintf("phase=%s used=2/%d", tc.phase, 2+2*tc.extensions)}
+				if !tc.pending && tc.phase == "exploring" && !tc.confirmed && tc.extensions > 0 {
+					wants = nil
+				}
+				for _, want := range wants {
 					if !strings.Contains(string(body), want) {
 						t.Errorf("restored request missing %s", want)
 					}

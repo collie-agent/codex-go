@@ -16,12 +16,14 @@ type ExplorationDecision struct {
 	Target         string   `json:"target" lineprotocol:"TARGET"`
 	Evidence       string   `json:"evidence" lineprotocol:"EVIDENCE"`
 	NextOperation  string   `json:"next_operation" lineprotocol:"NEXT_OPERATION"`
-	Gap            string   `json:"gap" lineprotocol:"GAP"`
-	BlockingReason string   `json:"blocking_reason" lineprotocol:"BLOCKING_REASON"`
-	Investigation  string   `json:"investigation" lineprotocol:"INVESTIGATION"`
-	ExitCondition  string   `json:"exit_condition" lineprotocol:"EXIT_CONDITION"`
-	Reason         string   `json:"reason" lineprotocol:"REASON"`
-	ExecutionState string   `json:"execution_state" lineprotocol:"EXECUTION_STATE"`
+	// SkipNextOperation 为 1 时表示无需执行下一步操作，避免使用字符串匹配检测否定语义。
+	SkipNextOperation int    `json:"skip_next_operation,omitempty" lineprotocol:"SKIP_NEXT_OPERATION"`
+	Gap               string `json:"gap" lineprotocol:"GAP"`
+	BlockingReason    string `json:"blocking_reason" lineprotocol:"BLOCKING_REASON"`
+	Investigation     string `json:"investigation" lineprotocol:"INVESTIGATION"`
+	ExitCondition     string `json:"exit_condition" lineprotocol:"EXIT_CONDITION"`
+	Reason            string `json:"reason" lineprotocol:"REASON"`
+	ExecutionState    string `json:"execution_state" lineprotocol:"EXECUTION_STATE"`
 }
 
 type ReactResult struct {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -91,23 +92,34 @@ func TestExecuteCancellationReturnsOutputAndPreventsLaterWorkspaceWrite(t *testi
 		result, err := executor.Execute(ctx, workspace, "python3", []string{"-u", "-c", `import os,pathlib,time
 print('before-cancel')
 if os.fork()==0:
- time.sleep(300/1000)
+ time.sleep(1)
  pathlib.Path('late').write_text('must not survive')
  os._exit(0)
+pathlib.Path('ready').write_text('ready')
 time.sleep(20)`})
 		resultCh <- struct {
 			result mcp.CommandResult
 			err    error
 		}{result, err}
 	}()
-	time.Sleep(100 * time.Millisecond)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(workspace, "ready")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("command did not become ready")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	cancel()
 	called := <-resultCh
 	if !errors.Is(called.err, context.Canceled) || called.result.Stdout != "before-cancel\n" {
 		t.Fatalf("unexpected cancellation result: result=%+v err=%v", called.result, called.err)
 	}
 	result, err := executor.Execute(context.Background(), workspace, "python3", []string{"-c", `import pathlib,time
-time.sleep(.6)
+time.sleep(1.2)
 assert not pathlib.Path('late').exists(), 'cancelled process survived'`})
 	if err != nil || result.ExitCode != 0 {
 		t.Fatalf("cancelled process survived: result=%+v err=%v", result, err)

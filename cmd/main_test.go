@@ -45,7 +45,7 @@ func TestRunAgentCompletesWithBothOutputSchemas(t *testing.T) {
 					t.Error(err)
 				}
 				input, _ := request["input"].(string)
-				for _, required := range []string{"# Required result schema", "status:", "answer:", `"completed"`, `"failed"`} {
+				for _, required := range []string{"# Required result schema", "status：", "answer：", `"completed"`, `"failed"`} {
 					if !strings.Contains(input, required) {
 						t.Errorf("model request missing result requirement %q", required)
 					}

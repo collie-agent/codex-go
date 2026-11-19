@@ -203,7 +203,7 @@ func (r *BaseReactProcess[T]) finishProgress(worker *Worker[T], modelContext sta
 		request.AllowTools = false
 		result, _, tools, err := worker.Run(frozenCompactContext{Contexter: modelContext, request: request})
 		if err == nil && len(tools) == 0 {
-			if value := progressResult(&result); value != nil && value.Status == FailedReactStatus && strings.TrimSpace(value.Answer) != "" {
+			if value := progressResult(&result); value.Status == FailedReactStatus && strings.TrimSpace(value.Answer) != "" {
 				fallback.Answer = value.Answer
 				fallback.Observation = append(fallback.Observation, value.Observation...)
 			}
@@ -214,11 +214,7 @@ func (r *BaseReactProcess[T]) finishProgress(worker *Worker[T], modelContext sta
 		fallback.Observation = append(fallback.Observation, "Unfinished step: "+step.Intent+"; conditions: "+step.CompletionCriteria)
 	}
 	var result T
-	output := progressResult(&result)
-	if output == nil {
-		return zero, nil, fmt.Errorf("execution stopped: %s", reason)
-	}
-	*output = fallback
+	*progressResult(&result) = fallback
 	encoded, err := json.Marshal(result)
 	if err != nil {
 		return zero, nil, err

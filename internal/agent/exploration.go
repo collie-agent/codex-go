@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -8,23 +9,57 @@ import (
 	state "github.com/collie-agent/codex-go/internal/context"
 )
 
+// 保存整体预算和阶段
 type explorationState struct {
 	Accounting            []explorationAccounting
-	SessionPurposes       map[string]string
-	SessionBaselines      map[string]sessionModificationBaseline
-	Extensions            int
-	Rejection             string
-	ModificationLeft      int
-	ModificationConfirmed bool
-	ModificationEvidence  []modificationEvidence
+	SessionPurposes       map[string]string                      //后台命令会话 ID 到用途的映射。exec_poll 和 exec_stop 据此沿用启动命令的用途
+	SessionBaselines      map[string]sessionModificationBaseline //后台命令会话 ID 到修改基准的映射，保存启动批次和启动前的目标文件快照。命令结束时用它和结束快照比较，以确认跨批次的变更
+	Extensions            int                                    //已获准的扩容次数
+	Rejection             string                                 //最近保存的拒绝原因，例如扩容额度不足、决策无效或探索额度耗尽
+	ModificationLeft      int                                    //当前实施窗口剩余的轮数
+	ModificationConfirmed bool                                   //是否已确认目标文件发生实际变更。开始新一轮实施承诺时会重置
+	ModificationEvidence  []modificationEvidence                 //已确认的变更记录，包含文件路径、变更前后版本、工具批次及对应的实施承诺编号
 	Policy                config.ExplorationBudget
-	TaskType              string
-	Phase                 string
-	Used                  int
-	Invalid               int
-	Pending               bool
-	Handoff               *state.ExplorationDecision
-	Handoffs              []state.ExplorationDecision
+	TaskType              string                      //任务分类。空字符串表示尚未分类，analysis 表示分析任务，modification 表示修改任务
+	Phase                 explorationPhase            //当前阶段。exploring 表示探索，implement 表示正在履行实施承诺，unable 表示决定停止并说明无法继续的原因。
+	Used                  int                         //已消耗的探索额度
+	Invalid               int                         //已计入决策纠错预算的无效尝试次数。超过 Policy.DecisionRetries 会触发停止
+	Pending               bool                        //是否必须补交有效的探索决策
+	Handoff               *state.ExplorationDecision  //当前保存的阶段决策。实施时包含目标、依据、下一步操作和目标文件。选择 unable 时也会保存该决策。
+	Handoffs              []state.ExplorationDecision //本次执行中所有获准的实施承诺。其位置用于将批次和变更证据关联到对应承诺
+}
+
+// decisionContext 仅在需要推进探索决策或实施时为原始请求追加提示。
+func (e *explorationState) decisionContext(modelContext state.Contexter, schema config.LLMOutputSchema, executionID string, multiAgent bool) state.Contexter {
+	required := e.required()
+	if !required && e.Phase != phaseImplement {
+		return modelContext
+	}
+
+	request := modelContext.ModelRequest()
+	if required {
+		request.LogLabel = "exploration budget"
+		// 已确认目标修改后可继续验证，调查仍由批次准入处理。
+		// 待纠错或首次交接必须在独立的无工具轮次完成。
+		request.AllowTools = e.ModificationConfirmed && !e.Pending
+		if request.AllowTools {
+			request.TrailingContext += "\n已确认目标修改，但探索额度已耗尽。可以执行受支持的验证操作或按正常协议完成任务。继续调查前须依据已有证据单独提交 exploration 阶段决策，不得混入工具调用。"
+		} else {
+			request.TrailingContext += "\n" + explorationInstructions + "\n\n" + explorationFewShot(schema, multiAgent)
+		}
+		request.TrailingContext += fmt.Sprintf("\nExploration state: instance=%s task_type=%s phase=%s used=%d/%d decision_required=%t extensions=%d rejection=%q modification_left=%d handoff=%d", executionID, e.TaskType, e.Phase, e.Used, e.allowance(), required, e.Extensions, e.Rejection, e.ModificationLeft, len(e.Handoffs))
+	}
+	if e.Phase == phaseImplement {
+		// 实施交接不在工具历史中；恢复也必须让模型看到既有证据和真实剩余窗口。
+		handoff, _ := json.Marshal(e.Handoff)
+		request.TrailingContext += fmt.Sprintf("\nImplementation state: instance=%s phase=%s used=%d/%d extensions=%d modification_left=%d handoff=%s", executionID, e.Phase, e.Used, e.allowance(), e.Extensions, e.ModificationLeft, handoff)
+		if e.Rejection != "" {
+			request.TrailingContext += "\n" + e.Rejection
+		}
+		// 每轮重建提示，并单独置于纠错消息之后。
+		request.FinalUserMessage = fmt.Sprintf("已进入实施阶段，剩余修改窗口为 %d 轮。请依据已有证据，优先对 target_files 执行 next_operation，尽快产生实际目标变更。仅在修改确有需要时执行工作区检查。若存在阻止安全修改的信息缺口，请单独申请探索延期；无法继续时返回 unable。修改后执行验证。", e.ModificationLeft)
+	}
+	return frozenCompactContext{Contexter: modelContext, request: request}
 }
 
 const explorationInstructions = `# 探索预算与阶段决策
@@ -46,7 +81,7 @@ const explorationInstructions = `# 探索预算与阶段决策
 达到阈值时，返回 exploration，choice 为 implement、extend 或 unable：
 
 - 已有本实例确认的修改且随后验证成功时，可以按正常协议返回 completed，无须创建新的实施交接。
-- implement 的 next_operation 必须描述接下来执行的具体修改，不能填写“无需操作”“直接结束”或已完成声明。
+- implement 的 next_operation 必须描述接下来执行的具体修改；若判断无需进一步操作，将 skip_next_operation 设为 1 并留空 next_operation，不得在 next_operation 中填写否定声明。
 - implement：确立修改任务，必须提供 target_files（工作区相对路径）、target（预期修改）、evidence 和 next_operation；也兼容在 target 中提供单个文件的旧格式。
 - extend：必须提供 gap、blocking_reason、investigation 和 exit_condition。
 - unable：必须提供 reason 和 execution_state。
@@ -71,7 +106,8 @@ const explorationInstructions = `# 探索预算与阶段决策
 - target_files：implement 的目标文件，使用工作区相对路径；JSON 中为字符串数组，行协议中单个文件的写法见示例。
 - target：implement 预期完成的具体修改，说明要改变的行为或逻辑。
 - evidence：支持实施决策或无需修改结论的具体观察证据，应来自实际查看的代码或调查结果。
-- next_operation：implement 被接受后将执行的下一步修改操作。
+- next_operation：implement 被接受后将执行的下一步修改操作；skip_next_operation 为 1 时留空。
+- skip_next_operation：整数标志，1 表示判断无需执行下一步修改（应走正常完成路径），0 表示将正常执行 next_operation。
 - gap：extend 尚需补齐的信息缺口。
 - blocking_reason：该信息缺口为何阻碍安全、正确地实施修改。
 - investigation：extend 期间为补齐缺口计划执行的具体调查。
@@ -146,104 +182,4 @@ END EXPLORATION`},
 	}
 	prompt.WriteString("## 分类后的回答\n\nanalysis 分类被接受后，在后续响应中使用正常回答协议提供解释。")
 	return prompt.String()
-}
-
-func (e *explorationState) allowance() int {
-	return e.Policy.InitialTurns + e.Extensions*e.Policy.ExtensionTurns
-}
-
-func (e *explorationState) required() bool {
-	return e.Pending || (e.TaskType != "analysis" && e.Used >= e.allowance() && !(e.Phase == "implement" && e.ModificationLeft > 0))
-}
-func (e *explorationState) decide(d *state.ExplorationDecision, remaining int) (string, error) {
-	if d == nil {
-		return "", fmt.Errorf("exploration threshold requires classification and phase decision")
-	}
-	nonempty := func(values ...string) bool {
-		for _, v := range values {
-			if strings.TrimSpace(v) == "" {
-				return false
-			}
-		}
-		return true
-	}
-	switch d.TaskType {
-	case "analysis":
-		if !nonempty(d.Basis) {
-			return "", fmt.Errorf("analysis requires basis")
-		}
-		// 一旦确认修改目标，不允许仅重命名任务类型；无须改动必须交付证据。
-		if e.TaskType == "modification" && !nonempty(d.Evidence) {
-			return "", fmt.Errorf("modification goal requires concrete no-change evidence")
-		}
-	case "modification":
-		if !nonempty(d.Basis) {
-			return "", fmt.Errorf("modification classification requires basis")
-		}
-	case "":
-		if e.TaskType == "" {
-			return "", fmt.Errorf("task_type required")
-		}
-	default:
-		return "", fmt.Errorf("invalid task_type")
-	}
-	if d.TaskType != "" {
-		e.TaskType = d.TaskType
-	}
-	if d.Choice == "" {
-		if e.TaskType != "analysis" && e.Used >= e.allowance() {
-			return "", fmt.Errorf("phase choice required")
-		}
-		return "", nil
-	}
-	switch d.Choice {
-	case "implement":
-		if !nonempty(d.Target, d.Evidence, d.NextOperation) {
-			return "", fmt.Errorf("implement requires target, evidence, next_operation")
-		}
-		// 否定操作或结束声明不构成新的实施承诺，应走已有证据完成路径。
-		operation := strings.ToLower(strings.TrimSpace(d.NextOperation))
-		for _, phrase := range []string{"无需", "无须", "不需要", "直接结束", "返回最终", "no further", "no operation", "nothing to", "already complete", "return final", "no-op", "noop"} {
-			if strings.Contains(operation, phrase) {
-				return "", fmt.Errorf("implement next_operation must describe a concrete modification; use normal completion for verified existing changes")
-			}
-		}
-		if err := e.beginModification(d); err != nil {
-			return "", err
-		}
-		// 实施承诺确认了修改目标，不能继续享有分析任务的探索豁免。
-		e.TaskType = "modification"
-		return "", nil
-	case "extend":
-		if !nonempty(d.Gap, d.BlockingReason, d.Investigation, d.ExitCondition) {
-			return "", fmt.Errorf("extend requires gap, blocking_reason, investigation, exit_condition")
-		}
-		// 审批使用扣除当前决策与失败收尾预留后的额度，不增加总预算。
-		if e.Extensions >= e.Policy.MaxExtensions {
-			e.Rejection = "extension limit exhausted; choose implement or unable"
-			return "", fmt.Errorf("%s", e.Rejection)
-		}
-		if remaining < e.Policy.ExtensionTurns {
-			e.Rejection = "insufficient total decision budget for extension; choose implement or unable"
-			return "", fmt.Errorf("%s", e.Rejection)
-		}
-		e.Extensions++
-		e.Rejection = ""
-		if e.Phase != "implement" {
-			e.Phase = "exploring"
-		}
-		return "", nil
-	case "unable":
-		if !nonempty(d.Reason, d.ExecutionState) {
-			return "", fmt.Errorf("unable requires reason and execution_state")
-		}
-	default:
-		return "", fmt.Errorf("invalid phase choice")
-	}
-	e.Handoff = d
-	e.Phase = d.Choice
-	if d.Choice == "unable" {
-		return "unable: " + d.Reason + "; confirmed execution state: " + d.ExecutionState, nil
-	}
-	return "", nil
 }
