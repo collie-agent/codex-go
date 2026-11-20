@@ -45,3 +45,55 @@ func TestCommandPurposeKeepsUnsupportedWorkspaceCommandsAsInvestigation(t *testi
 		})
 	}
 }
+
+func TestCommandPurposeRecognizesBuildAndTestInvocations(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		args    []string
+	}{
+		{"go", []string{"build", "./..."}},
+		{"go", []string{"build", "-o", "bin/app", "./cmd/app"}},
+		{"go", []string{"test", "-run", "TestBuild", "./..."}},
+		{"tsc", []string{"-b"}},
+		{"npx", []string{"tsc", "--noEmit", "-p", "tsconfig.json"}},
+		{"npm", []string{"run", "build"}},
+		{"npm", []string{"test"}},
+		{"npm", []string{"run", "test"}},
+		{"npx", []string{"vitest", "run"}},
+		{"jest", []string{"--runInBand"}},
+		{"python", []string{"-m", "build", "--wheel"}},
+		{"python3", []string{"-m", "unittest", "discover", "-s", "tests"}},
+		{"python", []string{"-m", "pytest", "-q"}},
+		{"pytest", []string{"tests/", "-k", "build"}},
+	} {
+		t.Run(tc.command+" "+strings.Join(tc.args, " "), func(t *testing.T) {
+			if got := filemcp.CommandPurpose(tc.command, tc.args); got != "verification" {
+				t.Fatalf("purpose=%s", got)
+			}
+		})
+	}
+}
+
+func TestCommandPurposeKeepsUnrecognizedBuildAndTestFormsAsInvestigation(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		args    []string
+	}{
+		{"go", []string{"build", "-n"}},
+		{"go", []string{"build", "-o"}},
+		{"npm", []string{"run", "build:custom"}},
+		{"npm", []string{"build"}},
+		{"npx", []string{"--package", "other", "tsc"}},
+		{"tsc", []string{"--watch"}},
+		{"vitest", []string{"watch"}},
+		{"pytest", []string{"--collect-only"}},
+		{"python", []string{"-m", "another_module"}},
+		{"sh", []string{"-c", "go build ./..."}},
+	} {
+		t.Run(tc.command+" "+strings.Join(tc.args, " "), func(t *testing.T) {
+			if got := filemcp.CommandPurpose(tc.command, tc.args); got != "investigation" {
+				t.Fatalf("purpose=%s", got)
+			}
+		})
+	}
+}
