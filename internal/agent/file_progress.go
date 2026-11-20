@@ -221,17 +221,18 @@ func (g *fileProgressGuard) observe(batch BatchEvidence, durable *state.DurableS
 	return fmt.Sprintf("File investigation recovery (%d/%d): %d batches provided no new investigation evidence. Goal: %s. Completion conditions (not established as satisfied by these reads): %s. Repeated evidence: %s. Remaining budget: %d turns remaining; recovery window: %d batches. First distinguish whether remaining work requires investigation, modification or verification. If existing evidence is sufficient to determine the required change, modify immediately and verify the result; do not reread already covered, unchanged content. A gap in a historical summary that tool results have since resolved is not a reason for further investigation. If essential information is missing, identify the specific gap and its completion criterion, then make a targeted read; if blocked, report the reason, changes and verification results. New evidence alone does not prove completion; do not declare success without meeting the conditions.", g.recoveries, g.policy.MaxRecoveries, g.stale, goal, criteria, strings.Join(references, "; "), remaining, g.recoveryLeft), nil
 }
 
-// evidenceFromResult accepts metadata only from the successful tool response.
-func evidenceFromResult(value any) *filemcp.FileEvidence {
+// readFileEvidence accepts metadata only from the successful tool response.
+func readFileEvidence(value any) (*filemcp.FileEvidence, int) {
 	data, err := json.Marshal(value)
 	if err != nil {
-		return nil
+		return nil, 0
 	}
 	var result struct {
-		Evidence *filemcp.FileEvidence `json:"evidence"`
+		Evidence   *filemcp.FileEvidence `json:"evidence"`
+		NextOffset int                   `json:"next_offset"`
 	}
 	if json.Unmarshal(data, &result) != nil {
-		return nil
+		return nil, 0
 	}
-	return result.Evidence
+	return result.Evidence, result.NextOffset
 }

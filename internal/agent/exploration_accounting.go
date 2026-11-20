@@ -5,16 +5,31 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/collie-agent/codex-go/internal/config"
 	state "github.com/collie-agent/codex-go/internal/context"
 	filemcp "github.com/collie-agent/codex-go/internal/mcp"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// 空用途表示必须查看调用参数或历史用途才能确定。
+func fixedExplorationPurpose(name config.McpToolName) string {
+	switch name {
+	case config.ApplyPatchMCPToolName:
+		return "modification"
+	case config.ExecMCPToolName, config.ExecStartMCPToolName, config.ExecPollMCPToolName,
+		config.ExecStopMCPToolName, config.ReadToolResultMCPToolName:
+		return ""
+	default:
+		return "investigation"
+	}
+}
+
 // 仅识别有明确语法的业务操作；解释器、项目脚本和未知选项保守计为调查。
 func explorationPurpose(param *sdk.CallToolParams) string {
+	if purpose := fixedExplorationPurpose(config.McpToolName(param.Name)); purpose != "" {
+		return purpose
+	}
 	switch param.Name {
-	case "apply_patch":
-		return "modification"
 	case "exec", "exec_start":
 		raw, _ := json.Marshal(param.Arguments)
 		var args struct {
@@ -25,10 +40,8 @@ func explorationPurpose(param *sdk.CallToolParams) string {
 			return "investigation"
 		}
 		return filemcp.CommandPurpose(args.Command, args.Args)
-	case "exec_poll", "exec_stop", "read_tool_result":
-		return "verification"
 	}
-	return "investigation"
+	return "verification" // 进程会话与历史回读由 batchPurpose 按原调用用途覆盖。
 }
 
 // 保存每批工具调用的用途、扣费状态，以及确认目标文件变更所需的证据
@@ -39,8 +52,8 @@ type explorationAccounting struct {
 	Charged             bool `json:",omitempty"`
 	ModificationCharged bool `json:",omitempty"`
 	Applied             bool
-	SinceBatch          int `json:",omitempty"`
-	Purpose             string
+	SinceBatch          int    `json:",omitempty"`
+	Purpose             string //investigation,modification,workspace_check,verification
 	Calls               map[string]string
 	Before              map[string]targetSnapshot `json:",omitempty"`
 	After               map[string]targetSnapshot `json:",omitempty"`

@@ -50,6 +50,11 @@ func (e *explorationState) decisionContext(modelContext state.Contexter, schema 
 		request.TrailingContext += fmt.Sprintf("\nExploration state: instance=%s task_type=%s phase=%s used=%d/%d decision_required=%t extensions=%d rejection=%q modification_left=%d handoff=%d", executionID, e.TaskType, e.Phase, e.Used, e.allowance(), required, e.Extensions, e.Rejection, e.ModificationLeft, len(e.Handoffs))
 	}
 	if e.Phase == phaseImplement {
+		if e.ModificationLeft > 0 && e.TaskType != "analysis" && e.Used >= e.allowance() {
+			request.AdvertiseTool = func(name config.McpToolName) bool {
+				return fixedExplorationPurpose(name) != "investigation"
+			}
+		}
 		// 实施交接不在工具历史中；恢复也必须让模型看到既有证据和真实剩余窗口。
 		handoff, _ := json.Marshal(e.Handoff)
 		request.TrailingContext += fmt.Sprintf("\nImplementation state: instance=%s phase=%s used=%d/%d extensions=%d modification_left=%d handoff=%s", executionID, e.Phase, e.Used, e.allowance(), e.Extensions, e.ModificationLeft, handoff)

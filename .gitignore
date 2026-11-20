@@ -32,3 +32,5 @@ Thumbs.db
 
 # Local provider logs
 logs/
+
+badcase/

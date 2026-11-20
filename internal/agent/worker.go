@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"sort"
 	"strings"
 
@@ -49,7 +50,14 @@ func (w *Worker[T]) Run(modelContext fileContext.Contexter) (result T, text stri
 		allowTools = w.agentConfig.AllowTools
 		session = w.mcpClientSess
 	}
-	client, err := provider.NewResponsesApiClient[T](w.agentConfig.LLMConfig, allowTools)
+	advertisedTools := allowTools
+	if request.AdvertiseTool != nil {
+		advertisedTools = maps.Clone(allowTools)
+		maps.DeleteFunc(advertisedTools, func(name config.McpToolName, _ struct{}) bool {
+			return !request.AdvertiseTool(name)
+		})
+	}
+	client, err := provider.NewResponsesApiClient[T](w.agentConfig.LLMConfig, advertisedTools)
 	if err != nil {
 		return result, "", nil, err
 	}

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/collie-agent/codex-go/internal/config"
 	"github.com/collie-agent/codex-go/internal/mcp"
 )
 
@@ -101,7 +102,9 @@ type ModelRequest struct {
 	TrailingContext     string
 	FinalUserMessage    string
 	AllowTools          bool
-	LogLabel            string
+	// AdvertiseTool 只缩小当前模型请求的工具列表，运行时仍按完整批次判定准入和扣费。
+	AdvertiseTool func(config.McpToolName) bool
+	LogLabel      string
 }
 
 // ConversationHistoryText 渲染独立历史消息；恢复记录保留结构，允许压缩视图过滤已覆盖批次。
@@ -441,6 +444,7 @@ type ToolResult struct {
 	SearchEvidence  *mcp.SearchEvidence  `json:",omitempty"`
 	HistoryEvidence *HistoryReadEvidence `json:",omitempty"`
 	FileEvidence    *mcp.FileEvidence    `json:",omitempty"`
+	FileNextOffset  int                  `json:",omitempty"` // read_file 截断时下一页的一基行号。
 	Batch           int
 	Position        int
 	ToolCallId      string

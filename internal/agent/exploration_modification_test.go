@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -25,6 +26,7 @@ func TestReactHandoffAppliesRealPatchAndCompletes(t *testing.T) {
 		var body struct {
 			Input        json.RawMessage
 			Instructions string `json:"instructions"`
+			Tools        []struct{ Name string }
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		// Patch observation uses the same external model boundary and is independent of business decisions.
@@ -33,15 +35,27 @@ func TestReactHandoffAppliesRealPatchAndCompletes(t *testing.T) {
 			return
 		}
 		calls++
+		var names []string
+		for _, tool := range body.Tools {
+			names = append(names, tool.Name)
+		}
+		slices.Sort(names)
 		switch calls {
 		case 1:
+			for _, name := range []string{"read_file", "list_dir", "glob", "grep", "load_skill"} {
+				if !slices.Contains(names, name) {
+					t.Errorf("exploration request missing %s: %v", name, names)
+				}
+			}
 			writeObservationResponse(w, []any{map[string]any{"type": "function_call", "id": "fc-list", "call_id": "list", "name": "list_dir", "arguments": `{"path":"."}`}})
 		case 2:
 			writeObservationResponse(w, []any{observationMessage(`{"exploration":{"task_type":"modification","basis":"requested fix","choice":"implement","target":"main.go: replace old with new","evidence":"existing line is old","next_operation":"apply patch"}}`)})
 		case 3:
+			want := []string{"apply_patch", "exec", "exec_poll", "exec_start", "read_tool_result"}
+			if !slices.Equal(names, want) {
+				t.Errorf("implementation request tools = %v, want %v", names, want)
+			}
 			writeObservationResponse(w, []any{map[string]any{"type": "function_call", "id": "fc", "call_id": "patch", "name": "apply_patch", "arguments": `{"patch":"--- main.go\n+++ main.go\n@@ -1 +1 @@\n-old\n+new\n"}`}})
-		case 4:
-			writeObservationResponse(w, []any{map[string]any{"type": "function_call", "id": "fc-read", "call_id": "verify", "name": "read_file", "arguments": `{"path":"main.go"}`}})
 		default:
 			writeObservationResponse(w, []any{observationMessage(`{"status":"completed","answer":"fixed"}`)})
 		}
@@ -52,23 +66,61 @@ func TestReactHandoffAppliesRealPatchAndCompletes(t *testing.T) {
 		t.Fatal(err)
 	}
 	durable := &state.DurableState{ExecutionID: "modification", Goal: "fix main.go", CompletionCriteria: []string{"new line"}}
-	result, _, err := process.Run(&config.AgentConfig{AllowTools: map[config.McpToolName]struct{}{config.ApplyPatchMCPToolName: {}, config.ListDirMCPToolName: {}, config.ReadFileMCPToolName: {}}, LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema}}, durable)
-	if err != nil || result.Status != CompletedReactStatus {
-		t.Fatalf("result=%+v err=%v", result, err)
+	policy := config.DefaultExplorationBudget()
+	policy.InitialTurns = 1
+	cfg := &config.AgentConfig{
+		ExplorationBudget: policy,
+		AllowTools: map[config.McpToolName]struct{}{
+			config.ApplyPatchMCPToolName: {}, config.ListDirMCPToolName: {}, config.ReadFileMCPToolName: {},
+			config.GlobMCPToolName: {}, config.GrepMCPToolName: {}, config.ExecMCPToolName: {},
+			config.ExecStartMCPToolName: {}, config.ExecPollMCPToolName: {},
+		},
+		LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema},
 	}
-	content, _ := os.ReadFile(filepath.Join(workspace, "main.go"))
-	if string(content) != "new\n" {
-		t.Fatalf("file=%q", content)
+	var checkpoint []byte
+	process.SetCheckpoint(func() error {
+		if calls != 2 {
+			return nil
+		}
+		var err error
+		checkpoint, err = json.Marshal(durable)
+		return err
+	})
+	assertPatch := func(process *ReactProcess[ReactResult], durable *state.DurableState) {
+		t.Helper()
+		result, _, err := process.Run(cfg, durable)
+		if err != nil || result.Status != CompletedReactStatus || calls != 4 {
+			t.Fatalf("result=%+v requests=%d err=%v", result, calls, err)
+		}
+		content, err := os.ReadFile(filepath.Join(workspace, "main.go"))
+		if err != nil || string(content) != "new\n" {
+			t.Fatalf("file=%q err=%v", content, err)
+		}
+		var saved struct {
+			Exploration struct {
+				Used                  int
+				ModificationConfirmed bool
+			}
+		}
+		if err := json.Unmarshal(durable.ExecutionProgress, &saved); err != nil || saved.Exploration.Used != 1 || !saved.Exploration.ModificationConfirmed {
+			t.Fatalf("unexpected exploration progress: %s, err=%v", durable.ExecutionProgress, err)
+		}
 	}
-	var saved struct {
-		Exploration struct{ ModificationConfirmed bool }
-	}
-	if err := json.Unmarshal(durable.ExecutionProgress, &saved); err != nil {
+	assertPatch(process, durable)
+
+	var restored state.DurableState
+	if err := json.Unmarshal(checkpoint, &restored); err != nil {
 		t.Fatal(err)
 	}
-	if !saved.Exploration.ModificationConfirmed {
-		t.Fatalf("missing confirmed modification: %s", durable.ExecutionProgress)
+	if err := os.WriteFile(filepath.Join(workspace, "main.go"), []byte("old\n"), 0600); err != nil {
+		t.Fatal(err)
 	}
+	calls = 2 // 恢复后直接检查第一轮实施请求。
+	process, err = NewReactProcess[ReactResult](t.Context(), filemcp.Config{Workspace: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPatch(process, &restored)
 }
 
 func TestReactModificationWindowRequiresNetTargetChange(t *testing.T) {

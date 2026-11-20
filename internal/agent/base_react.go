@@ -232,6 +232,7 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 			return zero, nil, r.checkpointErr
 		}
 		log.Printf("[INFO] [exploration budget] instance=%s task_type=%s phase=%s exploration=%d/%d extensions=%d modification_left=%d stop=%q", durableState.ExecutionID, exploration.TaskType, exploration.Phase, exploration.Used, exploration.allowance(), exploration.Extensions, exploration.ModificationLeft, reason)
+		compacted.handoffTargets = nil
 		return r.finishProgress(worker, modelContext, durableState, budget, reason, progressResult)
 	}
 	observeProgress := func(batch BatchEvidence, remaining int) error {
@@ -307,6 +308,11 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 			}
 			var err error
 			compacted.corrections = worker.corrections
+			compacted.handoffTargets = nil
+			if exploration.awaitingTargetChange() && exploration.Handoff != nil {
+				compacted.handoffTargets = exploration.Handoff.TargetFiles
+			}
+			compacted.savedTools = durableState.ToolExecutions
 			if applied, err := r.prepareCompaction(compaction, agentConfig, durableState, compacted, worker.inputTokens); err != nil {
 				return zero, nil, err
 			} else if applied {
@@ -789,7 +795,7 @@ func (r *BaseReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, t
 	}
 	if callResult != nil {
 		if !callResult.IsError && toolParam.Name == string(config.ReadFileMCPToolName) {
-			result.FileEvidence = evidenceFromResult(callResult.StructuredContent)
+			result.FileEvidence, result.FileNextOffset = readFileEvidence(callResult.StructuredContent)
 		}
 		if !callResult.IsError && (toolParam.Name == string(config.GrepMCPToolName) || toolParam.Name == string(config.GlobMCPToolName)) {
 			result.SearchEvidence = searchEvidenceFromResult(callResult.StructuredContent)

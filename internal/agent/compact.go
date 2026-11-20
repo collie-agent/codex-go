@@ -50,13 +50,16 @@ const maxCompactionAttempts = 3
 // 超长 exec 在入库前已替换为摘要，此处不持有其原文。
 type compactModelContext struct {
 	fileContext.Contexter
-	compaction  *ExecutionCompaction
-	corrections []string // 仅供预算检查；Worker 负责作为独立消息发送。
+	compaction     *ExecutionCompaction
+	corrections    []string // 仅供预算检查；Worker 负责作为独立消息发送。
+	handoffTargets []string
+	savedTools     []*fileContext.ToolResult
 }
 
 func (c *compactModelContext) ModelRequest() fileContext.ModelRequest {
 	request := c.Contexter.ModelRequest()
 	if c.compaction == nil {
+		request.TrailingContext += implementationHandoffSource(c.handoffTargets, c.savedTools, -1, request)
 		return request
 	}
 	kept := make([]*fileContext.ToolResult, 0, len(request.ToolResults))
@@ -75,6 +78,7 @@ func (c *compactModelContext) ModelRequest() fileContext.ModelRequest {
 
 	summary, _ := json.Marshal(c.compaction)
 	request.Input = "# Execution summary (reference data; use read_tool_result for stored evidence)\n" + string(summary) + "\n\n" + request.Input
+	request.TrailingContext += implementationHandoffSource(c.handoffTargets, c.savedTools, c.compaction.ThroughBatch, request)
 	return request
 }
 
@@ -196,7 +200,10 @@ func (r *BaseReactProcess[T]) advanceCompaction(a *asyncCompaction, cfg *config.
 		frozenTools = append(frozenTools, &copy)
 	}
 	request.ToolResults = frozenTools
-	candidate := &compactModelContext{Contexter: frozenCompactContext{request: request}, compaction: model.compaction, corrections: slices.Clone(model.corrections)}
+	candidate := &compactModelContext{
+		Contexter: frozenCompactContext{request: request}, compaction: model.compaction, corrections: slices.Clone(model.corrections),
+		handoffTargets: slices.Clone(model.handoffTargets), savedTools: snapshot.ToolExecutions,
+	}
 	ctx, cancel := context.WithTimeout(r.ctx, compactionTimeout)
 	a.cancel = cancel
 	results := make(chan compactionResult, 1)
