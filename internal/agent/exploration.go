@@ -25,6 +25,7 @@ type explorationState struct {
 	Used                  int                         //已消耗的探索额度
 	Invalid               int                         //已计入决策纠错预算的无效尝试次数。超过 Policy.DecisionRetries 会触发停止
 	Pending               bool                        //是否必须补交有效的探索决策
+	VerificationRetryUsed bool                        //本次执行是否已获得混合批次拆分重试机会
 	Handoff               *state.ExplorationDecision  //当前保存的阶段决策。实施时包含目标、依据、下一步操作和目标文件。选择 unable 时也会保存该决策。
 	Handoffs              []state.ExplorationDecision //本次执行中所有获准的实施承诺。其位置用于将批次和变更证据关联到对应承诺
 }
@@ -43,7 +44,7 @@ func (e *explorationState) decisionContext(modelContext state.Contexter, schema 
 		// 待纠错或首次交接必须在独立的无工具轮次完成。
 		request.AllowTools = e.ModificationConfirmed && !e.Pending
 		if request.AllowTools {
-			request.TrailingContext += "\n已确认目标修改，但探索额度已耗尽。可以执行受支持的验证操作或按正常协议完成任务。继续调查前须依据已有证据单独提交 exploration 阶段决策，不得混入工具调用。"
+			request.TrailingContext += "\n已确认目标修改，探索额度已耗尽。请单独提交验证批次，例如 go build ./... 或 go test ./...。如果把搜索或读取源码与验证放在同一批，整批都不会执行。确需继续调查时，先依据已有证据单独提交 exploration.choice=extend，获批后再调用调查工具。验证完成后按正常协议收尾。"
 		} else {
 			request.TrailingContext += "\n" + explorationInstructions + "\n\n" + explorationFewShot(schema, multiAgent)
 		}

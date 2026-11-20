@@ -68,6 +68,20 @@ func (e *explorationState) needsDecision(result *ReactResult, hasTools bool, pur
 	return e.Pending || !(verification || completion)
 }
 
+func (e *explorationState) allowVerificationRetry(purpose string, calls map[string]string) bool {
+	if e.VerificationRetryUsed || e.Pending || !e.ModificationConfirmed || purpose != "investigation" {
+		return false
+	}
+	for _, callPurpose := range calls {
+		if callPurpose == "verification" {
+			// 按执行实例记录，恢复或后续实施交接都不会刷新这次机会。
+			e.VerificationRetryUsed = true
+			return true
+		}
+	}
+	return false
+}
+
 func (e *explorationState) refundNonInvestigation(reserved bool, purpose string) bool {
 	if !reserved || purpose == "investigation" {
 		return false

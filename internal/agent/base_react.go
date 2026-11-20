@@ -394,6 +394,16 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 		batchPurpose, batchCalls := exploration.batchPurpose(toolParams, durableState.ToolExecutions)
 		hasTools := len(toolParams) > 0
 		if exploration.needsDecision(value, hasTools, batchPurpose, explorationReserved) {
+			if value.Exploration == nil && exploration.allowVerificationRetry(batchPurpose, batchCalls) {
+				const reason = "验证与调查混在同一批，本批未执行。下一轮可单独重试一次验证；如仍需调查，请先单独提交 exploration.choice=extend。"
+				r.publishRejectedToolBatch(durableState.RunId, toolParams, reason)
+				if err := saveDecisionProgress(durableState, budget, r.checkpoint); err != nil {
+					return zero, nil, err
+				}
+				log.Printf("[INFO] [exploration budget] instance=%s purpose=%s admission=denied verification_retry=allowed", durableState.ExecutionID, batchPurpose)
+				worker.corrections = append(worker.corrections, reason)
+				continue
+			}
 			// 校验前记录模型决策，保留被拒绝或缺失 exploration 的返回，便于定位阶段协议问题。
 			response, err := json.Marshal(result)
 			if err != nil {
