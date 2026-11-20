@@ -10,6 +10,9 @@ import (
 
 type symlinkPolicy bool
 
+// HandoffTargetFileMetaKey limits an implementation read to its explicit file.
+const HandoffTargetFileMetaKey = "collie-agent/handoff-target-file"
+
 const (
 	rejectSymlinks  symlinkPolicy = false
 	resolveSymlinks symlinkPolicy = true

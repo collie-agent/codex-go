@@ -36,10 +36,10 @@ func searchQuery(tool, path string, args any) string {
 
 // Snapshot before searching and verify afterwards. Never label a post-search
 // read alone as the version searched by rg; a changing/unreadable tree is unknown.
-func searchSnapshot(ctx context.Context, workspace, scope string, includeIgnored, contents bool) string {
+func searchSnapshot(ctx context.Context, workspace, scope string, includeIgnored, contents, fileOnly bool) string {
 	hash := sha256.New()
 	info, err := os.Stat(filepath.Join(workspace, scope))
-	if err != nil {
+	if err != nil || (fileOnly && !info.Mode().IsRegular()) {
 		return ""
 	}
 	paths := []string{scope}

@@ -15,6 +15,7 @@ import (
 	"github.com/collie-agent/codex-go/internal/config"
 	state "github.com/collie-agent/codex-go/internal/context"
 	filemcp "github.com/collie-agent/codex-go/internal/mcp"
+	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func runCommandExploration(t *testing.T, workspace string, outputs [][]any, policies ...config.ExplorationBudget) (*state.DurableState, error) {
@@ -251,6 +252,7 @@ func TestReactExhaustedExplorationCanModifyTestAndComplete(t *testing.T) {
 	durable, err := runCommandExploration(t, workspace, [][]any{
 		modificationTool("read", "read_file", map[string]any{"path": "main.go"}),
 		modificationHandoff(),
+		modificationTool("recall", "read_tool_result", map[string]any{"call_id": "read", "offset": 0, "limit": 100}),
 		modificationTool("edit", "exec", map[string]any{"command": "sed", "args": []string{"-i", "s/package old/package main/", "main.go"}}),
 		modificationTool("test", "exec", map[string]any{"command": "go", "args": []string{"test", "main.go"}}),
 		{observationMessage(`{"status":"completed","answer":"changed and verified"}`)},
@@ -258,12 +260,33 @@ func TestReactExhaustedExplorationCanModifyTestAndComplete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verification and completion must not require new exploration: %v; %s", err, durable.ExecutionProgress)
 	}
+	if len(durable.ToolExecutions) < 2 || durable.ToolExecutions[1].ToolCallId != "recall" || durable.ToolExecutions[1].Status != filemcp.ToolCallSuceessStatus {
+		t.Fatal("implementation did not retrieve the successful exploration result")
+	}
 	var saved struct{ Exploration struct{ Used int } }
 	if err := json.Unmarshal(durable.ExecutionProgress, &saved); err != nil {
 		t.Fatal(err)
 	}
 	if saved.Exploration.Used != 1 {
 		t.Fatalf("budget refreshed or overcharged: %s", durable.ExecutionProgress)
+	}
+}
+
+func TestImplementationRecallRequiresSuccessfulLocalResult(t *testing.T) {
+	history := []*state.ToolResult{
+		{ToolCallId: "ok", Status: filemcp.ToolCallSuceessStatus},
+		{ToolCallId: "failed", Status: filemcp.ToolCallFailedStatus},
+		{ToolCallId: "pending"},
+	}
+	recall := func(id string) *sdk.CallToolParams {
+		return &sdk.CallToolParams{Name: "read_tool_result", Arguments: map[string]any{"call_id": id}}
+	}
+	budget := explorationState{Phase: phaseImplement}
+	for _, id := range []string{"failed", "pending", "unknown"} {
+		purpose, _ := budget.batchPurpose([]*sdk.CallToolParams{recall("ok"), recall(id)}, history)
+		if purpose != "investigation" {
+			t.Errorf("batch containing recall of %q has purpose %q", id, purpose)
+		}
 	}
 }
 

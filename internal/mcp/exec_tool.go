@@ -70,7 +70,7 @@ Entrypoint approval does not guarantee that a command, runtime, or dependency is
 	}, func(ctx context.Context, _ *sdk.CallToolRequest, args execToolArgs) (*sdk.CallToolResult, execToolResult, error) {
 		toolCtx, cancel := context.WithTimeout(ctx, config.Timeout)
 		defer cancel()
-		before := searchSnapshot(toolCtx, workspace, ".", true, true)
+		before := searchSnapshot(toolCtx, workspace, ".", true, true, false)
 		result := CommandResult{ExitCode: -1}
 		err := startupErr
 		if err == nil {
@@ -90,7 +90,7 @@ Entrypoint approval does not guarantee that a command, runtime, or dependency is
 				out.ErrorKind, out.ExitCode = "sandbox_startup", -1
 			}
 		}
-		version := confirmedSearchVersion(before, searchSnapshot(toolCtx, workspace, ".", true, true))
+		version := confirmedSearchVersion(before, searchSnapshot(toolCtx, workspace, ".", true, true, false))
 		// Hash the original result, before any model-generated summary can vary.
 		raw, _ := json.Marshal(out)
 		out.Evidence = &CommandEvidence{Purpose: CommandPurpose(args.Command, args.Args), WorkspaceVersion: version, Fingerprint: fmt.Sprintf("%x", sha256.Sum256(raw))}

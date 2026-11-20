@@ -257,9 +257,6 @@ func TestRunAgentUsesObserveAgentConfiguration(t *testing.T) {
 	for _, mode := range []string{"CLI", "resolved ReAct config"} {
 		t.Run(mode, func(t *testing.T) {
 			workspace := t.TempDir()
-			if err := os.WriteFile(filepath.Join(workspace, "notes.txt"), []byte("before\n"), 0600); err != nil {
-				t.Fatal(err)
-			}
 			observeRequest := make(chan struct {
 				model string
 				input string
@@ -307,7 +304,7 @@ func TestRunAgentUsesObserveAgentConfiguration(t *testing.T) {
 					for _, tool := range request.Tools {
 						tools[tool.Name] = true
 					}
-					if !tools["apply_patch"] || !tools["load_skill"] || tools["update_completion_criteria"] {
+					if !tools["exec"] || !tools["load_skill"] || tools["update_completion_criteria"] {
 						t.Errorf("ReAct saw tools %v, want workspace tools and criteria tool only before criteria are defined", request.Tools)
 					}
 					if reactRequests > 1 {
@@ -327,7 +324,7 @@ func TestRunAgentUsesObserveAgentConfiguration(t *testing.T) {
 					}
 					_ = json.NewEncoder(w).Encode(map[string]any{
 						"id": "resp_tool", "status": "completed",
-						"output": []any{map[string]any{"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "apply_patch", "arguments": `{"patch":"--- /dev/null\n+++ b/created.txt\n@@ -0,0 +1 @@\n+created\n"}`}},
+						"output": []any{map[string]any{"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "exec", "arguments": `{"command":"python3","args":["-c","print('verified')"]}`}},
 					})
 				case "observe-model":
 					observeRequest <- struct {
@@ -341,7 +338,7 @@ func TestRunAgentUsesObserveAgentConfiguration(t *testing.T) {
 					_ = json.NewEncoder(w).Encode(map[string]any{
 						"id": "resp_observe", "status": "completed",
 						"output": []any{map[string]any{"type": "message", "role": "assistant", "status": "completed", "content": []any{
-							map[string]any{"type": "output_text", "text": `{"ConfirmedFacts":["created.txt created"],"ReportedErrors":[]}`},
+							map[string]any{"type": "output_text", "text": `{"ConfirmedFacts":["exec call_1 printed verified"],"ReportedErrors":[]}`},
 						}}},
 					})
 				default:
@@ -351,12 +348,12 @@ func TestRunAgentUsesObserveAgentConfiguration(t *testing.T) {
 			defer server.Close()
 
 			configPath := filepath.Join(t.TempDir(), "agent.yaml")
-			contents := "name: react\nbase:\n  llm:\n    base_url: " + server.URL + "\n    api_key: test\n    model: base-model\n  allow_tools: [apply_patch]\n  sys_prompt: base-prompt\nagents:\n  react:\n    llm:\n      base_url: " + server.URL + "\n      api_key: test\n      model: react-model\n    sys_prompt: react-prompt\n  observe:\n    llm:\n      base_url: " + server.URL + "\n      api_key: test\n      model: observe-model\n    sys_prompt: observe-prompt\n"
+			contents := "name: react\nobserve: true\nbase:\n  llm:\n    base_url: " + server.URL + "\n    api_key: test\n    model: base-model\n  allow_tools: [exec]\n  sys_prompt: base-prompt\nagents:\n  react:\n    llm:\n      base_url: " + server.URL + "\n      api_key: test\n      model: react-model\n    sys_prompt: react-prompt\n  observe:\n    llm:\n      base_url: " + server.URL + "\n      api_key: test\n      model: observe-model\n    sys_prompt: observe-prompt\n"
 			if err := os.WriteFile(configPath, []byte(contents), 0600); err != nil {
 				t.Fatal(err)
 			}
 			if mode == "CLI" {
-				if err := runPersistedTestAgent(t, configPath, "修改文件", workspace, 5*time.Second); err != nil {
+				if err := runPersistedTestAgent(t, configPath, "验证命令输出", workspace, 5*time.Second); err != nil {
 					t.Fatal(err)
 				}
 			} else {
@@ -370,7 +367,7 @@ func TestRunAgentUsesObserveAgentConfiguration(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if _, _, err := process.Run(loaded.ForAgent("react"), &fileContext.DurableState{RunId: "resolved-config-task", Goal: "修改文件"}); err != nil {
+				if _, _, err := process.Run(loaded.ForAgent("react"), &fileContext.DurableState{RunId: "resolved-config-task", Goal: "验证命令输出"}); err != nil {
 					t.Fatal(err)
 				}
 			}

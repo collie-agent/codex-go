@@ -52,7 +52,7 @@ func (e *explorationState) decisionContext(modelContext state.Contexter, schema 
 	if e.Phase == phaseImplement {
 		if e.ModificationLeft > 0 && e.TaskType != "analysis" && e.Used >= e.allowance() {
 			request.AdvertiseTool = func(name config.McpToolName) bool {
-				return fixedExplorationPurpose(name) != "investigation"
+				return isTargetLocationTool(name) || fixedExplorationPurpose(name) != "investigation"
 			}
 		}
 		// 实施交接不在工具历史中；恢复也必须让模型看到既有证据和真实剩余窗口。
@@ -62,7 +62,11 @@ func (e *explorationState) decisionContext(modelContext state.Contexter, schema 
 			request.TrailingContext += "\n" + e.Rejection
 		}
 		// 每轮重建提示，并单独置于纠错消息之后。
-		request.FinalUserMessage = fmt.Sprintf("已进入实施阶段，剩余修改窗口为 %d 轮。请依据已有证据，优先对 target_files 执行 next_operation，尽快产生实际目标变更。仅在修改确有需要时执行工作区检查。若存在阻止安全修改的信息缺口，请单独申请探索延期；无法继续时返回 unable。修改后执行验证。", e.ModificationLeft)
+		location := "如需准备 apply_patch，可用 grep 或 read_file 定位源码，每次显式指定 target_files 中的单个文件。定位批次消耗一轮修改窗口，整批失败时退回。"
+		request.FinalUserMessage = fmt.Sprintf("已进入实施阶段，剩余修改窗口为 %d 轮。请依据已有证据，优先对 target_files 执行 next_operation，尽快产生实际目标变更。%s仅在修改确有需要时执行工作区检查。若存在阻止安全修改的信息缺口，请单独申请探索延期；无法继续时返回 unable。修改后执行验证。", e.ModificationLeft, location)
+		if strings.HasPrefix(e.Rejection, "Operation rejected: exploration allowance exhausted") {
+			request.FinalUserMessage = fmt.Sprintf("已进入实施阶段，剩余修改窗口为 %d 轮。请依据以上纠错提示推进 target_files 的 next_operation。%s工作区检查和探索延期以当前额度为准；无法继续时选择 unable。修改后执行验证。", e.ModificationLeft, location)
+		}
 	}
 	return frozenCompactContext{Contexter: modelContext, request: request}
 }
@@ -96,7 +100,7 @@ const explorationInstructions = `# 探索预算与阶段决策
 - 实施必须在修改窗口内确认目标文件发生变化。调查仍消耗探索额度，修改窗口不提供免费探索。
 - 仅当探索额度、延期次数和总决策预算允许时，运行时才批准延期。延期被拒绝后必须选择 implement 或 unable，不得重复申请已耗尽的额度。
 - 运行时将使用受支持标准测试参数的 go test 识别为验证，将简单的 sed -i 替换及 apply_patch 识别为修改；实际修改后，git diff -- 加已确认目标的精确路径可识别为结果验证。
-- 源码读取与搜索、任意脚本或解释器、不支持的命令选项均保守地消耗探索额度；声称用于验证不能豁免。
+- 实施阶段可用 read_file 和 grep 定位交接目标文件的源码，计入修改窗口。其他源码读取与搜索、任意脚本或解释器以及不支持的命令选项均消耗探索额度。
 - 包含调查的混合批次消耗一轮探索。进程轮询、停止及已存结果读取继承原始命令或调用的用途；未知标识仍视为调查。
 - 验证命令与修改操作必须分开执行；混合批次中的修改归属不明确。
 - 只有已确认的目标文件变化能够证明实施；workspace_version、测试输出、退出状态或口头声明均不能证明。

@@ -30,7 +30,7 @@ func TestReactExplorationRejectionPublishesToolErrors(t *testing.T) {
 					t.Fatal(err)
 				}
 				patch := map[string]any{"patch": "--- main.go\n+++ main.go\n@@ -1 +1 @@\n-package old\n+package main\n"}
-				denied := modificationTool("denied-read", "read_file", map[string]any{"path": "main.go"})
+				denied := modificationTool("denied-read", "read_file", map[string]any{"path": "other.go"})
 				denied = append(denied, modificationTool("denied-patch", "apply_patch", patch)...)
 				if decision != "" {
 					denied = append(denied, observationMessage(decision))
@@ -70,7 +70,7 @@ func TestReactExplorationRejectionPublishesToolErrors(t *testing.T) {
 				durable := &state.DurableState{ExecutionID: "rejected-output", Goal: "fix main.go", CompletionCriteria: []string{"fixed"}}
 				_, _, err = process.Run(&config.AgentConfig{ExplorationBudget: policy, AllowTools: map[config.McpToolName]struct{}{config.ReadFileMCPToolName: {}, config.ApplyPatchMCPToolName: {}}, LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema}}, durable)
 				wantContent := "package main\n"
-				if window == 1 {
+				if window == 1 && decision != "" {
 					wantContent = "package old\n"
 					if err == nil || !strings.Contains(err.Error(), "modification window exhausted") {
 						t.Fatalf("err=%v", err)

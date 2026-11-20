@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"path/filepath"
+	"slices"
+	"strings"
 
 	"github.com/collie-agent/codex-go/internal/config"
 	state "github.com/collie-agent/codex-go/internal/context"
@@ -22,6 +25,29 @@ func fixedExplorationPurpose(name config.McpToolName) string {
 	default:
 		return "investigation"
 	}
+}
+
+func isTargetLocationTool(name config.McpToolName) bool {
+	return name == config.ReadFileMCPToolName || name == config.GrepMCPToolName
+}
+
+func (e *explorationState) locatesHandoffTarget(param *sdk.CallToolParams) bool {
+	if !e.awaitingTargetChange() || e.Handoff == nil || !isTargetLocationTool(config.McpToolName(param.Name)) {
+		return false
+	}
+	raw, err := json.Marshal(param.Arguments)
+	var args struct{ Path string }
+	if err != nil || json.Unmarshal(raw, &args) != nil || filepath.IsAbs(args.Path) {
+		return false
+	}
+	path := normalizedHandoffPath(args.Path)
+	if path == "." || path == ".." || strings.HasPrefix(path, "../") {
+		return false
+	}
+	// 这里只比对交接路径。由 MCP 服务在实际调用时校验文件类型和符号链接。
+	return slices.ContainsFunc(e.Handoff.TargetFiles, func(target string) bool {
+		return normalizedHandoffPath(target) == path
+	})
 }
 
 // 仅识别有明确语法的业务操作；解释器、项目脚本和未知选项保守计为调查。
@@ -53,7 +79,7 @@ type explorationAccounting struct {
 	ModificationCharged bool `json:",omitempty"`
 	Applied             bool
 	SinceBatch          int    `json:",omitempty"`
-	Purpose             string //investigation,modification,workspace_check,verification
+	Purpose             string //investigation,modification,workspace_check,verification,evidence_read
 	Calls               map[string]string
 	Before              map[string]targetSnapshot `json:",omitempty"`
 	After               map[string]targetSnapshot `json:",omitempty"`
@@ -203,15 +229,18 @@ purpose 是整批的用途，供主循环判断探索额度和批次准入。
 calls 是 调用 ID → 用途 的映射，供批次记账、失败退款和后续查询使用
 整批采用其中优先级最高的用途：
 
-investigation（调查） > modification（修改） > workspace_check（工作区检查） > verification（验证）
+investigation（调查） > modification（修改） > workspace_check（工作区检查） > verification（验证） > evidence_read（历史回读）
 
 例如，同一批包含 rg 搜索和 apply_patch，calls 会分别记录 investigation 和 modification，整批则按 investigation 处理。如果实施阶段的探索额度已经用尽，这一批会整体被拒绝
 */
-func (e *explorationState) batchPurpose(params []*sdk.CallToolParams) (string, map[string]string) {
-	purpose := "verification"
+func (e *explorationState) batchPurpose(params []*sdk.CallToolParams, history []*state.ToolResult) (string, map[string]string) {
+	purpose := "evidence_read"
 	calls := make(map[string]string)
 	for _, param := range params {
 		next := explorationPurpose(param)
+		if e.locatesHandoffTarget(param) {
+			next = "workspace_check"
+		}
 		if e.verifiesModifiedTargets(param) {
 			next = "verification"
 		}
@@ -227,23 +256,12 @@ func (e *explorationState) batchPurpose(params []*sdk.CallToolParams) (string, m
 			}
 		}
 		if param.Name == "read_tool_result" {
-			raw, _ := json.Marshal(param.Arguments)
-			var query struct {
-				CallID string `json:"call_id"`
-			}
-			_ = json.Unmarshal(raw, &query)
-			next = "investigation"
-			for i := len(e.Accounting) - 1; i >= 0; i-- {
-				if original, ok := e.Accounting[i].Calls[query.CallID]; ok {
-					next = original
-					break
-				}
-			}
+			next = e.storedResultPurpose(param, history)
 		}
 		id, _ := param.Meta[toolCallIDMetaKey].(string)
 		calls[id] = next
 		// 调查优先于修改、工作区检查和验证，禁止混合批次借低成本用途部分放行。
-		if next == "investigation" {
+		if purpose == "evidence_read" || next == "investigation" {
 			purpose = next
 		} else if next == "modification" && purpose != "investigation" {
 			purpose = next
@@ -252,6 +270,31 @@ func (e *explorationState) batchPurpose(params []*sdk.CallToolParams) (string, m
 		}
 	}
 	return purpose, calls
+}
+
+func (e *explorationState) storedResultPurpose(param *sdk.CallToolParams, history []*state.ToolResult) string {
+	raw, err := json.Marshal(param.Arguments)
+	var query struct {
+		CallID string `json:"call_id"`
+	}
+	if err != nil || json.Unmarshal(raw, &query) != nil || query.CallID == "" {
+		return "investigation"
+	}
+	if e.Phase == phaseImplement {
+		// 当前实例的持久化历史保留了压缩前的调用及状态。回读成功结果不消耗探索额度。
+		for _, call := range history {
+			if call != nil && call.ToolCallId == query.CallID && call.Status == filemcp.ToolCallSuceessStatus {
+				return "evidence_read"
+			}
+		}
+		return "investigation"
+	}
+	for i := len(e.Accounting) - 1; i >= 0; i-- {
+		if purpose, ok := e.Accounting[i].Calls[query.CallID]; ok {
+			return purpose
+		}
+	}
+	return "investigation"
 }
 
 func (e *explorationState) recordCommandSessions(completed []*state.ToolResult, calls map[string]string, before map[string]targetSnapshot, batch int) {
@@ -435,9 +478,8 @@ func (e *explorationState) preHandoffVerified(history []*state.ToolResult) bool 
 func (e *explorationState) registerBatch(batch int, purpose string, calls map[string]string) bool {
 	if e.Phase == phaseImplement && purpose == "investigation" && e.TaskType != "analysis" {
 		if e.Used >= e.allowance() {
-			// 策略拒绝不是工具失败：不登记执行或预扣探索，直接消耗业务轮窗口，不能退款。
-			e.ModificationLeft--
-			e.Rejection = fmt.Sprintf("Operation rejected: exploration allowance exhausted; batch was not executed. Apply a target modification using existing evidence, submit a standalone exploration extend decision with gap, blocking_reason, investigation and exit_condition, or choose unable. modification_left=%d", e.ModificationLeft)
+			// 整批尚未执行，保留修改窗口供下一轮纠错。模型请求仍计入总决策预算。
+			e.Rejection = fmt.Sprintf("Operation rejected: exploration allowance exhausted; batch was not executed. modification_left=%d", e.ModificationLeft)
 			return false
 		}
 		e.Used++
@@ -461,30 +503,27 @@ func (e *explorationState) chargeModificationBatch() bool {
 }
 
 // admitExplorationBatch 先持久化批次记账，再单独持久化实施窗口扣减。
-func (r *BaseReactProcess[T]) admitExplorationBatch(durable *state.DurableState, budget *executionProgress, toolParams []*sdk.CallToolParams, batch int, batchPurpose string, batchCalls map[string]string) (admitted bool, stopReason string, err error) {
+func (r *BaseReactProcess[T]) admitExplorationBatch(durable *state.DurableState, budget *executionProgress, toolParams []*sdk.CallToolParams, batch int, batchPurpose string, batchCalls map[string]string) (bool, error) {
 	e := budget.Exploration
 	if !e.registerBatch(batch, batchPurpose, batchCalls) {
+		e.Rejection += e.rejectedReadHints(toolParams, durable.ToolExecutions, r.maxTurn-budget.UsedTurns-2)
 		log.Printf("[INFO] [exploration budget] instance=%s purpose=%s admission=denied exploration=%d/%d modification_left=%d", durable.ExecutionID, batchPurpose, e.Used, e.allowance(), e.ModificationLeft)
 		r.publishRejectedToolBatch(durable.RunId, toolParams, e.Rejection)
 		if err := saveDecisionProgress(durable, budget, r.checkpoint); err != nil {
-			return false, "", err
+			return false, err
 		}
-		log.Printf("[INFO] [exploration budget] instance=%s operation=rejected correction_allowed=%t modification_left=%d", durable.ExecutionID, e.ModificationLeft > 0, e.ModificationLeft)
-		if reason := e.stopReason(); reason != "" {
-			return false, reason + "; exploration allowance exhausted", nil
-		}
-		return false, "", nil
+		return false, nil
 	}
 	if err := saveDecisionProgress(durable, budget, r.checkpoint); err != nil {
-		return false, "", err
+		return false, err
 	}
 	if e.chargeModificationBatch() {
 		if err := saveDecisionProgress(durable, budget, r.checkpoint); err != nil {
-			return false, "", err
+			return false, err
 		}
 	}
 	log.Printf("[INFO] [exploration budget] instance=%s purpose=%s admission=allowed exploration=%d/%d modification_left=%d", durable.ExecutionID, batchPurpose, e.Used, e.allowance(), e.ModificationLeft)
-	return true, "", nil
+	return true, nil
 }
 
 // checkpointExplorationBatch 将最后一个调用的结果与批次快照一起落盘，便于恢复时补做确认。

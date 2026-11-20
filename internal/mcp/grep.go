@@ -38,19 +38,21 @@ type grepArgs struct {
 	IncludeIgnored bool   `json:"include_ignored,omitempty" jsonschema:"disable ignore-file filtering during traversal (default false); .git entries and symlinks remain excluded; use JSON true or false, never a quoted string"`
 	Offset         int    `json:"offset,omitempty" jsonschema:"non-negative zero-based matching-line index (default 0); use next_offset to continue; use a JSON integer such as 0, never a quoted numeric string"`
 	Limit          *int   `json:"limit,omitempty" jsonschema:"positive maximum number of matching lines (default 200); response size may reduce the page; use a JSON integer such as 200, never a quoted numeric string"`
+	fileOnly       bool
 }
 
 // registerGrepTool registers the grep tool against an already resolved workspace.
 // It is kept separate so startup registration can compose the individual tools.
 func registerGrepTool(server *sdk.Server, workspace string, timeout time.Duration) {
 	sdk.AddTool(server, &sdk.Tool{Name: string(mcpconfig.GrepMCPToolName), InputSchema: toolInputSchema[grepArgs](), Description: `Search file contents for a non-empty pattern using ripgrep. Arguments must match the declared JSON types: strings stay strings, integers are unquoted numbers, and booleans are true or false, never quoted strings. Example arguments: {"pattern":"TODO","path":".","glob":"","literal":true,"ignore_case":false,"include_ignored":false,"offset":0,"limit":200}. path is an existing workspace-relative file or directory (default .); directory searches are recursive. Absolute paths, paths outside the workspace, and symlink path components are rejected. pattern is a ripgrep regular expression by default; set literal=true for fixed text. Matching is case-sensitive unless ignore_case=true. glob optionally filters file paths using ripgrep glob syntax evaluated from the workspace root; it is not a content pattern. Includes hidden files, does not follow symlinks, and excludes .git entries. Directory traversal respects ignore files unless include_ignored=true; an explicitly named file can be searched even when ignored. Returns one item per matching line with workspace-relative path, one-based line number, and line text, sorted by path then line; no matches returns an empty page. offset is a zero-based matching-line index (default 0), not a source line number; limit is a positive maximum item count (default 200). If truncated is true, repeat the same search with offset=next_offset. The 1 MiB response cap may shorten a page.`},
-		func(ctx context.Context, _ *sdk.CallToolRequest, args grepArgs) (*sdk.CallToolResult, grepResult, error) {
+		func(ctx context.Context, req *sdk.CallToolRequest, args grepArgs) (*sdk.CallToolResult, grepResult, error) {
 			if args.Pattern == "" {
 				return nil, grepResult{}, fmt.Errorf("pattern is required")
 			}
 			if args.Path == "" {
 				args.Path = "."
 			}
+			args.fileOnly = req.Params.Meta[HandoffTargetFileMetaKey] == true
 			toolCtx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
 			result, err := Grep(toolCtx, workspace, args)
@@ -70,23 +72,29 @@ func Grep(ctx context.Context, workspace string, args grepArgs) (grepResult, err
 	if args.Offset < 0 || limit < 1 {
 		return grepResult{}, fmt.Errorf("offset must be non-negative and limit must be positive")
 	}
-	rel, err := grepTarget(workspace, args.Path)
+	rel, err := grepTarget(workspace, args.Path, args.fileOnly)
 	if err != nil {
 		return grepResult{}, err
 	}
 	if isGitPath(rel) {
 		return grepResult{Items: []grepItem{}}, nil
 	}
-	before := searchSnapshot(ctx, workspace, rel, args.IncludeIgnored, true)
+	before := searchSnapshot(ctx, workspace, rel, args.IncludeIgnored, true, args.fileOnly)
 	var eligible map[string]bool
 	if args.Glob != "" && !args.IncludeIgnored {
-		eligible, err = searchableFiles(ctx, workspace, rel)
+		eligible, err = searchableFiles(ctx, workspace, rel, args.fileOnly)
 		if err != nil {
 			return grepResult{}, err
 		}
 	}
 
 	commandArgs := []string{"--json", "--hidden", "--no-follow", "--no-require-git", "--sort", "path"}
+	searchPath := rel
+	if args.fileOnly {
+		// 如果路径在校验后变为目录，rg 也不会递归搜索。
+		commandArgs = append(commandArgs, "--maxdepth", "0")
+		searchPath = "./" + rel
+	}
 	if args.IncludeIgnored {
 		commandArgs = append(commandArgs, "--no-ignore")
 	}
@@ -99,7 +107,7 @@ func Grep(ctx context.Context, workspace string, args grepArgs) (grepResult, err
 	if args.Glob != "" {
 		commandArgs = append(commandArgs, "--glob", args.Glob)
 	}
-	commandArgs = append(commandArgs, "--glob", "!.git", "--glob", "!**/.git/**", "--", args.Pattern, rel)
+	commandArgs = append(commandArgs, "--glob", "!.git", "--glob", "!**/.git/**", "--", args.Pattern, searchPath)
 
 	cmd := exec.CommandContext(ctx, "rg", commandArgs...)
 	cmd.Dir = workspace
@@ -160,11 +168,11 @@ func Grep(ctx context.Context, workspace string, args grepArgs) (grepResult, err
 		return items[i].Line < items[j].Line
 	})
 	selected, truncated, next := selectPage(items, args.Offset, limit)
-	evidence := &SearchEvidence{Query: searchQuery("grep", rel, args), Version: confirmedSearchVersion(before, searchSnapshot(ctx, workspace, rel, args.IncludeIgnored, true)), Offset: args.Offset}
+	evidence := &SearchEvidence{Query: searchQuery("grep", rel, args), Version: confirmedSearchVersion(before, searchSnapshot(ctx, workspace, rel, args.IncludeIgnored, true, args.fileOnly)), Offset: args.Offset}
 	return grepResult{Items: selected, Truncated: truncated, NextOffset: next, SearchEvidence: grepPageEvidence(evidence, selected, truncated)}, nil
 }
 
-func grepTarget(workspace, path string) (string, error) {
+func grepTarget(workspace, path string, fileOnly bool) (string, error) {
 	resolved, rel, err := resolveWorkspacePath(workspace, path, rejectSymlinks, false)
 	if err != nil {
 		return "", err
@@ -172,6 +180,9 @@ func grepTarget(workspace, path string) (string, error) {
 	info, err := os.Stat(resolved)
 	if err != nil {
 		return "", err
+	}
+	if fileOnly && !info.Mode().IsRegular() {
+		return "", fmt.Errorf("implementation grep path must be a regular file")
 	}
 	if !info.Mode().IsRegular() && !info.IsDir() {
 		return "", fmt.Errorf("path is not a regular file or directory")

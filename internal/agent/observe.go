@@ -81,3 +81,33 @@ func (o *ObserveProcess[T]) Run(agentConfig *config.AgentConfig, durableState *f
 		return result, []AgentProcessorType{EndAgentType}, nil
 	}
 }
+
+func (r *BaseReactProcess[T]) observeExec(toolResult *fileContext.ToolResult, rc *fileContext.ReactContext, agentConfig *config.AgentConfig) {
+	if toolResult == nil || toolResult.ToolName != string(config.ExecMCPToolName) ||
+		agentConfig == nil || agentConfig.Global == nil || !agentConfig.Global.Observe || r.ctx.Err() != nil {
+		return
+	}
+	// 同批工具可能仍在更新持久状态，先在执行锁内复制快照。
+	r.executionMu.Lock()
+	observationContext := rc.SnapshotObservationContext(toolResult)
+	r.executionMu.Unlock()
+	observerConfig := agentConfig.ForAgent("observe")
+	go func() {
+		observer := NewObserveProcess[ObserveResult](r.ctx, observationContext)
+		result, _, err := observer.Run(observerConfig, observationContext.DurableState)
+		if r.ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			tr := observationContext.ToolResult
+			rc.AppendReportedErrors(fmt.Sprintf("tool %q (call_id=%q): observation failed: %v", tr.ToolName, tr.ToolCallId, err))
+			return
+		}
+		for _, fact := range result.ConfirmedFacts {
+			rc.AppendConfirmedFacts(fact)
+		}
+		for _, reportedError := range result.ReportedErrors {
+			rc.AppendReportedErrors(reportedError)
+		}
+	}()
+}

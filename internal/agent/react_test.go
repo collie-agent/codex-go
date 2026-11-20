@@ -39,19 +39,20 @@ func TestReactObserveAsync(t *testing.T) {
 		case <-ctx.Done():
 			return
 		}
-		writeObservationResponse(w, []any{observationMessage(`{"ConfirmedFacts":["patch call_patch: file updated"],"ReportedErrors":["patch call_patch: partial result"]}`)})
+		writeObservationResponse(w, []any{observationMessage(`{"ConfirmedFacts":["exec call_exec: file updated"],"ReportedErrors":["exec call_exec: partial result"]}`)})
 	}))
 	defer server.Close()
 	r := &ReactProcess[ReactResult]{BaseReactProcess: BaseReactProcess[ReactResult]{ctx: ctx}}
-	agentConfig := &config.AgentConfig{LLMConfig: &config.LLMConfig{
+	agentConfig := &config.AgentConfig{Global: &config.GlobalConfig{Observe: true}, LLMConfig: &config.LLMConfig{
 		BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema,
 	}}
 	rc := fileContext.NewReactContext(&fileContext.DurableState{RunId: "react-task", Goal: "update file"})
 	rc.AppendConfirmedFacts("existing fact")
 	done := make(chan struct{})
 	go func() {
-		r.updateContext(&mcpSdk.CallToolResult{Content: []mcpSdk.Content{&mcpSdk.TextContent{Text: "updated"}}},
-			&mcpSdk.CallToolParams{Name: "apply_patch", Meta: mcpSdk.Meta{toolCallIDMetaKey: "call_patch"}}, rc, nil, agentConfig)
+		result := r.updateContext(&mcpSdk.CallToolResult{Content: []mcpSdk.Content{&mcpSdk.TextContent{Text: "updated"}}},
+			&mcpSdk.CallToolParams{Name: "exec", Meta: mcpSdk.Meta{toolCallIDMetaKey: "call_exec"}}, rc, nil, agentConfig)
+		r.observeExec(result, rc, agentConfig)
 		close(done)
 	}()
 	select {
@@ -61,7 +62,7 @@ func TestReactObserveAsync(t *testing.T) {
 	}
 	select {
 	case input := <-started:
-		for _, want := range []string{"update file", "existing fact", "apply_patch", "call_patch", "updated"} {
+		for _, want := range []string{"update file", "existing fact", "exec", "call_exec", "updated"} {
 			if !strings.Contains(input, want) {
 				t.Errorf("observation input missing %q: %s", want, input)
 			}
@@ -76,67 +77,11 @@ func TestReactObserveAsync(t *testing.T) {
 		t.Fatal("raw result missing while observation is pending")
 	}
 	release <- struct{}{}
-	waitForReactObservation(t, ctx, rc, "patch call_patch: partial result")
-	for _, want := range []string{"existing fact", "fact added during observation", "patch call_patch: file updated"} {
+	waitForReactObservation(t, ctx, rc, "exec call_exec: partial result")
+	for _, want := range []string{"existing fact", "fact added during observation", "exec call_exec: file updated"} {
 		if !strings.Contains(rc.Format(), want) {
 			t.Errorf("context missing %q", want)
 		}
-	}
-}
-
-func TestReactExecObservation(t *testing.T) {
-	for _, command := range []string{"git", "npm", "poetry", "python", "python3", "ts-node", "tsx"} {
-		t.Run(command, func(t *testing.T) { testReactExecObservation(t, command) })
-	}
-}
-
-func testReactExecObservation(t *testing.T, command string) {
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		var request struct {
-			Input string `json:"input"`
-		}
-		if err := decodeModelRequest(req.Body, &request); err != nil {
-			t.Error(err)
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		for _, want := range []string{"verify tests", "exec", "call_exec", `"command":"` + command + `"`, "FAIL: TestExample", "exit_code", "影响后续决策"} {
-			if !strings.Contains(request.Input, want) {
-				t.Errorf("exec observation input missing %q: %s", want, request.Input)
-			}
-		}
-		writeObservationResponse(w, []any{observationMessage(`{"ConfirmedFacts":["exec call_exec: TestExample failed"],"ReportedErrors":["exec call_exec: tests exited with code 1"]}`)})
-	}))
-	defer server.Close()
-	r := &ReactProcess[ReactResult]{BaseReactProcess: BaseReactProcess[ReactResult]{ctx: ctx}}
-	rc := fileContext.NewReactContext(&fileContext.DurableState{RunId: "exec-task", Goal: "verify tests"})
-	r.updateContext(&mcpSdk.CallToolResult{Content: []mcpSdk.Content{&mcpSdk.TextContent{Text: `{"stdout":"FAIL: TestExample","exit_code":1}`}}},
-		&mcpSdk.CallToolParams{Name: "exec", Meta: mcpSdk.Meta{toolCallIDMetaKey: "call_exec"}, Arguments: map[string]any{"command": command, "args": []string{"test"}}},
-		rc, nil, &config.AgentConfig{LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema}})
-	waitForReactObservation(t, ctx, rc, "exec call_exec: tests exited with code 1")
-	if !strings.Contains(rc.Format(), "exec call_exec: TestExample failed") {
-		t.Fatal("exec observation facts were not merged into ReAct context")
-	}
-}
-
-func TestReactSkipsObservationForSearchCommand(t *testing.T) {
-	requested := make(chan struct{}, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		requested <- struct{}{}
-		writeObservationResponse(w, []any{observationMessage(`{"ConfirmedFacts":[],"ReportedErrors":[]}`)})
-	}))
-	defer server.Close()
-	r := &ReactProcess[ReactResult]{BaseReactProcess: BaseReactProcess[ReactResult]{ctx: t.Context()}}
-	rc := fileContext.NewReactContext(&fileContext.DurableState{RunId: "search"})
-	r.updateContext(&mcpSdk.CallToolResult{Content: []mcpSdk.Content{&mcpSdk.TextContent{Text: `{"stdout":"match","exit_code":0}`}}},
-		&mcpSdk.CallToolParams{Name: "exec", Arguments: map[string]any{"command": "rg", "args": []string{"npm"}}},
-		rc, nil, &config.AgentConfig{LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema}})
-	select {
-	case <-requested:
-		t.Fatal("search command triggered observation")
-	case <-time.After(100 * time.Millisecond):
 	}
 }
 
@@ -249,14 +194,16 @@ func TestReactObserveFailure(t *testing.T) {
 	}))
 	defer server.Close()
 	r := &ReactProcess[ReactResult]{BaseReactProcess: BaseReactProcess[ReactResult]{ctx: ctx}}
-	agentConfig := &config.AgentConfig{LLMConfig: &config.LLMConfig{
+	agentConfig := &config.AgentConfig{Global: &config.GlobalConfig{Observe: true}, LLMConfig: &config.LLMConfig{
 		BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema,
 	}}
 	rc := fileContext.NewReactContext(&fileContext.DurableState{RunId: "react-task"})
-	r.updateContext(nil, &mcpSdk.CallToolParams{Name: "apply_patch", Meta: mcpSdk.Meta{toolCallIDMetaKey: "call_patch"}}, rc, errors.New("tool failed"), agentConfig)
+	result := r.updateContext(&mcpSdk.CallToolResult{IsError: true, Content: []mcpSdk.Content{&mcpSdk.TextContent{Text: "tool failed"}}},
+		&mcpSdk.CallToolParams{Name: "exec", Meta: mcpSdk.Meta{toolCallIDMetaKey: "call_exec"}}, rc, nil, agentConfig)
+	r.observeExec(result, rc, agentConfig)
 	waitForReactObservation(t, ctx, rc, "observation failed")
 	formatted := rc.Format()
-	for _, want := range []string{"call_patch", "parse response output"} {
+	for _, want := range []string{"call_exec", "parse response output"} {
 		if !strings.Contains(formatted, want) {
 			t.Errorf("context missing %q: %s", want, formatted)
 		}

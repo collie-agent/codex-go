@@ -391,7 +391,7 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 
 		value := progressResult(&result)
 		// 本轮预扣的最后一个探索额度仍允许执行；下一轮才要求独立决策。
-		batchPurpose, batchCalls := exploration.batchPurpose(toolParams)
+		batchPurpose, batchCalls := exploration.batchPurpose(toolParams, durableState.ToolExecutions)
 		hasTools := len(toolParams) > 0
 		if exploration.needsDecision(value, hasTools, batchPurpose, explorationReserved) {
 			// 校验前记录模型决策，保留被拒绝或缺失 exploration 的返回，便于定位阶段协议问题。
@@ -458,12 +458,9 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 			}
 			return result, []AgentProcessorType{EndAgentType}, nil
 		}
-		admitted, stopReason, err := r.admitExplorationBatch(durableState, budget, toolParams, batchOffset+i, batchPurpose, batchCalls)
+		admitted, err := r.admitExplorationBatch(durableState, budget, toolParams, batchOffset+i, batchPurpose, batchCalls)
 		if err != nil {
 			return zero, nil, err
-		}
-		if stopReason != "" {
-			return finish(stopReason)
 		}
 		if !admitted {
 			continue
@@ -471,6 +468,13 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 		// 在登记和执行前移除重复项，也覆盖模型同一批返回的重复调用。
 		pending := toolParams[:0]
 		for _, param := range toolParams {
+			id, _ := param.Meta[toolCallIDMetaKey].(string)
+			if batchCalls[id] == "workspace_check" && isTargetLocationTool(config.McpToolName(param.Name)) {
+				// 实施定位需要当前源码，也要允许重试此前失败的读取或搜索。
+				param.Meta[filemcp.HandoffTargetFileMetaKey] = true
+				pending = append(pending, param)
+				continue
+			}
 			if param.Name == string(config.ExecMCPToolName) {
 				args, err := json.Marshal(param.Arguments)
 				if err != nil {
@@ -478,7 +482,6 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 				}
 				key := toolInvocationKey(param.Name, string(args))
 				if failure, exists := failedExecs[key]; exists && (!failure.transient || failure.attempts >= 2) {
-					id, _ := param.Meta[toolCallIDMetaKey].(string)
 					message := fmt.Sprintf("Repeated failed command was not executed (previous call_id=%q). No intervening repair or state-changing tool call was observed. Inspect the cached error and repair the source, dependencies or environment before retrying. Transient failures allow only one retry.", failure.call.ToolCallId)
 					cached := r.cachedDuplicateResult(durableState, failure.call.ToolCallId, id, param.Name, string(args))
 					cached.Error = strings.TrimSpace(message + "\n" + cached.Error)
@@ -503,7 +506,6 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 				args = []byte(raw)
 			}
 			key := toolInvocationKey(param.Name, string(args))
-			id, _ := param.Meta[toolCallIDMetaKey].(string)
 			if original, exists := seenCalls[key]; exists {
 				message := fmt.Sprintf("Tool %q with these arguments was already called (previous call_id=%q). Duplicate call_id=%q was not executed; its native tool response contains the cached result. Use that result to choose your next action instead of repeating the original tool.", param.Name, original, id)
 				cached := r.cachedDuplicateResult(durableState, original, id, param.Name, string(args))
@@ -684,34 +686,6 @@ func (r *BaseReactProcess[T]) run(agentConfig *config.AgentConfig, durableState 
 	return finish(fmt.Sprintf("maximum decision budget exhausted (%d)", r.maxTurn))
 }
 
-func (r *BaseReactProcess[T]) observe(toolResult *fileContext.ToolResult, rc *fileContext.ReactContext, agentConfig *config.AgentConfig) {
-	if r == nil || r.ctx == nil || rc == nil || toolResult == nil || r.ctx.Err() != nil {
-		return
-	}
-	// Copy the inputs before starting the request: the next ReAct turn and
-	// other observers may update the context while this request is running.
-	observationContext := rc.SnapshotObservationContext(toolResult)
-	// 配置沿调用链传入并由本次闭包捕获，无需保存在 Process 上。
-	go func() {
-		observer := NewObserveProcess[ObserveResult](r.ctx, observationContext)
-		result, _, err := observer.Run(agentConfig, observationContext.DurableState)
-		if r.ctx.Err() != nil {
-			return
-		}
-		if err != nil {
-			tr := observationContext.ToolResult
-			rc.AppendReportedErrors(fmt.Sprintf("tool %q (call_id=%q): observation failed: %v", tr.ToolName, tr.ToolCallId, err))
-			return
-		}
-		for _, fact := range result.ConfirmedFacts {
-			rc.AppendConfirmedFacts(fact)
-		}
-		for _, reportedError := range result.ReportedErrors {
-			rc.AppendReportedErrors(reportedError)
-		}
-	}()
-}
-
 func (r *BaseReactProcess[T]) batchToolCallings(toolParams []*mcpSdk.CallToolParams, rc *fileContext.ReactContext, agentConfig *config.AgentConfig) {
 	// 执行前获取本批工具的实际 schema；校验失败也作为工具结果返回下一轮。
 	schemas := make(map[string]any)
@@ -753,13 +727,17 @@ func (r *BaseReactProcess[T]) batchToolCallings(toolParams []*mcpSdk.CallToolPar
 				return
 			}
 			callResult, err := r.mcpClientSess.CallTool(r.ctx, toolParam)
-			r.updateContext(callResult, toolParam, rc, err, agentConfig)
+			result := r.updateContext(callResult, toolParam, rc, err, agentConfig)
+			// 只观察 MCP 实际返回的结果，跳过参数校验拒绝和结果未知的调用。
+			if callResult != nil {
+				r.observeExec(result, rc, agentConfig)
+			}
 		})
 	}
 	wg.Wait()
 }
 
-func (r *BaseReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, toolParam *mcpSdk.CallToolParams, rc *fileContext.ReactContext, err error, agentConfig *config.AgentConfig) {
+func (r *BaseReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, toolParam *mcpSdk.CallToolParams, rc *fileContext.ReactContext, err error, agentConfig *config.AgentConfig) *fileContext.ToolResult {
 	var summaryErr error
 	if rc != nil && rc.DurableState != nil {
 		// Summarize before entering the persistence lock; raw exec output is never checkpointed.
@@ -769,7 +747,7 @@ func (r *BaseReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, t
 	r.executionMu.Lock()
 	defer r.executionMu.Unlock()
 	if rc == nil || toolParam == nil {
-		return
+		return nil
 	}
 
 	callID, _ := toolParam.Meta[toolCallIDMetaKey].(string)
@@ -870,7 +848,7 @@ func (r *BaseReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, t
 	}
 	r.executionErr = errors.Join(r.executionErr, summaryErr)
 	if r.executionErr != nil {
-		return
+		return nil
 	}
 	// 并发完成时先追加，整批结束后按登记顺序重建模型历史。
 	rc.AppendToolResult(result)
@@ -886,39 +864,7 @@ func (r *BaseReactProcess[T]) updateContext(callResult *mcpSdk.CallToolResult, t
 	if agentConfig == nil || agentConfig.LogLevel.InfoEnabled() {
 		log.Printf("[INFO] [react] tool calling result: %+v", result)
 	}
-	if shouldObserveTool(toolParam) {
-		// exec 的参数和已记录结果随快照交给观察器，由 LLM 筛选影响后续决策的新增信息。
-		// Observation is a separate processor and must use its own resolved
-		// settings rather than inheriting ReAct's model or custom prompt.
-		observerConfig := agentConfig.ForAgent("observe")
-		r.observe(result, rc, observerConfig)
-	}
-}
-
-// shouldObserveTool 按入口命令筛选，避免搜索参数中出现 npm 等词时误触发观察器。
-func shouldObserveTool(params *mcpSdk.CallToolParams) bool {
-	if config.McpToolName(params.Name) == config.ApplyPatchMCPToolName {
-		return true
-	}
-	if config.McpToolName(params.Name) != config.ExecMCPToolName {
-		return false
-	}
-	arguments, err := json.Marshal(params.Arguments)
-	if err != nil {
-		return false
-	}
-	var input struct {
-		Command string `json:"command"`
-	}
-	if json.Unmarshal(arguments, &input) != nil {
-		return false
-	}
-	switch input.Command {
-	case "git", "npm", "poetry", "python", "python3", "ts-node", "tsx":
-		return true
-	default:
-		return false
-	}
+	return result
 }
 
 // hasNonEmptyItems 拒绝缺失列表和空白条目，避免无内容的结果通过步骤验收。

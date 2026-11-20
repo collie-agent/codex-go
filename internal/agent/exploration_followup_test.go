@@ -200,7 +200,7 @@ func TestReactRepeatedFollowupHandoffCannotRefreshWindow(t *testing.T) {
 	if err := json.Unmarshal(durable.ExecutionProgress, &saved); err != nil {
 		t.Fatal(err)
 	}
-	if saved.Exploration.Used != 1 || saved.Exploration.ModificationLeft != 0 || len(saved.Exploration.Handoffs) != 2 || saved.Exploration.ModificationConfirmed || len(durable.ToolExecutions) != 2 {
+	if saved.Exploration.Used != 0 || saved.Exploration.ModificationLeft != 0 || len(saved.Exploration.Handoffs) != 2 || saved.Exploration.ModificationConfirmed || len(durable.ToolExecutions) != 2 {
 		t.Fatalf("progress=%s tools=%d", durable.ExecutionProgress, len(durable.ToolExecutions))
 	}
 }

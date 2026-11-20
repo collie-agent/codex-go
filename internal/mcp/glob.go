@@ -78,7 +78,7 @@ func Glob(ctx context.Context, workspace string, args globArgs) (GlobResult, err
 	if isGitPath(relDir) {
 		return GlobResult{Items: []GlobItem{}}, nil
 	}
-	before := searchSnapshot(ctx, workspace, relDir, args.IncludeIgnored, false)
+	before := searchSnapshot(ctx, workspace, relDir, args.IncludeIgnored, false, false)
 	cmdArgs := []string{"--files", "--null", "--hidden", "--no-follow", "--no-require-git"}
 	if args.IncludeIgnored {
 		cmdArgs = append(cmdArgs, "--no-ignore")
@@ -93,7 +93,7 @@ func Glob(ctx context.Context, workspace string, args globArgs) (GlobResult, err
 	if !args.IncludeIgnored {
 		// Positive rg globs override ignore files. Intersect their matches with
 		// an ordinary traversal to preserve the default ignore contract.
-		eligible, err = searchableFiles(ctx, base, ".")
+		eligible, err = searchableFiles(ctx, base, ".", false)
 		if err != nil {
 			return GlobResult{}, err
 		}
@@ -116,6 +116,6 @@ func Glob(ctx context.Context, workspace string, args globArgs) (GlobResult, err
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].Path < items[j].Path })
 	selected, truncated, next := selectPage(items, args.Offset, limit)
-	evidence := &SearchEvidence{Query: searchQuery("glob", relDir, args), Version: confirmedSearchVersion(before, searchSnapshot(ctx, workspace, relDir, args.IncludeIgnored, false)), Offset: args.Offset}
+	evidence := &SearchEvidence{Query: searchQuery("glob", relDir, args), Version: confirmedSearchVersion(before, searchSnapshot(ctx, workspace, relDir, args.IncludeIgnored, false, false)), Offset: args.Offset}
 	return GlobResult{Items: selected, Truncated: truncated, NextOffset: next, SearchEvidence: globPageEvidence(evidence, selected, truncated)}, nil
 }

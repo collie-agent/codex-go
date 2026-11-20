@@ -164,19 +164,26 @@ func renderHandoffLines(prefix, text string, start, end, next, limit int) string
 func latestHandoffRead(path string, calls []*state.ToolResult) *state.ToolResult {
 	for i := len(calls) - 1; i >= 0; i-- {
 		call := calls[i]
-		if call == nil || call.ToolName != string(config.ReadFileMCPToolName) ||
-			call.Status != filemcp.ToolCallSuceessStatus || call.Error != "" || call.ToolCallId == "" {
-			continue
-		}
-		if call.FileEvidence != nil && normalizedHandoffPath(call.FileEvidence.Path) == path {
-			return call
-		}
-		var args struct{ Path string }
-		if json.Unmarshal([]byte(call.Arguments), &args) == nil && args.Path != "" && normalizedHandoffPath(args.Path) == path {
+		if savedReadPath(call) == path {
 			return call
 		}
 	}
 	return nil
+}
+
+func savedReadPath(call *state.ToolResult) string {
+	if call == nil || call.ToolName != string(config.ReadFileMCPToolName) ||
+		call.Status != filemcp.ToolCallSuceessStatus || call.Error != "" || call.ToolCallId == "" {
+		return ""
+	}
+	if call.FileEvidence != nil && call.FileEvidence.Path != "" {
+		return normalizedHandoffPath(call.FileEvidence.Path)
+	}
+	var args struct{ Path string }
+	if json.Unmarshal([]byte(call.Arguments), &args) == nil && args.Path != "" {
+		return normalizedHandoffPath(args.Path)
+	}
+	return ""
 }
 
 func normalizedHandoffPath(path string) string {

@@ -205,7 +205,7 @@ func TestReactRejectedDecisionPersistsReasonForResume(t *testing.T) {
 	}
 }
 
-func TestReactResumeSpendsOnlyRemainingWindowOnRejectedInvestigation(t *testing.T) {
+func TestReactResumePreservesWindowOnRejectedInvestigation(t *testing.T) {
 	workspace := t.TempDir()
 	durable := &state.DurableState{ExecutionID: "rejected-read", Goal: "change main.go", CompletionCriteria: []string{"changed"}}
 	policy := config.DefaultExplorationBudget()
@@ -236,7 +236,7 @@ func TestReactResumeSpendsOnlyRemainingWindowOnRejectedInvestigation(t *testing.
 	if err == nil || !strings.Contains(err.Error(), "400 Bad Request") {
 		t.Fatalf("expected outage after first rejection, got %v", err)
 	}
-	checkBudget(durable, 1)
+	checkBudget(durable, 2)
 
 	snapshot, err := json.Marshal(durable)
 	if err != nil {
@@ -246,9 +246,9 @@ func TestReactResumeSpendsOnlyRemainingWindowOnRejectedInvestigation(t *testing.
 	if err := json.Unmarshal(snapshot, &restored); err != nil {
 		t.Fatal(err)
 	}
-	err = runModificationScript(t, workspace, &restored, config.ExplorationBudget{}, [][]any{read("last-denied")})
-	if err == nil || !strings.Contains(err.Error(), "modification window exhausted") {
-		t.Fatalf("expected final rejection to exhaust window, got %v", err)
+	err = runModificationScript(t, workspace, &restored, config.ExplorationBudget{}, [][]any{read("last-denied"), nil})
+	if err == nil || !strings.Contains(err.Error(), "400 Bad Request") {
+		t.Fatalf("expected another correction request after rejection, got %v", err)
 	}
-	checkBudget(&restored, 0)
+	checkBudget(&restored, 2)
 }

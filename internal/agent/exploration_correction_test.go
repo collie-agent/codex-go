@@ -56,7 +56,7 @@ func TestReactRejectedInvestigationCanPatchVerifyAndComplete(t *testing.T) {
 	}
 }
 
-func TestReactRejectedInvestigationExhaustsWindowWithoutExecutingMixedBatch(t *testing.T) {
+func TestReactRejectedInvestigationsAreBoundedByTotalBudget(t *testing.T) {
 	workspace := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workspace, "main.go"), []byte("package old\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -64,13 +64,14 @@ func TestReactRejectedInvestigationExhaustsWindowWithoutExecutingMixedBatch(t *t
 	policy := config.DefaultExplorationBudget()
 	policy.InitialTurns = 1
 	outputs := [][]any{modificationTool("read", "read_file", map[string]any{"path": "main.go"}), modificationHandoff()}
-	for i := 0; i < 3; i++ {
+	policy.ModificationWindowTurns = 1
+	for i := 0; i < maxReactTurns; i++ {
 		batch := modificationTool(fmt.Sprintf("search%d", i), "exec", map[string]any{"command": "rg", "args": []string{"package", "main.go"}})
 		batch = append(batch, modificationTool(fmt.Sprintf("patch%d", i), "apply_patch", map[string]any{"patch": "--- main.go\n+++ main.go\n@@ -1 +1 @@\n-package old\n+package main\n"})...)
 		outputs = append(outputs, batch)
 	}
 	durable, err := runCommandExploration(t, workspace, outputs, policy)
-	if err == nil || !strings.Contains(err.Error(), "modification window exhausted") {
+	if err == nil || !strings.Contains(err.Error(), "maximum decision budget exhausted") {
 		t.Fatalf("err=%v", err)
 	}
 	var saved struct {
@@ -84,7 +85,7 @@ func TestReactRejectedInvestigationExhaustsWindowWithoutExecutingMixedBatch(t *t
 		t.Fatal(err)
 	}
 	content, err := os.ReadFile(filepath.Join(workspace, "main.go"))
-	if err != nil || string(content) != "package old\n" || len(durable.ToolExecutions) != 1 || saved.Exploration.Used != 1 || saved.Exploration.ModificationLeft != 0 || saved.Exploration.ModificationConfirmed || !strings.Contains(saved.Exploration.Rejection, "modification_left=0") {
+	if err != nil || string(content) != "package old\n" || len(durable.ToolExecutions) != 1 || saved.Exploration.Used != 1 || saved.Exploration.ModificationLeft != 1 || saved.Exploration.ModificationConfirmed || !strings.Contains(saved.Exploration.Rejection, "modification_left=1") {
 		t.Fatalf("content=%q err=%v state=%s tools=%+v", content, err, durable.ExecutionProgress, durable.ToolExecutions)
 	}
 }
@@ -106,8 +107,9 @@ func TestReactImplementationExtensionDoesNotRefreshWindow(t *testing.T) {
 		modificationTool("allowed", "exec", map[string]any{"command": "rg", "args": []string{"package", "main.go"}}),
 		extend,
 		modificationTool("still-denied", "exec", map[string]any{"command": "rg", "args": []string{"old", "main.go"}}),
+		{observationMessage(`{"exploration":{"choice":"unable","reason":"caller contract unresolved","execution_state":"source read"}}`)},
 	}, policy)
-	if err == nil || !strings.Contains(err.Error(), "modification window exhausted") {
+	if err == nil || !strings.Contains(err.Error(), "unable: caller contract unresolved") {
 		t.Fatalf("err=%v state=%s", err, durable.ExecutionProgress)
 	}
 	var saved struct {
@@ -116,7 +118,7 @@ func TestReactImplementationExtensionDoesNotRefreshWindow(t *testing.T) {
 	if err := json.Unmarshal(durable.ExecutionProgress, &saved); err != nil {
 		t.Fatal(err)
 	}
-	if saved.Exploration.Used != 2 || saved.Exploration.Extensions != 1 || saved.Exploration.ModificationLeft != 0 || len(durable.ToolExecutions) != 2 {
+	if saved.Exploration.Used != 2 || saved.Exploration.Extensions != 1 || saved.Exploration.ModificationLeft != 1 || len(durable.ToolExecutions) != 2 {
 		t.Fatalf("state=%s tools=%+v", durable.ExecutionProgress, durable.ToolExecutions)
 	}
 }
@@ -134,10 +136,10 @@ func TestReactImplementationRejectedDecisionsShareWindow(t *testing.T) {
 			policy := config.DefaultExplorationBudget()
 			policy.InitialTurns = 1
 			policy.MaxExtensions = 0
+			policy.ModificationWindowTurns = 2
 			durable, err := runCommandExploration(t, workspace, [][]any{
 				modificationTool("read", "read_file", map[string]any{"path": "main.go"}), modificationHandoff(),
 				{observationMessage(decision)}, modificationHandoff(),
-				modificationTool("denied", "exec", map[string]any{"command": "rg", "args": []string{"package", "main.go"}}),
 			}, policy)
 			if err == nil || !strings.Contains(err.Error(), "modification window exhausted") {
 				t.Fatalf("err=%v state=%s", err, durable.ExecutionProgress)
@@ -176,7 +178,7 @@ func TestReactRejectionCheckpointPrecedesCorrection(t *testing.T) {
 					writeObservationResponse(w, []any{observationMessage(`{"ConfirmedFacts":[],"ReportedErrors":[]}`)})
 					return
 				}
-				if requests == 3 && (!persisted || !strings.Contains(string(body.Input), "Operation rejected") || !strings.Contains(string(body.Input), "modification_left=2") || !strings.Contains(string(body.Input), "extend")) {
+				if requests == 3 && (!persisted || !strings.Contains(string(body.Input), "Operation rejected") || !strings.Contains(string(body.Input), "modification_left=3") || !strings.Contains(string(body.Input), "extend")) {
 					t.Error("missing persisted rejection feedback before correction")
 				}
 				if requests >= len(outputs) {
@@ -207,7 +209,7 @@ func TestReactRejectionCheckpointPrecedesCorrection(t *testing.T) {
 					}
 				}
 				if strings.Contains(saved.Exploration.Rejection, "Operation rejected") {
-					if saved.Exploration.ModificationLeft != 2 {
+					if saved.Exploration.ModificationLeft != 3 {
 						t.Errorf("remaining window=%d", saved.Exploration.ModificationLeft)
 					}
 					if failSave {
@@ -242,7 +244,7 @@ func TestReactRejectedInvestigationStillRefundsExecutedFailedPatch(t *testing.T)
 	}
 	policy := config.DefaultExplorationBudget()
 	policy.InitialTurns = 1
-	policy.ModificationWindowTurns = 2
+	policy.ModificationWindowTurns = 1
 	durable, err := runCommandExploration(t, workspace, [][]any{
 		modificationTool("read", "read_file", map[string]any{"path": "main.go"}), modificationHandoff(),
 		modificationTool("denied", "exec", map[string]any{"command": "rg", "args": []string{"package", "main.go"}}),
@@ -341,7 +343,7 @@ func TestReactImplementationExtensionRespectsRemainingTotalBudget(t *testing.T) 
 	if err := json.Unmarshal(durable.ExecutionProgress, &saved); err != nil {
 		t.Fatal(err)
 	}
-	if saved.UsedTurns > 5 || saved.Exploration.Extensions != 0 || saved.Exploration.Used != 1 || saved.Exploration.ModificationLeft != 1 || len(durable.ToolExecutions) != 1 {
+	if saved.UsedTurns > 5 || saved.Exploration.Extensions != 0 || saved.Exploration.Used != 1 || saved.Exploration.ModificationLeft != 2 || len(durable.ToolExecutions) != 1 {
 		t.Fatalf("state=%s tools=%+v", durable.ExecutionProgress, durable.ToolExecutions)
 	}
 }
@@ -360,8 +362,9 @@ func TestReactRejectedFollowupRetainsConfirmedProgress(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		outputs = append(outputs, modificationTool(fmt.Sprintf("denied%d", i), "exec", map[string]any{"command": "rg", "args": []string{"package", "main.go"}, "purpose": "verification"}))
 	}
+	outputs = append(outputs, []any{observationMessage(`{"exploration":{"choice":"unable","reason":"followup blocked","execution_state":"first change confirmed"}}`)})
 	durable, err := runCommandExploration(t, workspace, outputs, policy)
-	if err == nil || !strings.Contains(err.Error(), "modification window exhausted") {
+	if err == nil || !strings.Contains(err.Error(), "unable: followup blocked") {
 		t.Fatalf("err=%v", err)
 	}
 	var saved struct {
@@ -375,7 +378,7 @@ func TestReactRejectedFollowupRetainsConfirmedProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	content, err := os.ReadFile(filepath.Join(workspace, "main.go"))
-	if err != nil || string(content) != "package main\n" || len(durable.ToolExecutions) != 2 || saved.Exploration.Used != 1 || saved.Exploration.ModificationLeft != 0 || saved.Exploration.ModificationConfirmed || len(saved.Exploration.ModificationEvidence) != 1 {
+	if err != nil || string(content) != "package main\n" || len(durable.ToolExecutions) != 2 || saved.Exploration.Used != 1 || saved.Exploration.ModificationLeft != 3 || saved.Exploration.ModificationConfirmed || len(saved.Exploration.ModificationEvidence) != 1 {
 		t.Fatalf("content=%q err=%v state=%s tools=%+v", content, err, durable.ExecutionProgress, durable.ToolExecutions)
 	}
 	evidence := saved.Exploration.ModificationEvidence[0]

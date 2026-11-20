@@ -85,10 +85,14 @@ func RegisterToolsWithCleanup(server *sdk.Server, config Config) (func(), error)
 		Limit  *int   `json:"limit,omitempty" jsonschema:"positive maximum number of lines (default 200); response size may reduce the page; use a JSON integer such as 200, never a quoted numeric string"`
 	}
 	sdk.AddTool(server, &sdk.Tool{Name: string(mcpconfig.ReadFileMCPToolName), InputSchema: toolInputSchema[readFileArgs](), Description: `Read a page of lines from an existing UTF-8 text file (NUL bytes are rejected). Arguments must match the declared JSON types: strings stay strings, integers are unquoted numbers, and booleans are true or false, never quoted strings. Example arguments: {"path":"README.md","offset":1,"limit":200}. path is relative to the workspace; absolute paths and paths resolving outside it are rejected. Symlinks are allowed only when their resolved target stays inside the workspace. offset is the one-based starting line (default 1); limit is a positive maximum line count (default 200). Returns lines with their original one-based line numbers and text, plus truncated and next_offset. An offset past EOF returns an empty page. Responses may contain fewer than limit lines to fit the 1 MiB response cap; when truncated is true, pass next_offset as offset with the same path to continue.`},
-		func(ctx context.Context, _ *sdk.CallToolRequest, args readFileArgs) (*sdk.CallToolResult, ReadFileResult, error) {
+		func(ctx context.Context, req *sdk.CallToolRequest, args readFileArgs) (*sdk.CallToolResult, ReadFileResult, error) {
 			toolCtx, cancel := context.WithTimeout(ctx, config.Timeout)
 			defer cancel()
-			result, err := ReadFile(toolCtx, workspace, args.Path, intDefault(args.Offset, 1), intDefault(args.Limit, 200))
+			links := resolveSymlinks
+			if req.Params.Meta[HandoffTargetFileMetaKey] == true {
+				links = rejectSymlinks
+			}
+			result, err := readFile(toolCtx, workspace, args.Path, intDefault(args.Offset, 1), intDefault(args.Limit, 200), links)
 			if err != nil {
 				return nil, ReadFileResult{}, err
 			}
@@ -118,10 +122,14 @@ func RegisterToolsWithCleanup(server *sdk.Server, config Config) (func(), error)
 }
 
 func ReadFile(ctx context.Context, workspace, path string, offset, limit int) (ReadFileResult, error) {
+	return readFile(ctx, workspace, path, offset, limit, resolveSymlinks)
+}
+
+func readFile(ctx context.Context, workspace, path string, offset, limit int, links symlinkPolicy) (ReadFileResult, error) {
 	if offset < 1 || limit < 1 {
 		return ReadFileResult{}, fmt.Errorf("offset and limit must be positive")
 	}
-	resolved, _, err := resolveWorkspacePath(workspace, path, resolveSymlinks, false)
+	resolved, _, err := resolveWorkspacePath(workspace, path, links, false)
 	if err != nil {
 		return ReadFileResult{}, err
 	}

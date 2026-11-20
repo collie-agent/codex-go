@@ -66,7 +66,7 @@ agents:
 
 `ReactContext` 组装系统提示词、会话历史、目标、完成标准、观察、原生工具消息与持久状态；`ModelRequest` 提供请求快照。`DurableState` 表达运行身份、计划步骤和当前进度；计划步骤使用 `pending → running → completed/failed` 状态流转。不同步骤和独立委派拥有各自的执行实例，恢复时延续原实例。
 
-观察区分已确认事实 `ConfirmedFacts`、已报告错误 `ReportedErrors` 和待验证推断 `ModelInferences`。`apply_patch` 与 `exec` 的结果异步交给观察器分析，不阻塞下一轮；原始工具结果仍直接返回模型。运行级完成标准可通过一次性的 `update_completion_criteria` 设置，计划步骤另有自己的验收标准。
+观察区分已确认事实 `ConfirmedFacts`、已报告错误 `ReportedErrors` 和待验证推断 `ModelInferences`。顶层 `observe` 默认关闭。设为 `true` 后，每次 `exec` 返回已确认的结果时，观察器异步分析该结果。工具结果照常传给下一轮 ReAct，模型无需等待观察器。运行级完成标准可通过一次性的 `update_completion_criteria` 设置，计划步骤另有自己的验收标准。
 
 实现入口：[`internal/context/context.go`](internal/context/context.go)、[`observation.go`](internal/context/observation.go)、[`internal/agent/observe.go`](internal/agent/observe.go)。
 
@@ -241,6 +241,7 @@ make build
 
 ```yaml
 name: react
+observe: false # 设为 true 后异步观察 exec 结果
 log_level: info # debug 额外打印流式文本片段；error 减少诊断详情
 # 可选：启用 Redis Stream 输出时取消注释，并填写实际连接信息。
 # redis:
@@ -303,7 +304,7 @@ flowchart TD
     MCP --> EXEC["exec / bwrap 与 seccomp 隔离"]
     FILE --> WS["Workspace 工作目录"]
     EXEC --> WS
-    REACT -. "apply_patch / exec 结果" .-> OBS["Observer 异步观察器"]
+    REACT -. "exec 结果（observe: true）" .-> OBS["Observer 异步观察器"]
     OBS --> MODEL
     OBS -. "回填观察" .-> CTX
     APP --> STORE["Persistence 运行锁、检查点与执行记录"]

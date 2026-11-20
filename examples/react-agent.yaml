@@ -1,4 +1,5 @@
 name: react
+observe: false # 设为 true 后异步观察 exec 结果
 # 可选的宿主运行时授权（顶层全局配置）；命令行显式参数优先。
 discover_host_commands: true
 exec_commands: [poetry, python3, make, go]

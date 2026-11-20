@@ -51,7 +51,7 @@ func TestReactHandoffAppliesRealPatchAndCompletes(t *testing.T) {
 		case 2:
 			writeObservationResponse(w, []any{observationMessage(`{"exploration":{"task_type":"modification","basis":"requested fix","choice":"implement","target":"main.go: replace old with new","evidence":"existing line is old","next_operation":"apply patch"}}`)})
 		case 3:
-			want := []string{"apply_patch", "exec", "exec_poll", "exec_start", "read_tool_result"}
+			want := []string{"apply_patch", "exec", "exec_poll", "exec_start", "grep", "read_file", "read_tool_result"}
 			if !slices.Equal(names, want) {
 				t.Errorf("implementation request tools = %v, want %v", names, want)
 			}
@@ -209,7 +209,7 @@ func runModificationScript(t *testing.T, workspace string, durable *state.Durabl
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = process.Run(&config.AgentConfig{ExplorationBudget: policy, AllowTools: map[config.McpToolName]struct{}{config.ApplyPatchMCPToolName: {}, config.ReadFileMCPToolName: {}, config.ListDirMCPToolName: {}}, LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema}}, durable)
+	_, _, err = process.Run(&config.AgentConfig{ExplorationBudget: policy, AllowTools: map[config.McpToolName]struct{}{config.ApplyPatchMCPToolName: {}, config.ReadFileMCPToolName: {}, config.GrepMCPToolName: {}, config.ListDirMCPToolName: {}}, LLMConfig: &config.LLMConfig{BaseUrl: server.URL, ApiKey: "test", Model: "test", OutputSchema: config.JsonLLMOutputSchema}}, durable)
 	return err
 }
 func modificationHandoff() []any {
@@ -271,12 +271,98 @@ func TestReactExhaustedExplorationDoesNotAllowWindowInvestigation(t *testing.T) 
 	durable := &state.DurableState{ExecutionID: "exhausted", Goal: "change main.go", CompletionCriteria: []string{"changed"}}
 	policy := config.DefaultExplorationBudget()
 	policy.InitialTurns = 1
-	err := runModificationScript(t, workspace, durable, policy, [][]any{modificationTool("list", "list_dir", map[string]string{"path": "."}), modificationHandoff(), modificationTool("read", "read_file", map[string]string{"path": "main.go"}), modificationTool("read2", "read_file", map[string]string{"path": "main.go"}), modificationTool("read3", "read_file", map[string]string{"path": "main.go"})})
-	if err == nil || !strings.Contains(err.Error(), "exploration allowance exhausted") {
+	err := runModificationScript(t, workspace, durable, policy, [][]any{modificationTool("list", "list_dir", map[string]string{"path": "."}), modificationHandoff(), modificationTool("read", "read_file", map[string]string{"path": "other.go"}), nil})
+	if err == nil || !strings.Contains(err.Error(), "400 Bad Request") || !strings.Contains(string(durable.ExecutionProgress), "exploration allowance exhausted") {
 		t.Fatalf("err=%v", err)
 	}
 	if len(durable.ToolExecutions) != 1 {
 		t.Fatalf("investigation escaped: %+v", durable.ToolExecutions)
+	}
+}
+
+func TestReactLocatesHandoffTargetsAfterExplorationIsExhausted(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "main.go"), []byte("old\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	policy := config.DefaultExplorationBudget()
+	policy.InitialTurns = 1
+	durable := &state.DurableState{ExecutionID: "locate-target", Goal: "change main.go", CompletionCriteria: []string{"changed"}}
+	err := runModificationScript(t, workspace, durable, policy, [][]any{
+		modificationTool("list", "list_dir", map[string]string{"path": "."}),
+		modificationHandoff(),
+		modificationTool("directory-search", "grep", map[string]string{"path": ".", "pattern": "old"}),
+		modificationTool("grep", "grep", map[string]string{"path": "./main.go", "pattern": "old"}),
+		modificationTool("read", "read_file", map[string]any{"path": "main.go", "offset": 1, "limit": 1}),
+		modificationTool("patch", "apply_patch", map[string]string{"patch": "--- main.go\n+++ main.go\n@@ -1 +1 @@\n-old\n+new\n"}),
+		{observationMessage(`{"status":"completed","answer":"fixed"}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var progress executionProgress
+	if err := json.Unmarshal(durable.ExecutionProgress, &progress); err != nil {
+		t.Fatal(err)
+	}
+	if progress.Exploration.Used != 1 || !progress.Exploration.ModificationConfirmed || len(durable.ToolExecutions) != 4 || len(progress.Exploration.Accounting) != 4 {
+		t.Fatalf("unexpected tools or accounting: %s", durable.ExecutionProgress)
+	}
+	for i, id := range []string{"grep", "read"} {
+		result := durable.ToolExecutions[i+1]
+		batch := progress.Exploration.Accounting[i+1]
+		if result.ToolCallId != id || result.Status != filemcp.ToolCallSuceessStatus || !strings.Contains(result.Result, "old") || batch.Purpose != "workspace_check" || batch.Charged || !batch.ModificationCharged {
+			t.Fatalf("failed to locate target or charge window: result=%+v batch=%+v", result, batch)
+		}
+	}
+}
+
+func TestReactFailedTargetLocationRefundsLastModificationTurn(t *testing.T) {
+	for _, tc := range []struct {
+		name, tool string
+		args       map[string]any
+	}{
+		{"invalid read range", "read_file", map[string]any{"path": "main.go", "offset": -1}},
+		{"invalid search pattern", "grep", map[string]any{"path": "main.go", "pattern": "["}},
+		{"directory listed as target", "grep", map[string]any{"path": "sub", "pattern": "old"}},
+		{"symlink listed as target", "read_file", map[string]any{"path": "alias"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			if err := os.WriteFile(filepath.Join(workspace, "main.go"), []byte("old\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(filepath.Join(workspace, "sub"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("main.go", filepath.Join(workspace, "alias")); err != nil {
+				t.Fatal(err)
+			}
+			policy := config.DefaultExplorationBudget()
+			policy.InitialTurns, policy.ModificationWindowTurns = 1, 1
+			durable := &state.DurableState{ExecutionID: "target-location-refund", Goal: "change main.go", CompletionCriteria: []string{"changed"}}
+			err := runModificationScript(t, workspace, durable, policy, [][]any{
+				modificationTool("list", "list_dir", map[string]string{"path": "."}),
+				{observationMessage(`{"exploration":{"task_type":"modification","basis":"requested fix","choice":"implement","target":"change main.go","target_files":["main.go","sub","alias"],"evidence":"source inspected","next_operation":"apply patch"}}`)},
+				modificationTool("first", tc.tool, tc.args),
+				modificationTool("retry", tc.tool, tc.args),
+				nil,
+			})
+			if err == nil || !strings.Contains(err.Error(), "400 Bad Request") {
+				t.Fatalf("expected another model request after failed location, got %v", err)
+			}
+			var progress executionProgress
+			if err := json.Unmarshal(durable.ExecutionProgress, &progress); err != nil {
+				t.Fatal(err)
+			}
+			if len(durable.ToolExecutions) != 3 || len(progress.Exploration.Accounting) != 3 || progress.Exploration.Used != 1 || progress.Exploration.ModificationLeft != 1 {
+				t.Fatalf("unexpected tools or accounting: %s", durable.ExecutionProgress)
+			}
+			for i := 1; i <= 2; i++ {
+				if durable.ToolExecutions[i].Status != filemcp.ToolCallFailedStatus || progress.Exploration.Accounting[i].ModificationCharged {
+					t.Fatalf("expected a recorded, refunded failure: %s", durable.ExecutionProgress)
+				}
+			}
+		})
 	}
 }
 
@@ -310,7 +396,7 @@ func TestReactResumeRetainsModificationWindow(t *testing.T) {
 	}
 }
 
-func TestReactCachedReadsCannotOutliveModificationWindow(t *testing.T) {
+func TestReactHandoffReadsCannotOutliveModificationWindow(t *testing.T) {
 	workspace := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workspace, "main.go"), []byte("old\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -321,8 +407,8 @@ func TestReactCachedReadsCannotOutliveModificationWindow(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "modification window exhausted") {
 		t.Fatalf("err=%v", err)
 	}
-	if len(durable.ToolExecutions) != 1 {
-		t.Fatalf("cached reads executed: %d", len(durable.ToolExecutions))
+	if len(durable.ToolExecutions) != 3 {
+		t.Fatalf("expected three live reads within the window, got %d", len(durable.ToolExecutions))
 	}
 }
 func TestReactResumeExhaustedModificationWindowDoesNotRequestDecision(t *testing.T) {

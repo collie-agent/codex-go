@@ -24,8 +24,13 @@ func rgFiles(ctx context.Context, directory string, args []string) ([]string, er
 	return strings.Split(strings.TrimSuffix(string(output), "\x00"), "\x00"), nil
 }
 
-func searchableFiles(ctx context.Context, directory, path string) (map[string]bool, error) {
-	paths, err := rgFiles(ctx, directory, []string{"--files", "--null", "--hidden", "--no-follow", "--no-require-git", "--glob", "!.git", "--glob", "!**/.git/**", "--", path})
+func searchableFiles(ctx context.Context, directory, path string, fileOnly bool) (map[string]bool, error) {
+	args := []string{"--files", "--null", "--hidden", "--no-follow", "--no-require-git", "--glob", "!.git", "--glob", "!**/.git/**"}
+	if fileOnly {
+		args = append(args, "--maxdepth", "0")
+		path = "./" + path
+	}
+	paths, err := rgFiles(ctx, directory, append(args, "--", path))
 	if err != nil {
 		return nil, err
 	}

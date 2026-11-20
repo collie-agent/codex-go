@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +27,10 @@ func TestReactResumeImplementationAdmissionCompletesRealChange(t *testing.T) {
 			name = "rejected-investigation"
 		}
 		t.Run(name, func(t *testing.T) {
+			remaining := 2
+			if rejected {
+				remaining = 3
+			}
 			workspace := t.TempDir()
 			path := filepath.Join(workspace, "main.go")
 			if err := os.WriteFile(path, []byte("package old\n"), 0600); err != nil {
@@ -63,10 +68,10 @@ func TestReactResumeImplementationAdmissionCompletesRealChange(t *testing.T) {
 						return
 					}
 					last := messages[len(messages)-1]
-					if last.Role != "user" || !strings.HasPrefix(last.Content, "已进入实施阶段，剩余修改窗口为 2 轮。") {
+					if last.Role != "user" || !strings.HasPrefix(last.Content, fmt.Sprintf("已进入实施阶段，剩余修改窗口为 %d 轮。", remaining)) {
 						t.Errorf("restored model missing final implementation instruction: %+v", last)
 					}
-					for _, want := range []string{"modification_left=2", "phase=implement", "source inspected", "apply patch"} {
+					for _, want := range []string{fmt.Sprintf("modification_left=%d", remaining), "phase=implement", "source inspected", "apply patch"} {
 						if !strings.Contains(input, want) {
 							t.Errorf("restored model missing %q: %s", want, input)
 						}
@@ -107,7 +112,7 @@ func TestReactResumeImplementationAdmissionCompletesRealChange(t *testing.T) {
 					}
 				}
 				_ = json.Unmarshal(durable.ExecutionProgress, &progress)
-				if progress.Exploration.ModificationLeft == 2 && ((rejected && strings.Contains(progress.Exploration.Rejection, "Operation rejected")) || (!rejected && len(durable.ToolExecutions) == 2 && durable.ToolExecutions[1].Status == "success")) {
+				if progress.Exploration.ModificationLeft == remaining && ((rejected && strings.Contains(progress.Exploration.Rejection, "Operation rejected")) || (!rejected && len(durable.ToolExecutions) == 2 && durable.ToolExecutions[1].Status == "success")) {
 					stopped = true
 					return outage
 				}

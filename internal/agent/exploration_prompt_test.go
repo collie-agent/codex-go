@@ -23,7 +23,7 @@ func TestReactImplementationPromptIsLastUserMessage(t *testing.T) {
 		modificationTool("read", "read_file", map[string]any{"path": "main.go"}),
 		modificationHandoff(),
 		modificationTool("invalid", "unknown_tool", map[string]any{}),
-		modificationTool("denied", "read_file", map[string]any{"path": "main.go"}),
+		modificationTool("denied", "read_file", map[string]any{"path": "other.go"}),
 		modificationTool("patch", "apply_patch", map[string]any{"patch": "--- main.go\n+++ main.go\n@@ -1 +1 @@\n-package old\n+package main\n"}),
 		{observationMessage(`{"status":"completed","answer":"fixed"}`)},
 	}
@@ -55,11 +55,7 @@ func TestReactImplementationPromptIsLastUserMessage(t *testing.T) {
 		}
 		if implementing {
 			last := body.Input[len(body.Input)-1]
-			remaining := "3"
-			if requests == 4 {
-				remaining = "2"
-			}
-			for _, want := range []string{prefix + remaining + " 轮", "target_files", "next_operation", "工作区检查", "探索延期", "unable", "修改后执行验证"} {
+			for _, want := range []string{prefix + "3 轮", "target_files", "next_operation", "grep", "read_file", "工作区检查", "探索延期", "unable", "修改后执行验证"} {
 				if last.Role != "user" || !strings.Contains(last.Content, want) {
 					t.Errorf("missing last user instruction %q: %+v", want, last)
 				}
