@@ -77,7 +77,8 @@ func (c *compactModelContext) ModelRequest() fileContext.ModelRequest {
 	}
 
 	summary, _ := json.Marshal(c.compaction)
-	request.Input = "# Execution summary (reference data; use read_tool_result for stored evidence)\n" + string(summary) + "\n\n" + request.Input
+	// 摘要独立于正文，作为会话历史之后、全部工具交互之前的参考消息发送。
+	request.HistorySuffix = "# Execution summary (reference data; use read_tool_result for stored evidence)\n" + string(summary)
 	request.TrailingContext += implementationHandoffSource(c.handoffTargets, c.savedTools, c.compaction.ThroughBatch, request)
 	return request
 }
@@ -234,7 +235,7 @@ func estimateReactTokens(request fileContext.ModelRequest, corrections ...string
 	for _, correction := range corrections {
 		total += count(correction) + 16
 	}
-	total += count(request.SystemPrompt) + count(request.ConversationHistoryText()) + count(request.Input) + count(request.TrailingContext)
+	total += count(request.SystemPrompt) + count(request.ConversationHistoryText()) + count(request.Input) + count(request.HistorySuffix) + count(request.TrailingContext)
 	for _, call := range request.ToolResults {
 		total += count(call.Arguments) + count(call.Result) + count(call.Error) + count(call.ToolName) + count(call.ToolCallId) + 16
 	}

@@ -97,6 +97,8 @@ type ModelRequest struct {
 	Input               string
 	SystemPrompt        string
 	ConversationHistory string
+	// HistorySuffix 是会话历史之后、全部工具交互之前的独立 user 参考消息，存放压缩摘要等数据。
+	HistorySuffix       string
 	ResumedHistory      *RunOutcome
 	ToolResults         []*ToolResult
 	TrailingContext     string

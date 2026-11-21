@@ -40,6 +40,7 @@ type baseResponsesApiClient[T any] struct {
 	contextLogLabel     string
 	systemPrompt        string
 	conversationHistory string
+	historySuffix       string
 	corrections         []string
 	finalUserMessage    string
 	logLevel            config.LogLevel
@@ -103,6 +104,11 @@ func (c *baseResponsesApiClient[T]) SetSystemPrompt(prompt string) {
 // SetConversationHistory 将历史参考作为 system 后、全部工具交互前的 user 消息。
 func (c *baseResponsesApiClient[T]) SetConversationHistory(history string) {
 	c.conversationHistory = history
+}
+
+// SetHistorySuffix 将压缩摘要等参考数据作为历史之后、全部工具交互之前的独立 user 消息发送。
+func (c *baseResponsesApiClient[T]) SetHistorySuffix(suffix string) {
+	c.historySuffix = suffix
 }
 
 // SetCorrectionMessages 将运行内的纠错提示作为正文之后的独立 user 消息发送。
@@ -245,7 +251,7 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 	if c.agentConfig.LLMConfig.MaxOutputTokens > 0 {
 		params.MaxOutputTokens = openai.Int(c.agentConfig.LLMConfig.MaxOutputTokens)
 	}
-	if len(messages) > 0 || c.systemPrompt != "" || c.conversationHistory != "" || len(c.corrections) > 0 || c.finalUserMessage != "" {
+	if len(messages) > 0 || c.systemPrompt != "" || c.conversationHistory != "" || c.historySuffix != "" || len(c.corrections) > 0 || c.finalUserMessage != "" {
 		items := make(responses.ResponseInputParam, 0, 2*len(messages)+3+len(c.corrections))
 		// 系统指令独立于任务数据，工具重放时也保持相同角色。
 		if c.systemPrompt != "" {
@@ -253,6 +259,10 @@ func (c *baseResponsesApiClient[T]) RunWithToolMessages(ctx context.Context, tas
 		}
 		if c.conversationHistory != "" {
 			items = append(items, responses.ResponseInputItemParamOfMessage(c.conversationHistory, responses.EasyInputMessageRoleUser))
+		}
+		// 摘要等参考数据位于会话历史之后、全部工具交互之前。
+		if c.historySuffix != "" {
+			items = append(items, responses.ResponseInputItemParamOfMessage(c.historySuffix, responses.EasyInputMessageRoleUser))
 		}
 		for _, message := range messages {
 			if strings.TrimSpace(message.ToolCallID) == "" || strings.TrimSpace(message.Name) == "" {

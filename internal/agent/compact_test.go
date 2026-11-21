@@ -820,7 +820,7 @@ func TestAsyncCompactionSnapshotAndHandoff(t *testing.T) {
 	if len(request.ToolResults) != 5 || request.ToolResults[0].Batch != 12 || model.compaction.ThroughBatch != 11 {
 		t.Fatalf("unexpected handoff: %+v", request.ToolResults)
 	}
-	if !strings.Contains(request.Input, "snapshot evidence") || len(durable.ToolExecutions) != 16 {
+	if !strings.Contains(request.HistorySuffix, "snapshot evidence") || len(durable.ToolExecutions) != 16 {
 		t.Fatal("lost summary or durable history")
 	}
 	rc.AppendToolResult(&state.ToolResult{Batch: 17, ToolCallId: "call_17"})

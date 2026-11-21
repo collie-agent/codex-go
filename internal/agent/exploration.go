@@ -64,9 +64,9 @@ func (e *explorationState) decisionContext(modelContext state.Contexter, schema 
 		}
 		// 每轮重建提示，并单独置于纠错消息之后。
 		location := "如需准备 apply_patch，可用 grep 或 read_file 定位源码，每次显式指定 target_files 中的单个文件。定位批次消耗一轮修改窗口，整批失败时退回。"
-		request.FinalUserMessage = fmt.Sprintf("已进入实施阶段，剩余修改窗口为 %d 轮。请依据已有证据，优先对 target_files 执行 next_operation，尽快产生实际目标变更。%s仅在修改确有需要时执行工作区检查。若存在阻止安全修改的信息缺口，请单独申请探索延期；无法继续时返回 unable。修改后执行验证。", e.ModificationLeft, location)
+		request.FinalUserMessage = fmt.Sprintf("已进入实施阶段，剩余修改窗口为 %d 轮。请依据已有证据，优先对 target_files 执行 next_operation，尽快产生实际目标变更。%s仅在修改确有需要时执行工作区检查。若存在阻止安全修改的信息缺口，请单独申请探索延期；无法继续时返回 unable。修改后，优先运行覆盖本次行为变更的测试，再根据影响范围扩大验证。", e.ModificationLeft, location)
 		if strings.HasPrefix(e.Rejection, "Operation rejected: exploration allowance exhausted") {
-			request.FinalUserMessage = fmt.Sprintf("已进入实施阶段，剩余修改窗口为 %d 轮。请依据以上纠错提示推进 target_files 的 next_operation。%s工作区检查和探索延期以当前额度为准；无法继续时选择 unable。修改后执行验证。", e.ModificationLeft, location)
+			request.FinalUserMessage = fmt.Sprintf("已进入实施阶段，剩余修改窗口为 %d 轮。请依据以上纠错提示推进 target_files 的 next_operation。%s工作区检查和探索延期以当前额度为准；无法继续时选择 unable。修改后，优先运行覆盖本次行为变更的测试，再根据影响范围扩大验证。", e.ModificationLeft, location)
 		}
 	}
 	return frozenCompactContext{Contexter: modelContext, request: request}

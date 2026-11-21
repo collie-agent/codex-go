@@ -55,7 +55,7 @@ func TestReactImplementationPromptIsLastUserMessage(t *testing.T) {
 		}
 		if implementing {
 			last := body.Input[len(body.Input)-1]
-			for _, want := range []string{prefix + "3 轮", "target_files", "next_operation", "grep", "read_file", "工作区检查", "探索延期", "unable", "修改后执行验证"} {
+			for _, want := range []string{prefix + "3 轮", "target_files", "next_operation", "grep", "read_file", "工作区检查", "探索延期", "unable", "修改后，优先运行覆盖本次行为变更的测试，再根据影响范围扩大验证"} {
 				if last.Role != "user" || !strings.Contains(last.Content, want) {
 					t.Errorf("missing last user instruction %q: %+v", want, last)
 				}

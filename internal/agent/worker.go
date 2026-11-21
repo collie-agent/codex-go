@@ -79,6 +79,7 @@ func (w *Worker[T]) Run(modelContext fileContext.Contexter) (result T, text stri
 	// 输出协议和示例属于系统指令，状态正文始终位于工具结果之后。
 	client.SetSystemPrompt(appendContextFewShot(request.SystemPrompt, modelContext, w.agentConfig.LLMConfig.OutputSchema))
 	client.SetConversationHistory(request.ConversationHistoryText())
+	client.SetHistorySuffix(request.HistorySuffix)
 	client.SetCorrectionMessages(w.corrections)
 	client.SetFinalUserMessage(request.FinalUserMessage)
 	input := request.Input
